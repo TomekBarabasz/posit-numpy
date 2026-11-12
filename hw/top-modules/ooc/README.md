@@ -65,7 +65,7 @@ i potokiem full, razem z rejestrami AXI4-Lite i licznikami.
 | `alu_p32` | 1 474 | 676 | 70 | 4 | 0 | 2.450 | 132.5 |
 
 - Obie konfiguracje mają zapas przy 100 MHz; po samej syntezie opóźnienia połączeń są szacowane, wiążące będą liczby z `-impl`.
-- DSP zgadzają się z mnożarką znaczących: 15 × 15 b mieści się w jednym DSP48E2 (27 × 18), 29 × 29 b potrzebuje czterech.
+- DSP zgadzają się z mnożarką znaczących (1.ułamek): 12 × 12 b mieści się w jednym DSP48E2 (27 × 18), 28 × 28 b potrzebuje czterech.
 - ALU posit32 zajmuje ok. 1,3% LUT układu.
 
 Jednostki posit-core (`comb`, `op`, `full`, `div`): do uzupełnienia.
