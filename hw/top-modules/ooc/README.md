@@ -1,11 +1,56 @@
 # top-modules/ooc (pakiet `posit.top.ooc`)
 
-Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza kontekstem na
-`xck26-sfvc784-2LV-c`. Każdy wariant potoku w osobnym katalogu (`hw/gen/{comb,op,full,div}`),
-bo nazwa modułu nie zawiera potoku.
+Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza kontekstem (OOC) na
+`xck26-sfvc784-2LV-c`: tabela LUT / FF / CARRY8 / DSP / BRAM / Fmax dla każdego ustawienia potoku.
 
-```
-sbt "top-ooc/runMain posit.top.ooc.OocUnits"
-```
+| katalog `hw/gen/` | co |
+| --- | --- |
+| `comb/` | `PositPipeline.combinational`: add, sub, mul, div (dzielenie rozwinięte w jeden łańcuch) |
+| `op/` | `PositPipeline()`: rejestr po operacji (domyślny) |
+| `full/` | `PositPipeline.full`: rejestry po dekoderze, operacji i enkoderze |
+| `div/` | dzielniki sekwencyjne: `Iterative(1)`, `Iterative(4)`, `Pipelined(4)` |
 
-Do zrobienia w etapie 0: skrypt Tcl (`vivado/`) i tabela LUT / FF / DSP / Fmax.
+Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
+
+## Uruchomienie
+
+1. RTL (z `hw/`, np. w kontenerze SpinalHDL):
+   ```
+   sbt "top-ooc/runMain posit.top.ooc.OocUnits"
+   ```
+2. Synteza (z `hw/top-modules/ooc/vivado`, Vivado w PATH):
+   ```
+   vivado -mode batch -nojournal -log vivado.log -source ooc_synth.tcl
+   vivado -mode batch -nojournal -log vivado.log -source ooc_synth.tcl -tclargs -impl
+   vivado -mode batch -nojournal -log vivado.log -source ooc_synth.tcl -tclargs -only "*/PositMul_32_2" -period 5
+   ```
+
+| opcja `-tclargs` | domyślnie | |
+| --- | --- | --- |
+| `-gen <dir>` | `../hw/gen` | katalog z RTL |
+| `-out <dir>` | `./out` | wyniki |
+| `-part <part>` | `xck26-sfvc784-2LV-c` | |
+| `-period <ns>` | `10.0` | okres zegara (100 MHz) |
+| `-only <glob>` | `*` | filtr `<wariant>/<moduł>`, np. `div/*`, `*_32_2` |
+| `-impl` | wyłączone | po syntezie `opt_design`, `place_design`, `route_design` i drugi wiersz z wynikiem po routingu |
+
+Wyniki w `out/` (poza gitem):
+- `ooc_results.csv`: wiersz na jednostkę i etap (`synth`, `impl`), dopisywany po każdej jednostce, więc przerwany przebieg zostawia to, co już policzył;
+- `ooc_results.md`: ta sama tabela w markdownie, do wklejenia poniżej;
+- `<wariant>/<moduł>/`: `ooc.xdc`, `utilization_*.rpt`, `timing_*.rpt`.
+
+Błąd jednej jednostki daje wiersz `BLAD` i przebieg idzie dalej (szczegóły w `vivado.log`).
+
+## Metoda
+
+- Synteza w trybie non-project, `synth_design -mode out_of_context` (bez buforów I/O), każda jednostka w osobnym projekcie w pamięci.
+- Zegar `clk` o okresie `-period`. Jednostki `comb` nie mają portu `clk` (SpinalHDL go nie generuje), więc dostają zegar wirtualny.
+- `set_input_delay` / `set_output_delay` 0 względem `clk` na wszystkich portach: ścieżki port → rejestr,
+  rejestr → port i port → port mają cały okres, tak jakby jednostkę otaczały rejestry. Clk-to-q i setup tych
+  rejestrów są pominięte, więc Fmax wariantu `comb` wychodzi lekko optymistycznie.
+- Fmax = 1000 / (okres − WNS). Po samej syntezie opóźnienia połączeń są szacowane; wiążące są liczby z `-impl`.
+- LUT, FF, CARRY8, DSP i BRAM pochodzą z wierszy `report_utilization`. Gdy wiersza brakuje, skrypt liczy komórki po `REF_NAME`.
+
+## Wyniki
+
+Do uzupełnienia po pierwszym przebiegu (`out/ooc_results.md`, wersja Vivado w nagłówku tabeli).

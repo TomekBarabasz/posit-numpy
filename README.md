@@ -68,3 +68,9 @@ sbt "posit-kv260/runMain posit.kv260.PositGen"            # -> posit-kv260/hw/ge
 sbt "posit-kv260/runMain posit.kv260.PositGen 24 2 mul"
 sbt "top-ooc/runMain posit.top.ooc.OocUnits"              # etap 0: jednostki do syntezy OOC
 ```
+
+## synteza OOC (etap 0)
+z `hw/top-modules/ooc/vivado`, opis opcji i metody: `hw/top-modules/ooc/README.md`
+```
+vivado -mode batch -nojournal -log vivado.log -source ooc_synth.tcl -tclargs -impl
+```

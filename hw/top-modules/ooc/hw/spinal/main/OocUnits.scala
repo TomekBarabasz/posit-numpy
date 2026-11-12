@@ -17,7 +17,7 @@ import posit.kv260.PositGen.{DividerJob, UnitJob}
 //    hw/gen/div/    dzielniki sekwencyjne (Iterative, Pipelined)
 //
 //  sbt "top-ooc/runMain posit.top.ooc.OocUnits"
-//  Skrypt Tcl syntezy: vivado/ (etap 0, do napisania).
+//  Synteza: vivado/ooc_synth.tcl (opis w README.md).
 // =====================================================================
 object OocUnits {
   val formats   = Seq(PositConfig(16), PositConfig(32))

@@ -14,4 +14,4 @@ Obok kodu: `vivado/` (skrypty Tcl, block design) i `README.md` z wynikami syntez
 
 | top | etap | co |
 | --- | --- | --- |
-| `ooc` | 0 | jednostki posit-core do syntezy OOC na xck26 (LUT/FF/DSP/Fmax per potok) |
+| `ooc` | 0 | jednostki posit-core do syntezy OOC na xck26 (LUT/FF/DSP/Fmax per potok), `vivado/ooc_synth.tcl` |
