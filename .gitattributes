@@ -1,0 +1,13 @@
+# Konce linii niezaleznie od core.autocrlf na Windows.
+* text=auto
+
+# Uruchamiane na plytce (Linux): zawsze LF, inaczej "/usr/bin/env: 'bash\r'".
+*.sh   text eol=lf
+*.py   text eol=lf
+*.dtsi text eol=lf
+*.json text eol=lf
+
+# Binaria: bez konwersji
+*.bit     binary
+*.bin     binary
+*.dtbo    binary
