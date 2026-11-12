@@ -161,9 +161,12 @@ set seg [get_bd_addr_segs -of_objects [get_bd_addr_spaces $ps/Data] -filter {NAM
 if {[llength $seg] != 1} { error "segment adresowy posit_alu: [llength $seg] zamiast 1 ([get_bd_addr_segs -of_objects [get_bd_addr_spaces $ps/Data]])" }
 set alu_base [expr {[get_property OFFSET $seg]}]
 set alu_size [to_bytes [get_property RANGE $seg]]
-# czestotliwosc, ktora PS faktycznie wytworzy z PLL (np. 99.999001 MHz)
+# Zadana czestotliwosc pl_clk0, nie "faktyczna" z Vivado (ACT_FREQMHZ, np. 99.999001 MHz):
+# ta jest policzona dla PLL z konfiguracji PS w block designie, a na plytce PL0 taktuje
+# PLL z firmware Kria (1500 MHz). Sterownik zegara wybiera dzielnik nie przekraczajacy
+# zadanej wartosci: 99 999 001 Hz -> 1500/16 = 93.75 MHz, 100 000 000 Hz -> 1500/15 = 100 MHz.
 set pl0_hz 100000000
-catch { set pl0_hz [expr {round([get_property CONFIG.PSU__CRL_APB__PL0_REF_CTRL__ACT_FREQMHZ $ps] * 1e6)}] }
+catch { set pl0_hz [expr {round([get_property CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ $ps] * 1e6)}] }
 puts "build: posit_alu @ [format 0x%llx $alu_base], $alu_size B; pl_clk0 $pl0_hz Hz"
 validate_bd_design
 save_bd_design

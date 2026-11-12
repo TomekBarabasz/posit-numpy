@@ -67,8 +67,11 @@ WNS < 0 kończy się błędem bez tworzenia katalogu aplikacji.
 Bez PYNQ nikt nie czyta `.hwh` i nie konfiguruje PS przy ładowaniu, więc wszystko, czego PL potrzebuje
 od PS, jest w overlayu `.dtsi`:
 
-- **zegar**: `clocking0` (`xlnx,fclk`) włącza PL0_REF i ustawia częstotliwość, jaką Vivado policzył dla
-  `pl_clk0` (`PSU__CRL_APB__PL0_REF_CTRL__ACT_FREQMHZ`, np. 99 999 001 Hz);
+- **zegar**: `clocking0` (`xlnx,fclk`) włącza PL0_REF i ustawia **zadaną** częstotliwość `pl_clk0`
+  (`PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ`, 100 000 000 Hz). Nie „faktyczną” z Vivado (`ACT_FREQMHZ`,
+  99 999 001 Hz): ta jest liczona dla PLL z block designu, a na płytce PL0 taktuje PLL z firmware Kria
+  (1500 MHz) i sterownik wybiera dzielnik nie przekraczający zadanej wartości — 99 999 001 Hz dawało
+  1500/16 = 93,75 MHz, 100 MHz daje 1500/15. Sprawdzenie: `sudo cat /sys/kernel/debug/clk/pl0_ref/clk_rate`;
 - **reset**: `resets = <&zynqmp_reset 116>` na regionie FPGA (`pl_resetn0`);
 - **szerokość HPM0 FPD**: siedzi w rejestrach PS (AFI), nie w bitstreamie. Block design zostawia domyślne
   128 b, a `afi0` (`config-afi = <14 0xa00>`) wpisuje ten sam stan; smartconnect zwęża 128 b do AXI4-Lite 32 b.
