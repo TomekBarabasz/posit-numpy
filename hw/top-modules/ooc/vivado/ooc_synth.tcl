@@ -19,6 +19,7 @@
 #    -period <ns>     okres zegara                 (10.0 = 100 MHz)
 #    -only <glob>     filtr "<wariant>/<modul>"    (*), np. "*/PositMul_32_2" albo "div/*"
 #    -impl            po syntezie opt/place/route i drugi wiersz z wynikiem po routingu
+#    -threads <n>     watki Vivado (general.maxThreads)          (8)
 #
 #  Ograniczenia czasowe (kazda jednostka tak samo):
 #    - zegar clk o okresie -period na porcie clk albo aclk (IP z AXI);
@@ -41,17 +42,18 @@ array set opt [list \
     period 10.0 \
     only   * \
     impl   0 \
+    threads 8 \
 ]
 
 proc usage {} {
-    puts "uzycie: vivado -mode batch -source ooc_synth.tcl -tclargs \[-gen dir\] \[-out dir\] \[-part part\] \[-period ns\] \[-only glob\] \[-impl\]"
+    puts "uzycie: vivado -mode batch -source ooc_synth.tcl -tclargs \[-gen dir\] \[-out dir\] \[-part part\] \[-period ns\] \[-only glob\] \[-impl\] \[-threads n\]"
 }
 
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
         -impl { set opt(impl) 1 }
-        -gen - -out - -part - -period - -only {
+        -gen - -out - -part - -period - -only - -threads {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([string range $a 1 end]) [lindex $argv $i]
@@ -61,6 +63,17 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
     }
 }
 if {![string is double -strict $opt(period)] || $opt(period) <= 0} { error "-period: liczba ns > 0, nie $opt(period)" }
+
+# Watki Vivado na jeden proces (place_design, route_design, synteza). Domyslnie
+# Vivado bierze 2 na Windows i 8 na Linuksie; gorna granica zalezy od wersji,
+# wiec przy odmowie schodzimy do 8.
+proc set_threads {n} {
+    if {[catch { set_param general.maxThreads $n } err]} {
+        puts "uwaga: general.maxThreads $n odrzucone ($err), ustawiam 8"
+        set_param general.maxThreads [set n 8]
+    }
+    return $n
+}
 set opt(gen) [file normalize $opt(gen)]
 set opt(out) [file normalize $opt(out)]
 
@@ -166,7 +179,7 @@ proc add_row {values} {
 # ---- przebieg -----------------------------------------------------------------
 
 puts "ooc: [llength $units] jednostek, $opt(part), [format %.3f $opt(period)] ns, impl=$opt(impl)"
-puts "ooc: RTL $opt(gen)"
+puts "ooc: RTL $opt(gen), watki [set_threads $opt(threads)]"
 puts "ooc: wyniki $opt(out)"
 
 set idx 0

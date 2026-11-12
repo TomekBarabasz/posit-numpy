@@ -22,7 +22,8 @@
 #    -board           ustaw board part KV260 i preset PS z plikow plytki (wymaga board files)
 #    -out <dir>       katalog roboczy                             (./out)
 #    -deploy <dir>    gdzie zapisac katalog aplikacji             (../../../../sw/positnp/overlays)
-#    -jobs <n>        rownolegle zadania synth/impl               (4)
+#    -jobs <n>        rownolegle przebiegi (synteza IP z block designu) (8)
+#    -threads <n>     watki Vivado na przebieg (general.maxThreads)    (8)
 #    -stop ip|bd      zatrzymaj po spakowaniu IP albo po block designie
 #
 #  Wynik: katalog aplikacji <deploy>/posit<n>_alu/, kopiowany na plytce do
@@ -45,19 +46,20 @@ array set opt [list \
     board  0 \
     out    [file join $script_dir out] \
     deploy [file normalize [file join $script_dir .. .. .. .. sw positnp overlays]] \
-    jobs   4 \
+    jobs   8 \
+    threads 8 \
     stop   "" \
 ]
 
 proc usage {} {
-    puts "uzycie: vivado -mode batch -source build.tcl -tclargs \[-n bity\] \[-part part\] \[-board\] \[-out dir\] \[-deploy dir\] \[-jobs n\] \[-stop ip|bd\]"
+    puts "uzycie: vivado -mode batch -source build.tcl -tclargs \[-n bity\] \[-part part\] \[-board\] \[-out dir\] \[-deploy dir\] \[-jobs n\] \[-threads n\] \[-stop ip|bd\]"
 }
 
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
         -board { set opt(board) 1 }
-        -n - -part - -out - -deploy - -jobs - -stop {
+        -n - -part - -out - -deploy - -jobs - -threads - -stop {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([string range $a 1 end]) [lindex $argv $i]
@@ -68,6 +70,18 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
 }
 if {$opt(stop) ni {"" ip bd}} { error "-stop ip|bd, nie $opt(stop)" }
 
+# Watki Vivado na jeden proces (place_design, route_design, synteza). Domyslnie
+# Vivado bierze 2 na Windows i 8 na Linuksie; gorna granica zalezy od wersji,
+# wiec przy odmowie schodzimy do 8.
+proc set_threads {n} {
+    if {[catch { set_param general.maxThreads $n } err]} {
+        puts "uwaga: general.maxThreads $n odrzucone ($err), ustawiam 8"
+        set_param general.maxThreads [set n 8]
+    }
+    return $n
+}
+set opt(threads) [set_threads $opt(threads)]
+
 set n        $opt(n)
 set name     posit${n}_alu
 set bd_name  posit_alu_bd
@@ -76,7 +90,7 @@ set rtl      [file normalize [file join $script_dir .. hw gen p$n PositAluAxiLit
 set ip_dir   [file join $out ip_p$n]
 set proj_dir [file join $out proj_p$n]
 
-puts "build: $name, $opt(part), RTL $rtl"
+puts "build: $name, $opt(part), RTL $rtl, watki $opt(threads), przebiegi $opt(jobs)"
 
 # ---- 1. IP ------------------------------------------------------------------------
 set vlnv [posit_ip::package $rtl $ip_dir $opt(part)]
@@ -168,6 +182,15 @@ set fh [open $xdc w]
 puts $fh "set_property BITSTREAM.GENERAL.COMPRESS TRUE \[current_design\]"
 close $fh
 add_files -fileset constrs_1 -norecurse $xdc
+
+# launch_runs startuje osobne procesy Vivado, ktore nie dziedzicza set_param
+# z tej sesji: watki ustawia w nich skrypt tcl.pre pierwszego kroku przebiegu.
+set threads_tcl [file join $proj_dir threads.tcl]
+set fh [open $threads_tcl w]
+puts $fh "set_param general.maxThreads $opt(threads)"
+close $fh
+set_property STEPS.SYNTH_DESIGN.TCL.PRE $threads_tcl [get_runs synth_1]
+set_property STEPS.OPT_DESIGN.TCL.PRE   $threads_tcl [get_runs impl_1]
 
 launch_runs impl_1 -to_step write_bitstream -jobs $opt(jobs)
 wait_on_run impl_1

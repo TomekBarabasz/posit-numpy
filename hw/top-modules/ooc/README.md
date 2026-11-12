@@ -34,6 +34,7 @@ Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`
 | `-period <ns>` | `10.0` | okres zegara (100 MHz) |
 | `-only <glob>` | `*` | filtr `<wariant>/<moduł>`, np. `div/*`, `*_32_2` |
 | `-impl` | wyłączone | po syntezie `opt_design`, `place_design`, `route_design` i drugi wiersz z wynikiem po routingu |
+| `-threads <n>` | `8` | wątki Vivado (`general.maxThreads`; Vivado domyślnie bierze 2 na Windows) |
 
 Wyniki w `out/` (poza gitem):
 - `ooc_results.csv`: wiersz na jednostkę i etap (`synth`, `impl`), dopisywany po każdej jednostce, więc przerwany przebieg zostawia to, co już policzył;

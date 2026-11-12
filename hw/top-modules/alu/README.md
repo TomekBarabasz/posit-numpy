@@ -53,7 +53,8 @@ pl_clk0 100 MHz, pl_resetn0 -> proc_sys_reset -> aresetn
 | `-board` | wyłączone | board part KV260 i preset PS (wymaga board files z Vivado Store) |
 | `-out <dir>` | `./out` | IP, projekt, raporty, `.bit` i `.hwh` do podglądu |
 | `-deploy <dir>` | `sw/positnp/overlays` | gdzie zapisać katalog aplikacji |
-| `-jobs <n>` | `4` | |
+| `-jobs <n>` | `8` | równoległe przebiegi (synteza IP z block designu) |
+| `-threads <n>` | `8` | wątki Vivado na przebieg (`general.maxThreads`; Vivado domyślnie bierze 2 na Windows) |
 | `-stop ip\|bd` | — | zatrzymanie po pakowaniu IP albo po block designie (do obejrzenia w GUI: `out/proj_p<n>`) |
 
 Kolejno: `package_ip.tcl` (IP `newhope.pl:posit:PositAluAxiLite:1.0`, interfejsy `s_axi`, `aclk`,
