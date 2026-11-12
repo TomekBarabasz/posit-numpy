@@ -21,8 +21,9 @@
 #    -impl            po syntezie opt/place/route i drugi wiersz z wynikiem po routingu
 #
 #  Ograniczenia czasowe (kazda jednostka tak samo):
-#    - zegar clk o okresie -period; jednostki kombinacyjne (comb) nie maja
-#      portu clk, wtedy zegar jest wirtualny,
+#    - zegar clk o okresie -period na porcie clk albo aclk (IP z AXI);
+#      jednostki kombinacyjne (comb) nie maja portu zegara, wtedy zegar
+#      jest wirtualny,
 #    - set_input_delay / set_output_delay 0 wzgledem clk na wszystkich
 #      portach: sciezki port -> rejestr, rejestr -> port i port -> port maja
 #      caly okres, jakby jednostke otaczaly rejestry. Pomija to clk-to-q i
@@ -86,16 +87,17 @@ if {[llength $units] == 0} {
 
 # ---- pomocnicze ---------------------------------------------------------------
 
-# Ograniczenia jednostki. Zegar wirtualny, gdy modul nie ma portu clk.
-proc write_xdc {path has_clk period} {
+# Ograniczenia jednostki. clk_port: port zegara ("clk" jednostek, "aclk" IP z AXI)
+# albo "" - wtedy zegar wirtualny.
+proc write_xdc {path clk_port period} {
     set p [format %.3f $period]
     set fh [open $path w]
-    if {$has_clk} {
-        puts $fh "create_clock -period $p -name clk \[get_ports clk\]"
+    if {$clk_port ne ""} {
+        puts $fh "create_clock -period $p -name clk \[get_ports $clk_port\]"
     } else {
         puts $fh "create_clock -period $p -name clk"
     }
-    puts $fh "set_input_delay  -clock clk 0.000 \[get_ports -filter {DIRECTION == IN && NAME != clk}\]"
+    puts $fh "set_input_delay  -clock clk 0.000 \[get_ports -filter {DIRECTION == IN && NAME != \"$clk_port\"}\]"
     puts $fh "set_output_delay -clock clk 0.000 \[all_outputs\]"
     close $fh
 }
@@ -180,9 +182,10 @@ foreach u $units {
     file mkdir $dir
 
     set fh [open $src r]; set text [read $fh]; close $fh
-    set has_clk [regexp {input\s+wire\s+clk\y} $text]
+    set clk_port ""
+    regexp {input\s+wire\s+(a?clk)\y} $text -> clk_port
     set xdc [file join $dir ooc.xdc]
-    write_xdc $xdc $has_clk $opt(period)
+    write_xdc $xdc $clk_port $opt(period)
 
     set t0 [clock seconds]
     set stage synth

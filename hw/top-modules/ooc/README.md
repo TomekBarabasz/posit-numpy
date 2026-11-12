@@ -9,6 +9,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `op/` | `PositPipeline()`: rejestr po operacji (domyślny) |
 | `full/` | `PositPipeline.full`: rejestry po dekoderze, operacji i enkoderze |
 | `div/` | dzielniki sekwencyjne: `Iterative(1)`, `Iterative(4)`, `Pipelined(4)` |
+| `alu_p16/`, `alu_p32/` | `PositAluAxiLite` z etapu 1 (k = 4, potok full), ta sama konfiguracja co `top-modules/alu` |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 
