@@ -3,7 +3,7 @@ package posit.top.ooc
 import spinal.core._
 import posit._
 import posit.vector.PositAluConfig
-import posit.kv260.{Kv260, PositAluAxiLite, PositGen}
+import posit.kv260.{Kv260, PositAluAxiLite, PositGen, PositVecAxi}
 import posit.kv260.PositGen.{DividerJob, UnitJob}
 
 // =====================================================================
@@ -18,6 +18,7 @@ import posit.kv260.PositGen.{DividerJob, UnitJob}
 //    hw/gen/div/    dzielniki sekwencyjne (Iterative, Pipelined)
 //    hw/gen/alu_p16/, alu_p32/  PositAluAxiLite z etapu 1 (k = 4, potok full),
 //                   ta sama konfiguracja co top-modules/alu
+//    hw/gen/vec_p16/, vec_p32/  PositVecAxi z etapu 2 (rejestry + AXI4-Stream), jak top-modules/vec
 //
 //  sbt "top-ooc/runMain posit.top.ooc.OocUnits"
 //  Synteza: vivado/ooc_synth.tcl (opis w README.md).
@@ -36,5 +37,8 @@ object OocUnits {
     for (c <- formats)
       Kv260.spinal.copy(targetDirectory = s"hw/gen/alu_p${c.n}")
         .generateVerilog(new PositAluAxiLite(PositAluConfig(c, PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full)))
+    for (c <- formats)
+      Kv260.spinal.copy(targetDirectory = s"hw/gen/vec_p${c.n}")
+        .generateVerilog(new PositVecAxi(PositAluConfig(c, PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full)))
   }
 }

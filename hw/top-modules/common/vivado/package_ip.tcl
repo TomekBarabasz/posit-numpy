@@ -1,26 +1,26 @@
 # =====================================================================
-#  Pakowanie PositAluAxiLite jako IP Vivado (etap 1).
-#  Uzywane przez build.tcl; samodzielnie:
-#    vivado -mode batch -nojournal -log package_ip.log -source package_ip.tcl -tclargs <rtl.v> <ip_dir> [part]
+#  Pakowanie IP z posit-kv260 dla Vivado; wspolne dla top-modules/*/vivado/build.tcl.
+#  Samodzielnie:
+#    vivado -mode batch -nojournal -log package_ip.log -source package_ip.tcl -tclargs <rtl.v> <ip_dir> [part] [top] [busif...]
 #
-#  IP: newhope.pl:posit:PositAluAxiLite:1.0
-#  Interfejsy wnioskuje ipx::package_project z nazw portow (test
-#  axi_port_names w PositAluAxiLiteTestplan pilnuje tych nazw):
-#    s_axi_*  -> s_axi    (AXI4-Lite slave, mapa pamieci 4 KB)
-#    aclk     -> zegar,   ASSOCIATED_BUSIF s_axi, ASSOCIATED_RESET aresetn
-#    aresetn  -> reset,   POLARITY ACTIVE_LOW
+#  IP: newhope.pl:posit:<top>:1.0, np. PositAluAxiLite (etap 1), PositVecAxi (etap 2).
+#  Interfejsy wnioskuje ipx::package_project z nazw portow (testy
+#  *_port_names w testplanach posit-kv260 pilnuja tych nazw):
+#    s_axi_*   -> s_axi    (AXI4-Lite slave, mapa pamieci 4 KB)
+#    s_axis_*  -> s_axis   (AXI4-Stream slave),  m_axis_* -> m_axis (master)
+#    aclk      -> zegar,   ASSOCIATED_BUSIF <wszystkie busif>, ASSOCIATED_RESET aresetn
+#    aresetn   -> reset,   POLARITY ACTIVE_LOW
 #  Skrypt ustawia te parametry jawnie i sprawdza, ze interfejsy sa.
 # =====================================================================
 
 namespace eval posit_ip {
     variable vendor  newhope.pl
     variable library posit
-    variable top     PositAluAxiLite
     variable version 1.0
 }
 
-proc posit_ip::vlnv {} {
-    variable vendor; variable library; variable top; variable version
+proc posit_ip::vlnv {top} {
+    variable vendor; variable library; variable version
     return "$vendor:$library:$top:$version"
 }
 
@@ -30,11 +30,12 @@ proc posit_ip::bus_param {busif name value} {
     set_property value $value $p
 }
 
-# Pakuje <rtl> do <ip_dir> (katalog czyszczony). Zwraca VLNV.
-proc posit_ip::package {rtl ip_dir part} {
-    variable vendor; variable library; variable top; variable version
+# Pakuje <rtl> (top-level <top>, interfejsy magistral <busifs>) do <ip_dir>
+# (katalog czyszczony). Zwraca VLNV.
+proc posit_ip::package {rtl ip_dir part {top PositAluAxiLite} {busifs {s_axi}}} {
+    variable vendor; variable library; variable version
     if {![file exists $rtl]} {
-        error "brak $rtl; najpierw z hw/: sbt \"top-alu/runMain posit.top.alu.AluKv260 <n>\""
+        error "brak $rtl; najpierw wygeneruj RTL z hw/ (sbt \"top-<id>/runMain ...\", README top-levelu)"
     }
     set rtl    [file normalize $rtl]
     set ip_dir [file normalize $ip_dir]
@@ -52,16 +53,16 @@ proc posit_ip::package {rtl ip_dir part} {
         -import_files -set_current true
     set core [ipx::current_core]
     set_property version      $version $core
-    set_property display_name "Posit ALU (AXI4-Lite)" $core
-    set_property description  "posit-numpy stage 1: add/sub/mul/div on posits behind AXI4-Lite registers" $core
+    set_property display_name "posit-numpy $top" $core
+    set_property description  "posit-numpy: posit arithmetic engine ($top, interfaces: $busifs)" $core
 
-    foreach name {s_axi aclk aresetn} {
+    foreach name [concat $busifs {aclk aresetn}] {
         if {[ipx::get_bus_interfaces $name -of_objects $core] eq ""} {
             error "IP packager nie rozpoznal interfejsu $name - sprawdz nazwy portow w $rtl"
         }
     }
     set clk [ipx::get_bus_interfaces aclk -of_objects $core]
-    posit_ip::bus_param $clk ASSOCIATED_BUSIF s_axi
+    posit_ip::bus_param $clk ASSOCIATED_BUSIF [join $busifs :]
     posit_ip::bus_param $clk ASSOCIATED_RESET aresetn
     posit_ip::bus_param [ipx::get_bus_interfaces aresetn -of_objects $core] POLARITY ACTIVE_LOW
 
@@ -76,16 +77,18 @@ proc posit_ip::package {rtl ip_dir part} {
     ipx::save_core $core
     close_project
     file delete -force $tmp
-    puts "posit_ip: [posit_ip::vlnv] -> $ip_dir"
-    return [posit_ip::vlnv]
+    puts "posit_ip: [posit_ip::vlnv $top] -> $ip_dir"
+    return [posit_ip::vlnv $top]
 }
 
 # Uruchomienie samodzielne (nie przy source z build.tcl)
 if {[info exists argv] && [file tail [info script]] eq "package_ip.tcl" && ![info exists ::posit_build]} {
     if {[llength $argv] < 2} {
-        puts "uzycie: -tclargs <rtl.v> <ip_dir> \[part\]"
+        puts "uzycie: -tclargs <rtl.v> <ip_dir> \[part\] \[top\] \[busif...\]"
     } else {
-        set part [expr {[llength $argv] > 2 ? [lindex $argv 2] : "xck26-sfvc784-2LV-c"}]
-        posit_ip::package [lindex $argv 0] [lindex $argv 1] $part
+        set part   [expr {[llength $argv] > 2 ? [lindex $argv 2] : "xck26-sfvc784-2LV-c"}]
+        set top    [expr {[llength $argv] > 3 ? [lindex $argv 3] : "PositAluAxiLite"}]
+        set busifs [expr {[llength $argv] > 4 ? [lrange $argv 4 end] : {s_axi}}]
+        posit_ip::package [lindex $argv 0] [lindex $argv 1] $part $top $busifs
     }
 }

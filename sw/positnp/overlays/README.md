@@ -1,6 +1,7 @@
 # overlays
 
-Katalogi aplikacji PL dla `xmutil` (dfx-mgr), po jednym na format: `posit32_alu/`, `posit8_alu/`, ...
+Katalogi aplikacji PL dla `xmutil` (dfx-mgr), po jednym na format i etap: `posit32_alu/` (etap 1),
+`posit32_vec/` (etap 2), `posit8_alu/`, ...
 
 | plik | |
 | --- | --- |

@@ -46,9 +46,10 @@ def topModule(id: String) = Project(s"top-$id", file(s"top-modules/$id"))
 
 lazy val topOoc = topModule("ooc")
 lazy val topAlu = topModule("alu")
+lazy val topVec = topModule("vec")
 
 // sbt test z hw/ odpala testy wszystkich blokow i top-leveli. Testy lib/ (voice-changer)
 // celowo poza aggregate; w razie potrzeby: sbt "{lib}vertebra/test".
 lazy val root = (project in file("."))
-  .aggregate(positCore, positVector, positKv260, topOoc, topAlu)
+  .aggregate(positCore, positVector, positKv260, topOoc, topAlu, topVec)
   .settings(publish / skip := true)

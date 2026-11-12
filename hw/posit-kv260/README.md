@@ -8,8 +8,10 @@ własny master AXI4 (etap 6), konwencje nazw portów dla IP packagera oraz gener
 | `Kv260.scala` | oznaczenie układu (`xck26-sfvc784-2LV-c`), zegar PL, `Kv260.spinal` |
 | `PositGen.scala` | generacja jednostek posit-core do Verilog/VHDL (`UnitJob`, `DividerJob`) |
 | `PositAluAxiLite.scala` | etap 1: `PositAlu` za rejestrami AXI4-Lite (`PositAluRegs`), porty `s_axi_*`, `aclk`, `aresetn` |
+| `PositVecAxi.scala` | etap 2: `PositStreamAlu` za rejestrami v2.0 (`PositVecRegs`) i AXI4-Stream `s_axis` ({b, a}) / `m_axis` pod AXI DMA |
 
-Mapa rejestrów: `hw/top-modules/alu/README.md`; kopia w Pythonie: `sw/positnp/regs.py`.
+Mapy rejestrów: `hw/top-modules/alu/README.md` (etap 1), `hw/top-modules/vec/README.md` (etap 2);
+kopia w Pythonie: `sw/positnp/regs.py`.
 
 ```
 sbt "posit-kv260/runMain posit.kv260.PositGen"
