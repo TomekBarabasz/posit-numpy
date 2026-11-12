@@ -1,0 +1,82 @@
+"""ref.py against the Scala PositRef (shared digests) and known cases."""
+
+import hashlib
+import math
+from pathlib import Path
+
+import pytest
+
+from positnp import ref
+from positnp.ref import Flags, PositConfig
+
+DIGESTS = Path(__file__).with_name("ref_digests.txt")
+
+
+def lcg(n, seed, count):
+    """The same generator as RefDigest.lcg in Scala."""
+    s = seed
+    for _ in range(count):
+        s = (s * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        a = s >> (64 - n)
+        s = (s * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        b = s >> (64 - n)
+        yield a, b
+
+
+def pairs(n, es, kind, count):
+    if kind == "all":
+        return ((a, b) for a in range(1 << n) for b in range(1 << n))
+    return lcg(n, int(kind[3:]), count)
+
+
+def entries():
+    for line in DIGESTS.read_text().splitlines():
+        if line and not line.startswith("#"):
+            n, es, name, kind, count, digest = line.split()
+            yield pytest.param(int(n), int(es), name, kind, int(count), digest, id=f"p{n}_{es}_{name}_{kind}")
+
+
+@pytest.mark.parametrize("n,es,name,kind,count,digest", list(entries()))
+def test_digest_matches_scala(n, es, name, kind, count, digest):
+    c = PositConfig(n, es)
+    md = hashlib.sha256()
+    for a, b in pairs(n, es, kind, count):
+        r, f = ref.op(c, name, a, b)
+        md.update(f"{r:x} {f.bits}\n".encode("ascii"))
+    assert md.hexdigest() == digest
+
+
+P8 = PositConfig(8)
+ONE, TWO, THREE, NAR, MAXPOS, MINPOS = 0x40, 0x48, 0x4C, 0x80, 0x7F, 0x01
+
+
+def test_known_values():
+    assert ref.op(P8, "add", ONE, ONE) == (TWO, Flags())
+    assert ref.op(P8, "div", TWO, TWO) == (ONE, Flags())
+    assert ref.op(P8, "div", ONE, 0) == (NAR, Flags(nar=True))
+    assert ref.op(P8, "mul", MAXPOS, MAXPOS) == (MAXPOS, Flags(sat=True, inexact=True))
+    assert ref.op(P8, "mul", MINPOS, MINPOS) == (MINPOS, Flags(sat=True, inexact=True))
+    assert ref.op(P8, "div", ONE, THREE)[1] == Flags(inexact=True)
+    for name in ref.OPS:
+        assert ref.op(P8, name, NAR, ONE) == (NAR, Flags(nar=True))
+
+
+def test_roundtrip_float_posit16():
+    c = PositConfig(16)
+    for raw in range(1 << 16):
+        x = ref.decode(c, raw)
+        if x is None:
+            assert math.isnan(ref.to_float(c, raw))
+        else:
+            assert ref.encode(c, x) == raw
+            assert ref.to_float(c, raw) == math.ldexp(*x)
+
+
+def test_flags_bits_roundtrip():
+    for b in range(8):
+        assert Flags.from_bits(b).bits == b
+
+
+def test_config_validation():
+    with pytest.raises(ValueError):
+        PositConfig(5, 2)

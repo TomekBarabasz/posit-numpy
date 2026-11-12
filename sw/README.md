@@ -1,21 +1,34 @@
 # sw: positnp (Python)
 
 Bindingi Pythona do silnika posit na KV260. Jedna klasa `PositArray`, dwa wymienne backendy:
-sprzętowy (PYNQ: Overlay, MMIO, DMA) i programowy, bitowo zgodny ze sprzętem — biblioteka działa
-też na PC bez płytki, a testy porównują oba.
+sprzętowy i programowy, bitowo zgodny ze sprzętem — biblioteka działa też na PC bez płytki,
+a testy porównują oba. Bez PYNQ: na płytce Ubuntu z `xmutil`, rejestry przez `/dev/uioN`.
 
 ```
 positnp/
-  __init__.py
-  array.py         PositArray: operatory, __array_ufunc__, __array_function__   (etap 2-3)
-  ref.py           model referencyjny (port PositRef ze Scali)                 (etap 1)
-  backend_sw.py    operacje na ref.py                                          (etap 3)
-  backend_hw.py    Overlay, MMIO, DMA, bufory z pynq.allocate                  (etap 1-2)
-  overlays/        pary .bit + .hwh, po jednej na format
-tests/             pytest: backend_hw kontra backend_sw
+  ref.py           model referencyjny z flagami (port PositRef ze Scali)       etap 1
+  regs.py          mapa rejestrów ALU (= posit.kv260.PositAluRegs)             etap 1
+  backend_hw.py    PositAluHw na UioMmio (/dev/uioN) albo DevMemMmio; FakeAluMmio
+                   do testów bez płytki                                        etap 1 (DMA: etap 2)
+  overlays/        katalogi aplikacji dla xmutil: .bit.bin, .dtsi, shell.json (poza gitem)
+  array.py         PositArray: operatory, __array_ufunc__, __array_function__   etap 2-3
+  backend_sw.py    operacje na ref.py                                          etap 3
+tests/
+  test_ref.py           ref.py kontra skróty SHA-256 z PositRef.scala (ref_digests.txt)
+  test_backend_fake.py  sterownik na atrapie rejestrów
+  test_board.py         na KV260: UIO kontra ref.py (pomijany, gdy overlay nie jest wgrany)
+scripts/
+  install_overlay.sh    na płytce: dtc, /lib/firmware/xilinx/<nazwa>/, xmutil loadapp
 ```
 
 ```
 pip install -e sw[test]
-pytest sw/tests
+python3 -m pytest sw/tests
+```
+
+Na płytce (Ubuntu 24.04, bez instalacji pakietu; `python3 -m` z `sw/` widzi `positnp`):
+```
+sudo apt install device-tree-compiler python3-pytest python3-numpy
+scripts/install_overlay.sh posit32_alu
+sudo python3 -m pytest -v tests/test_board.py          # POSITNP_VECTORS=100000 dla większej liczby par
 ```

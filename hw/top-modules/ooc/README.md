@@ -1,11 +1,78 @@
 # top-modules/ooc (pakiet `posit.top.ooc`)
 
-Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza kontekstem na
-`xck26-sfvc784-2LV-c`. Każdy wariant potoku w osobnym katalogu (`hw/gen/{comb,op,full,div}`),
-bo nazwa modułu nie zawiera potoku.
+Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza kontekstem (OOC) na
+`xck26-sfvc784-2LV-c`: tabela LUT / FF / CARRY8 / DSP / BRAM / Fmax dla każdego ustawienia potoku.
 
-```
-sbt "top-ooc/runMain posit.top.ooc.OocUnits"
-```
+| katalog `hw/gen/` | co |
+| --- | --- |
+| `comb/` | `PositPipeline.combinational`: add, sub, mul, div (dzielenie rozwinięte w jeden łańcuch) |
+| `op/` | `PositPipeline()`: rejestr po operacji (domyślny) |
+| `full/` | `PositPipeline.full`: rejestry po dekoderze, operacji i enkoderze |
+| `div/` | dzielniki sekwencyjne: `Iterative(1)`, `Iterative(4)`, `Pipelined(4)` |
+| `alu_p16/`, `alu_p32/` | `PositAluAxiLite` z etapu 1 (k = 4, potok full), ta sama konfiguracja co `top-modules/alu` |
 
-Do zrobienia w etapie 0: skrypt Tcl (`vivado/`) i tabela LUT / FF / DSP / Fmax.
+Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
+
+## Uruchomienie
+
+1. RTL (z `hw/`, np. w kontenerze SpinalHDL):
+   ```
+   sbt "top-ooc/runMain posit.top.ooc.OocUnits"
+   ```
+2. Synteza (z `hw/top-modules/ooc/vivado`, Vivado w PATH):
+   ```
+   vivado -mode batch -nojournal -log vivado.log -source ooc_synth.tcl
+   vivado -mode batch -nojournal -log vivado.log -source ooc_synth.tcl -tclargs -impl
+   vivado -mode batch -nojournal -log vivado.log -source ooc_synth.tcl -tclargs -only "*/PositMul_32_2" -period 5
+   ```
+
+| opcja `-tclargs` | domyślnie | |
+| --- | --- | --- |
+| `-gen <dir>` | `../hw/gen` | katalog z RTL |
+| `-out <dir>` | `./out` | wyniki |
+| `-part <part>` | `xck26-sfvc784-2LV-c` | |
+| `-period <ns>` | `10.0` | okres zegara (100 MHz) |
+| `-only <glob>` | `*` | filtr `<wariant>/<moduł>`, np. `div/*`, `*_32_2` |
+| `-impl` | wyłączone | po syntezie `opt_design`, `place_design`, `route_design` i drugi wiersz z wynikiem po routingu |
+| `-threads <n>` | `8` | wątki Vivado (`general.maxThreads`; Vivado domyślnie bierze 2 na Windows) |
+
+Wyniki w `out/` (poza gitem):
+- `ooc_results.csv`: wiersz na jednostkę i etap (`synth`, `impl`), dopisywany po każdej jednostce, więc przerwany przebieg zostawia to, co już policzył;
+- `ooc_results.md`: ta sama tabela w markdownie, do wklejenia poniżej;
+- `<wariant>/<moduł>/`: `ooc.xdc`, `utilization_*.rpt`, `timing_*.rpt`.
+
+Błąd jednej jednostki daje wiersz `BLAD` i przebieg idzie dalej (szczegóły w `vivado.log`).
+
+## Metoda
+
+- Synteza w trybie non-project, `synth_design -mode out_of_context` (bez buforów I/O), każda jednostka w osobnym projekcie w pamięci.
+- Zegar `clk` o okresie `-period`. Jednostki `comb` nie mają portu `clk` (SpinalHDL go nie generuje), więc dostają zegar wirtualny.
+- `set_input_delay` / `set_output_delay` 0 względem `clk` na wszystkich portach: ścieżki port → rejestr,
+  rejestr → port i port → port mają cały okres, tak jakby jednostkę otaczały rejestry. Clk-to-q i setup tych
+  rejestrów są pominięte, więc Fmax wariantu `comb` wychodzi lekko optymistycznie.
+- Fmax = 1000 / (okres − WNS). Po samej syntezie opóźnienia połączeń są szacowane; wiążące są liczby z `-impl`.
+- LUT, FF, CARRY8, DSP i BRAM pochodzą z wierszy `report_utilization`. Gdy wiersza brakuje, skrypt liczy komórki po `REF_NAME`.
+
+## Wyniki
+
+### ALU z etapu 1 (2026-11-12)
+
+Vivado 2026.1, `xck26-sfvc784-2LV-c`, 100 MHz, `-impl -only "alu_*/*"`. `PositAluAxiLite` z dzielnikiem k = 4
+i potokiem full, razem z rejestrami AXI4-Lite i licznikami.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `alu_p16` | synth | 776 | 430 | 36 | 1 | 0 | 3.926 | 164.6 |
+| `alu_p16` | impl | 770 | 430 | 36 | 1 | 0 | 3.404 | 151.6 |
+| `alu_p32` | synth | 1 474 | 676 | 70 | 4 | 0 | 2.450 | 132.5 |
+| `alu_p32` | impl | 1 447 | 676 | 70 | 4 | 0 | 1.691 | 120.4 |
+
+- Po routingu obie konfiguracje domykają 100 MHz: posit32 z zapasem 1,7 ns (120 MHz), posit16 3,4 ns (152 MHz).
+  Synteza przeszacowała Fmax o ok. 8–10%.
+- DSP zgadzają się z mnożarką znaczących (1.ułamek): 12 × 12 b mieści się w jednym DSP48E2 (27 × 18), 28 × 28 b potrzebuje czterech.
+- ALU posit32 zajmuje ok. 1,2% LUT układu.
+- Ostrzeżenia `Synth 8-7129` (porty bez obciążenia: `s_axi_awaddr[1:0]`, `*prot`, `wstrb`, w posit16 `wdata[31:16]`)
+  są oczekiwane: rejestry są wyrównane do słowa, bity ochrony nieużywane, `AxiLite4SlaveFactory` ignoruje
+  `wstrb` (`backend_hw` zapisuje zawsze pełne słowo 32 b).
+
+Jednostki posit-core (`comb`, `op`, `full`, `div`): do uzupełnienia.
