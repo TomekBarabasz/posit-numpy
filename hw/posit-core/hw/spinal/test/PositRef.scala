@@ -68,15 +68,39 @@ object PositRef {
       if (d.m < 0) (-r) & ((BigInt(1) << n) - 1) else r
   }
 
-  def apply(c: PositConfig, op: PositOp, a: BigInt, b: BigInt): BigInt = (decode(c, a), decode(c, b)) match {
+  /** Flags of one rounding, as PositFlags in hardware (asBits: nar = 0, sat = 1, inexact = 2). */
+  final case class Flags(nar: Boolean = false, sat: Boolean = false, inexact: Boolean = false) {
+    def bits: Int = (if (nar) 1 else 0) | (if (sat) 2 else 0) | (if (inexact) 4 else 0)
+  }
+
+  /** Result and flags. `inexact`: the true value lies strictly beyond x (a division remainder). */
+  def round(c: PositConfig, x: Option[Dyadic], inexact: Boolean = false): (BigInt, Flags) = x match {
+    case None                => (encode(c, None), Flags(nar = true))
+    case Some(d) if d.m == 0 => (BigInt(0), Flags())
+    case Some(d) =>
+      val r        = encode(c, x, inexact)
+      val maxScale = (c.n - 2) << c.es
+      val mag      = Dyadic(d.m.abs, d.e)
+      val maxpos   = Dyadic(1, maxScale)
+      val minpos   = Dyadic(1, -maxScale)
+      def cmp(p: Dyadic, q: Dyadic): Int = (p - q).m.signum
+      // |true| > maxpos: |x| > maxpos, or |x| == maxpos with a remainder; |true| < minpos iff |x| < minpos
+      val sat   = cmp(mag, maxpos) > 0 || (cmp(mag, maxpos) == 0 && inexact) || cmp(mag, minpos) < 0
+      val exact = !inexact && decode(c, r).exists(v => cmp(v, d) == 0)
+      (r, Flags(sat = sat, inexact = !exact))
+  }
+
+  def withFlags(c: PositConfig, op: PositOp, a: BigInt, b: BigInt): (BigInt, Flags) = (decode(c, a), decode(c, b)) match {
     case (Some(x), Some(y)) =>
       op match {
-        case PositOp.Add                => encode(c, Some(x + y))
-        case PositOp.Sub                => encode(c, Some(x - y))
-        case PositOp.Mul                => encode(c, Some(x * y))
-        case PositOp.Div if y.m == 0    => encode(c, None)
-        case PositOp.Div                => val (q, inexact) = x / y; encode(c, Some(q), inexact)
+        case PositOp.Add                => round(c, Some(x + y))
+        case PositOp.Sub                => round(c, Some(x - y))
+        case PositOp.Mul                => round(c, Some(x * y))
+        case PositOp.Div if y.m == 0    => round(c, None)
+        case PositOp.Div                => val (q, inexact) = x / y; round(c, Some(q), inexact)
       }
-    case _ => encode(c, None)
+    case _ => round(c, None)
   }
+
+  def apply(c: PositConfig, op: PositOp, a: BigInt, b: BigInt): BigInt = withFlags(c, op, a, b)._1
 }
