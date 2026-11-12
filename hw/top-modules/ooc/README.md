@@ -54,4 +54,18 @@ Błąd jednej jednostki daje wiersz `BLAD` i przebieg idzie dalej (szczegóły w
 
 ## Wyniki
 
-Do uzupełnienia po pierwszym przebiegu (`out/ooc_results.md`, wersja Vivado w nagłówku tabeli).
+### ALU z etapu 1, sama synteza (2026-11-12)
+
+Vivado 2026.1, `xck26-sfvc784-2LV-c`, 100 MHz, `-only "alu_*/*"`. `PositAluAxiLite` z dzielnikiem k = 4
+i potokiem full, razem z rejestrami AXI4-Lite i licznikami.
+
+| wariant | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz (synteza) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `alu_p16` | 776 | 430 | 36 | 1 | 0 | 3.926 | 164.6 |
+| `alu_p32` | 1 474 | 676 | 70 | 4 | 0 | 2.450 | 132.5 |
+
+- Obie konfiguracje mają zapas przy 100 MHz; po samej syntezie opóźnienia połączeń są szacowane, wiążące będą liczby z `-impl`.
+- DSP zgadzają się z mnożarką znaczących: 15 × 15 b mieści się w jednym DSP48E2 (27 × 18), 29 × 29 b potrzebuje czterech.
+- ALU posit32 zajmuje ok. 1,3% LUT układu.
+
+Jednostki posit-core (`comb`, `op`, `full`, `div`): do uzupełnienia.
