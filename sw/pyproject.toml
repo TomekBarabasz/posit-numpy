@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "positnp"
+version = "0.0.1"
+description = "NumPy-style posit arrays computed in KV260 programmable logic"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+test = ["pytest", "hypothesis"]
+board = ["pynq"]
+
+[tool.setuptools.packages.find]
+include = ["positnp*"]
