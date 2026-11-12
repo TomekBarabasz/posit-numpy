@@ -72,6 +72,6 @@ i potokiem full, razem z rejestrami AXI4-Lite i licznikami.
 - ALU posit32 zajmuje ok. 1,2% LUT układu.
 - Ostrzeżenia `Synth 8-7129` (porty bez obciążenia: `s_axi_awaddr[1:0]`, `*prot`, `wstrb`, w posit16 `wdata[31:16]`)
   są oczekiwane: rejestry są wyrównane do słowa, bity ochrony nieużywane, `AxiLite4SlaveFactory` ignoruje
-  `wstrb` (zapisy zawsze pełnym słowem 32 b, jak w PYNQ `MMIO.write`).
+  `wstrb` (`backend_hw` zapisuje zawsze pełne słowo 32 b).
 
 Jednostki posit-core (`comb`, `op`, `full`, `div`): do uzupełnienia.

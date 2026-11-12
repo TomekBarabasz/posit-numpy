@@ -66,7 +66,7 @@ proc posit_ip::package {rtl ip_dir part} {
     posit_ip::bus_param [ipx::get_bus_interfaces aresetn -of_objects $core] POLARITY ACTIVE_LOW
 
     if {[ipx::get_memory_maps -of_objects $core] eq ""} {
-        error "IP bez mapy pamieci s_axi - PYNQ nie zobaczy rejestrow"
+        error "IP bez mapy pamieci s_axi - block design nie przydzieli adresu"
     }
 
     set_property core_revision [scan [clock format [clock seconds] -format %y%m%d%H] %d] $core

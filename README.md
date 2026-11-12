@@ -1,7 +1,7 @@
 # posit-numpy
 
 Biblioteka w stylu NumPy na KV260: tablice positów liczy logika PL wygenerowana
-w SpinalHDL, a steruje nią Python w PS (Kria-PYNQ).
+w SpinalHDL, a steruje nią Python w PS (Ubuntu z `xmutil`, rejestry przez UIO; bez PYNQ).
 Plan: [posit-numpy na KV260: architektura i plan implementacji](https://claude.ai/artifact/JtAzXExTzWmnyTq6d8kmym).
 
 ```
@@ -77,11 +77,12 @@ pip install -e .[test]
 python3 -m pytest tests          # ref.py kontra skróty ze Scali, sterownik na atrapie; test_board.py tylko na płytce
 ```
 
-## etap 1 na płytce
+## etap 1 na płytce (bez PYNQ: Ubuntu + xmutil + UIO)
 ```
 sbt "top-alu/runMain posit.top.alu.AluKv260"     # z hw/
 vivado -mode batch -nojournal -log build.log -source build.tcl    # z hw/top-modules/alu/vivado
-sudo -E python3 -m pytest -v tests/test_board.py # na KV260, z sw/
+scripts/install_overlay.sh posit32_alu           # na KV260, z sw/
+sudo python3 -m pytest -v tests/test_board.py    # na KV260, z sw/
 ```
 
 ## synteza OOC (etap 0)

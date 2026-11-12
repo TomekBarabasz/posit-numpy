@@ -1,20 +1,25 @@
-"""Stage 1 hardware backend: the posit ALU behind AXI4-Lite, driven through MMIO.
+"""Stage 1 hardware backend: the posit ALU behind AXI4-Lite, driven through MMIO. No PYNQ.
+
+On the KV260 (Ubuntu + xmutil), after sw/scripts/install_overlay.sh posit32_alu:
 
     from positnp.backend_hw import PositAluHw
-    alu = PositAluHw.from_overlay()          # overlays/posit32_alu.bit + .hwh, on the KV260
+    alu = PositAluHw.open()                  # /dev/uioN named "posit_alu" (from the overlay's .dtbo)
     bits, flags = alu.op("div", 0x40000000, 0x4C000000)
     alu.stats()                              # {'nar': 0, 'sat': 0, 'inexact': 1, 'cycles': ...}
 
 The register sequence is the one PositAluAxiLiteTestplan checks in simulation:
 OP, OPERAND_A, OPERAND_B, CTRL.start, poll STATUS.done, read RESULT.
 
-`PositAluHw` needs only an object with read(offset) and write(offset, value), so the
-same driver runs against pynq's DefaultIP / MMIO on the board and against
-`FakeAluMmio` (the register model on ref.py) on a PC.
+`PositAluHw` needs only an object with read(offset) and write(offset, value):
+`UioMmio` (the normal way), `DevMemMmio` (explicit opt-in, see its warning) and
+`FakeAluMmio` (the register model on ref.py, for a PC without the board).
 """
 
 from __future__ import annotations
 
+import json
+import mmap
+import os
 import time
 from pathlib import Path
 from typing import Dict, Optional, Protocol, Tuple
@@ -23,7 +28,8 @@ from . import ref, regs
 from .ref import Flags, PositConfig
 
 OVERLAY_DIR = Path(__file__).with_name("overlays")
-IP_NAME = "posit_alu"  # instance name in the block design (hw/top-modules/alu/vivado/build.tcl)
+IP_NAME = "posit_alu"  # block design instance = UIO node name in the .dtsi (hw/top-modules/alu/vivado/build.tcl)
+UIO_CLASS = Path("/sys/class/uio")
 
 
 class Mmio(Protocol):
@@ -33,6 +39,84 @@ class Mmio(Protocol):
 
 class PositAluError(RuntimeError):
     pass
+
+
+# ---- register access on the board ----------------------------------------------------------
+
+class _MappedWords:
+    """32-bit accesses through a memoryview cast to 'I': one aligned load/store per register.
+
+    Byte-wise copies (struct on the raw mmap) could turn into four 8-bit bus writes, and the
+    AXI4-Lite slave ignores WSTRB, so every access here is a whole word.
+    """
+
+    def __init__(self, fd: int, size: int, offset: int):
+        self.size = size
+        self._mm = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=offset)
+        self._w = memoryview(self._mm).cast("I")
+
+    def read(self, offset: int) -> int:
+        return self._w[offset >> 2]
+
+    def write(self, offset: int, value: int) -> None:
+        self._w[offset >> 2] = value & 0xFFFFFFFF
+
+    def close(self) -> None:
+        self._w.release()
+        self._mm.close()
+
+
+def find_uio(name: str = IP_NAME) -> Optional[str]:
+    """/dev/uioN whose device tree node is `name`, or None (overlay not loaded)."""
+    if not UIO_CLASS.exists():
+        return None
+    for d in sorted(UIO_CLASS.iterdir()):
+        try:
+            if (d / "name").read_text().strip() == name:
+                return f"/dev/{d.name}"
+        except OSError:
+            continue
+    return None
+
+
+class UioMmio(_MappedWords):
+    """Registers through /dev/uioN (generic-uio node from the overlay). Needs read/write access to the node."""
+
+    def __init__(self, name: str = IP_NAME):
+        dev = find_uio(name)
+        if dev is None:
+            raise PositAluError(f"no UIO device named {name!r}: is the overlay loaded? "
+                                f"(sudo xmutil listapps; sw/scripts/install_overlay.sh)")
+        size = int((UIO_CLASS / Path(dev).name / "maps" / "map0" / "size").read_text(), 0)
+        fd = os.open(dev, os.O_RDWR | os.O_SYNC)
+        try:
+            super().__init__(fd, size, 0)   # map0 = offset 0
+        finally:
+            os.close(fd)
+        self.device = dev
+
+
+class DevMemMmio(_MappedWords):
+    """Registers through /dev/mem at a physical address (root only).
+
+    Only for when UIO is not available. Reading an address in the PL window while the
+    PL holds no design there can stall the AXI bus and hang the whole system, so
+    nothing in positnp falls back to this on its own.
+    """
+
+    def __init__(self, base: int, size: int = 0x1000):
+        if base % mmap.PAGESIZE:
+            raise ValueError(f"base 0x{base:x} is not page aligned")
+        fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+        try:
+            super().__init__(fd, size, base)
+        finally:
+            os.close(fd)
+
+
+def overlay_info(overlay: str) -> Dict[str, object]:
+    """overlays/<overlay>/<overlay>.json written by build.tcl (base address, size, clock, WNS...)."""
+    return json.loads((OVERLAY_DIR / overlay / f"{overlay}.json").read_text())
 
 
 class PositAluHw:
@@ -51,15 +135,17 @@ class PositAluHw:
     # ---- construction on the board ----------------------------------------------------
 
     @classmethod
-    def from_overlay(cls, bitfile: Optional[str] = None, n: int = 32, download: bool = True) -> "PositAluHw":
-        """Load overlays/posit<n>_alu.bit (and the .hwh next to it) and bind to the ALU."""
-        from pynq import Overlay  # only on the board
+    def open(cls, name: str = IP_NAME, devmem_overlay: Optional[str] = None) -> "PositAluHw":
+        """Bind to the ALU of the loaded overlay.
 
-        path = Path(bitfile) if bitfile else OVERLAY_DIR / f"posit{n}_alu.bit"
-        overlay = Overlay(str(path), download=download)
-        hw = cls(getattr(overlay, IP_NAME))
-        hw.overlay = overlay
-        return hw
+        Default: the UIO device `name` (needs sudo, or a udev rule for /dev/uio*).
+        devmem_overlay="posit32_alu": /dev/mem at the address from overlays/<name>/<name>.json
+        instead; only when you know that overlay is loaded (see DevMemMmio).
+        """
+        if devmem_overlay is not None:
+            info = overlay_info(devmem_overlay)
+            return cls(DevMemMmio(int(info["base"]), int(info["size"])))
+        return cls(UioMmio(name))
 
     # ---- registers ----------------------------------------------------------------------
 

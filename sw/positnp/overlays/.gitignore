@@ -1,3 +1,4 @@
-*.bit
-*.hwh
-*.txt
+# katalogi aplikacji z build.tcl (posit<n>_alu/) i stare pliki PYNQ
+*
+!.gitignore
+!README.md

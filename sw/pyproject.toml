@@ -11,7 +11,6 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 test = ["pytest", "hypothesis"]
-board = ["pynq"]
 
 [tool.setuptools.packages.find]
 include = ["positnp*"]

@@ -1,7 +1,13 @@
 # overlays
 
-Pary `.bit` + `.hwh` o tej samej nazwie (PYNQ czyta `.hwh` obok `.bit`), jedna na format:
-`posit32_alu.bit`, `posit32_alu.hwh`, `posit8_alu.*`, ...
+Katalogi aplikacji PL dla `xmutil` (dfx-mgr), po jednym na format: `posit32_alu/`, `posit8_alu/`, ...
 
-Powstają w `hw/top-modules/alu/vivado/build.tcl`, który kopiuje je tutaj.
-Pliki binarne są poza gitem (`.gitignore`); na płytkę kopiuje się cały katalog `sw/`.
+| plik | |
+| --- | --- |
+| `<nazwa>.bit.bin` | bitstream dla `fpga_manager` |
+| `<nazwa>.dtsi` | overlay device tree (na płytce: `dtc` -> `.dtbo`) |
+| `shell.json` | typ aplikacji dla dfx-mgr |
+| `<nazwa>.json` | adres i rozmiar IP, zegar, wersja Vivado, WNS |
+
+Powstają w `hw/top-modules/alu/vivado/build.tcl`; na płytce instaluje je `sw/scripts/install_overlay.sh <nazwa>`
+(do `/lib/firmware/xilinx/<nazwa>/` i `xmutil loadapp`). Pliki są poza gitem (`.gitignore`).
