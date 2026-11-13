@@ -15,15 +15,25 @@ import posit.PositSimKit.Pair
 //  Dostepne w testach posit-kv260 i top-modules (test->test).
 // =====================================================================
 object AluSimKit {
-  /** Jedno polecenie ALU: kod operacji (PositAluOp) i argumenty. */
-  case class Cmd(op : Int, a : BigInt, b : BigInt)
+  /** Jedno polecenie ALU: kod operacji (PositAluOp) i argumenty (addend: FMA / AXPY). */
+  case class Cmd(op : Int, a : BigInt, b : BigInt, addend : BigInt = 0)
 
   def opOf(code : Int) : Option[PositOp] = PositAluOp.codes.collectFirst { case (op, `code`) => op }
 
-  /** Oczekiwany wynik: dla operacji spoza `ops` (albo nieznanego kodu) NaR z flaga nar. */
-  def expected(cfg : PositAluConfig, cmd : Cmd) : (BigInt, Int) = opOf(cmd.op).filter(cfg.has) match {
-    case Some(op) => val (r, f) = PositRef.withFlags(cfg.c, op, cmd.a, cmd.b); (r, f.bits)
-    case None     => (BigInt(1) << (cfg.c.n - 1), PositRef.Flags(nar = true).bits)
+  /** Oczekiwany wynik: dla operacji spoza cfg.opMask (albo nieznanego kodu) NaR z flaga nar. */
+  def expected(cfg : PositAluConfig, cmd : Cmd) : (BigInt, Int) = {
+    val c = cfg.c
+    val built = ((cfg.opMask >> cmd.op) & 1) == 1
+    val (r, f) =
+      if (!built) PositRef.round(c, None)
+      else cmd.op match {
+        case PositAluOp.SQRT                    => PositRef.sqrt(c, cmd.a)
+        case PositAluOp.FMA | PositAluOp.AXPY   => PositRef.fma(c, cmd.a, cmd.b, cmd.addend)
+        case PositAluOp.F2P                     => PositRef.fromFloat32(c, cmd.a)
+        case PositAluOp.P2F                     => PositRef.toFloat32(c, cmd.a)
+        case code                               => PositRef.withFlags(c, opOf(code).get, cmd.a, cmd.b)
+      }
+    (r, f.bits)
   }
 
   def cmds(op : PositOp, pairs : Iterator[Pair]) : Iterator[Cmd] = pairs.map { case (a, b) => Cmd(PositAluOp.code(op), a, b) }
@@ -62,6 +72,7 @@ object AluSimKit {
         p.op #= x.op
         p.a  #= x.a
         p.b  #= x.b
+        p.addend #= x.addend
         val (r, f) = expected(cfg, x)
         queue.enqueue((x, r, f))
         true
@@ -76,7 +87,7 @@ object AluSimKit {
       val gotF = (if (rsp.flags.nar.toBoolean) 1 else 0) | (if (rsp.flags.sat.toBoolean) 2 else 0) |
                  (if (rsp.flags.inexact.toBoolean) 4 else 0)
       assert(got == want && gotF == wantF,
-        f"${cfg.c} $label: op=${x.op} a=0x${x.a}%x b=0x${x.b}%x -> 0x$got%x flags=$gotF%03d, oczekiwane 0x$want%x flags=$wantF%03d (bity: nar=1 sat=2 inexact=4)")
+        f"${cfg.c} $label: op=${x.op} a=0x${x.a}%x b=0x${x.b}%x c=0x${x.addend}%x -> 0x$got%x flags=$gotF%03d, oczekiwane 0x$want%x flags=$wantF%03d (bity: nar=1 sat=2 inexact=4)")
       if ((gotF & 1) != 0) counts("nar") += 1
       if ((gotF & 2) != 0) counts("sat") += 1
       if ((gotF & 4) != 0) counts("inexact") += 1

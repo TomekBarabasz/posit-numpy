@@ -115,7 +115,7 @@ class PositAluAxiLiteTestplan extends TestplanSuite {
 
   testpoint("regs_python_match") {
     val path = "../../sw/positnp/regs.py"   // test forkowany z hw/posit-kv260
-    val Line = """^([A-Z_]+)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\b.*""".r
+    val Line = """^([A-Z][A-Z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\b.*""".r
     val py = Source.fromFile(path).getLines().collect { case Line(k, v) =>
       k -> (if (v.startsWith("0x")) java.lang.Long.parseLong(v.drop(2), 16) else v.toLong)
     }.toMap

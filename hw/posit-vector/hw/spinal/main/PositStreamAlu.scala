@@ -12,6 +12,8 @@ import posit._
 //
 //  - tablica (+) tablica: a i b z elementu strumienia; tablica (+) skalar
 //    (io.scalarB): b z io.b dla kazdego elementu,
+//  - FMA (etap 5): a * b + io.addend; AXPY: a * io.b + b ze strumienia
+//    (y = alfa * x + y: x w polowie a, y w polowie b, alfa w OPERAND_B),
 //  - `last` przechodzi z wejscia na wyjscie przy tym samym elemencie
 //    (S2MM w AXI DMA konczy transfer na tlast),
 //  - sciezka rejestrowa (pojedyncze dzialania z etapu 1) dzieli ALU ze
@@ -33,6 +35,7 @@ class PositStreamAlu(val cfg : PositAluConfig, tagDepth : Int = 8) extends Compo
     val op      = in UInt(PositAluOp.width bits)   // operacja dla strumienia
     val scalarB = in Bool()                         // tablica (+) skalar: b = io.b
     val b       = in Bits(c.n bits)
+    val addend  = in Bits(cfg.c.n bits)             // FMA: a * b + io.addend; AXPY: a * io.b + b ze strumienia
 
     val reg     = slave(Stream(PositAluCmd(c)))
     val regRsp  = master(Stream(PositAluRsp(c)))
@@ -59,9 +62,11 @@ class PositStreamAlu(val cfg : PositAluConfig, tagDepth : Int = 8) extends Compo
   }
   val fromIn = io.input ~~ { x =>
     val t = Tagged()
+    val axpy = io.op === PositAluOp.AXPY
     t.cmd.op         := io.op
     t.cmd.a          := x.fragment.a
-    t.cmd.b          := Mux(io.scalarB, io.b, x.fragment.b)
+    t.cmd.b          := Mux(io.scalarB || axpy, io.b, x.fragment.b)
+    t.cmd.addend     := Mux(axpy, x.fragment.b, io.addend)
     t.tag.fromStream := True
     t.tag.last       := x.last
     t

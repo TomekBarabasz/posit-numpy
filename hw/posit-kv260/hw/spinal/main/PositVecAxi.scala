@@ -25,6 +25,11 @@ import posit.vector._
 //  Quire nie jest niszczony odczytem: tablice dluzsze niz jeden transfer
 //  DMA akumuluja sie dalej. CNT_ELEMENTS liczy tez elementy quire.
 //
+//  Etap 5 (wersja 4.0): OP = SQRT / FMA / AXPY / F2P / P2F w ALU (gdy
+//  zbudowane, PositAluConfig.sqrt/fma/convert): FMA = a * b + OPERAND_C,
+//  AXPY = a * OPERAND_B + b (y = alfa x + y w jednym przebiegu strumienia),
+//  F2P / P2F: float32 <-> posit32. Ktore sa zbudowane: CONFIG.opMask.
+//
 //  Mapa rejestrow: PositVecRegs (= PositAluRegs + rozszerzenia),
 //  w Pythonie sw/positnp/regs.py. Porty: s_axi_*, s_axis_*, m_axis_*, aclk, aresetn.
 // =====================================================================
@@ -50,7 +55,15 @@ object PositVecRegs {
   val CONFIG_HAS_QUIRE  = 13
   val REDUCE_MASK = (1 << OP_SUM) | (1 << OP_DOT) | (1 << OP_SUMSQ)
 
-  val VERSION = 0x0300           // 3.0
+  // etap 5: sqrt, FMA / AXPY, konwersje float32 (kody w PositAluOp)
+  val OPERAND_C = 0x58  // RW  [n-1:0] trzeci argument FMA (a * b + c)
+  val OP_SQRT   = PositAluOp.SQRT
+  val OP_FMA    = PositAluOp.FMA
+  val OP_AXPY   = PositAluOp.AXPY
+  val OP_F2P    = PositAluOp.F2P
+  val OP_P2F    = PositAluOp.P2F
+
+  val VERSION = 0x0400           // 4.0
 
   def idVersion : Long = (ID.toLong << 16) | VERSION
   def config(cfg : PositAluConfig) : Long =
@@ -65,7 +78,9 @@ object PositVecRegs {
     "QUIRE_CFG" -> QUIRE_CFG, "QUIRE" -> QUIRE, "OP_SUM" -> OP_SUM, "OP_DOT" -> OP_DOT, "OP_SUMSQ" -> OP_SUMSQ,
     "CTRL_QUIRE_CLEAR" -> CTRL_QUIRE_CLEAR, "CTRL_QUIRE_ROUND" -> CTRL_QUIRE_ROUND,
     "STATUS_QUIRE_BUSY" -> STATUS_QUIRE_BUSY, "STATUS_QUIRE_NAR" -> STATUS_QUIRE_NAR,
-    "CONFIG_HAS_QUIRE" -> CONFIG_HAS_QUIRE)
+    "CONFIG_HAS_QUIRE" -> CONFIG_HAS_QUIRE,
+    "OPERAND_C" -> OPERAND_C, "OP_SQRT" -> OP_SQRT, "OP_FMA" -> OP_FMA, "OP_AXPY" -> OP_AXPY,
+    "OP_F2P" -> OP_F2P, "OP_P2F" -> OP_P2F)
 }
 
 class PositVecAxi(val cfg : PositAluConfig) extends Component {
@@ -117,10 +132,12 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   val aReg      = Reg(Bits(c.n bits)) init 0
   val bReg      = Reg(Bits(c.n bits)) init 0
   val streamCfg = Reg(Bits(1 bits)) init 0
+  val cReg      = Reg(Bits(c.n bits)) init 0
   bus.driveAndRead(opReg, OP)
   bus.driveAndRead(aReg, OPERAND_A)
   bus.driveAndRead(bReg, OPERAND_B)
   bus.driveAndRead(streamCfg, STREAM_CFG)
+  bus.driveAndRead(cReg, OPERAND_C)
 
   // ---- silnik: miekki reset przerywa dzialanie i oproznia potok -----------------------
   val core = new ResetArea(softReset, cumulative = true) {
@@ -133,6 +150,7 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   engine.io.op      := opReg
   engine.io.scalarB := streamCfg(STREAM_CFG_SCALAR_B)
   engine.io.b       := bReg
+  engine.io.addend  := cReg
 
   // AXI4-Stream wejscie: {b, a}; OP sum/dot/sumsq -> quire, reszta -> ALU
   val reduce = opReg === OP_SUM || opReg === OP_DOT || opReg === OP_SUMSQ
@@ -210,6 +228,7 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
       cmd.op   := opReg
       cmd.a    := aReg
       cmd.b    := bReg
+      cmd.addend := cReg
     }
   }
   when(softReset) {

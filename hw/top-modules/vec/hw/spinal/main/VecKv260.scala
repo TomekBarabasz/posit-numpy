@@ -17,7 +17,8 @@ import posit.kv260._
 // =====================================================================
 object VecKv260 {
   def config(n : Int = 32, es : Int = 2, k : Int = 4) : PositAluConfig =
-    PositAluConfig(PositConfig(n, es), PositOp.all, divBitsPerCycle = k, pipe = PositPipeline.full)
+    PositAluConfig(PositConfig(n, es), PositOp.all, divBitsPerCycle = k, pipe = PositPipeline.full,
+                   sqrt = true, fma = true, convert = n == 32 && es == 2)
 
   def main(args : Array[String]) : Unit = {
     val cfg = args.map(_.toInt) match {
