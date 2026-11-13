@@ -217,7 +217,7 @@ class PositAlu(val cfg : PositAluConfig) extends Component {
       cfg.sqrt generate iterative(isCode(d.op, PositAluOp.SQRT), PositSqrt.prepare(d.a, cfg.sqrtSteps),
         (s : PositSqrtState) => PositSqrt.steps(s, k), cfg.sqrtSteps / k, PositSqrt.finish),
       cfg.fma generate iterative(isCode(d.op, PositAluOp.FMA) || isCode(d.op, PositAluOp.AXPY),
-        PositFma.prepare(d.a, d.b, d.d), (s : PositFmaState) => s, 1, PositFma.finish)
+        PositFma.prepare(d.a, d.b, d.d), PositFma.align, 1, PositFma.finish)   // takt: prepare | align | add + normalizacja
     ).filter(_ != null)
 
     if (slow.nonEmpty) {

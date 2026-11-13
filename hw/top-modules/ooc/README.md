@@ -122,8 +122,14 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`, konfiguracja jak bitstream (`Ve
 | `vec_p32` | impl | 6 550 | 3 423 | 278 | 8 | 0 | 0,516 | 105,4 |
 
 - Koszt etapu 5 w posit32 (względem przebiegu kontrolnego niżej): +1 540 LUT (+31%), +390 FF, +52 CARRY8, 0 DSP.
-- Timing: 100 MHz trzymane, ale zapas spadł do ok. 0,5 ns (było 1,1–1,8 ns), w posit16 ze 139 do 104 MHz —
-  nowa ścieżka krytyczna weszła razem z sqrt / FMA. Do ustalenia z `out/vec_p*/PositVecAxi/timing_impl.rpt`.
+- Timing: 100 MHz trzymane, ale zapas spadł do ok. 0,5 ns (było 1,1–1,8 ns), w posit16 ze 139 do 104 MHz.
+  Ścieżka krytyczna (`timing_impl.rpt`, 35 poziomów logiki, 9,5 ns): koniec FMA w jednym takcie — porównanie
+  modułów, przesunięcie wyrównujące, sumator 2F + 5 b, LZC, normalizacja, sticky (`opStage_out_rData_u_sticky`).
+  **Poprawione:** `PositFma.align` w kroku ścieżki iteracyjnej (zamiast pustego), więc wyrównanie i dodawanie
+  są w osobnych taktach; FMA nadal 3 takty / element, +ok. 130 FF. Wyniki po poprawce — do powtórzenia.
+- Naruszenia hold (−0,13 ns, 260 punktów) to artefakt OOC: wejścia `s_axi_*` z `set_input_delay 0` idą prosto
+  do przerzutników. W układzie sterują nimi rejestry interkonektu, więc w `build.tcl` ich nie ma; tabela
+  ocenia tylko setup.
 
 ### Etap 5, przebieg kontrolny: `PositVecAxi` 4.0 bez nowych operacji (2026-11-13)
 
