@@ -119,3 +119,24 @@ Przepustowość jednego `array_op` na 4 194 304 elementach (pakowanie, synchroni
 - Dla add silnik i DMA zajmują ok. 40 ms z ok. 400 ms; resztę zabiera strona PS (rzutowania i pakowanie `{b, a}`
   w NumPy, synchronizacja cache na 48 MB bufora, kopia wyniku). To jest pierwsze miejsce do przyspieszenia, nie sprzęt.
 - Dla div ograniczeniem jest już dzielnik iteracyjny (10 M/s), a narzut PS dokłada się do niego.
+
+### Po zmianach w `array_op` z etapu 3 (2026-11-13)
+
+Bity bez kopii, pakowanie dwiema kopiami z krokiem, synchronizacja cache osobno dla wejścia i wyniku.
+Ten sam test, czasy faz z `PositVecHw.last_timing` (4 194 304 elementy):
+
+| | M elementów / s | pakowanie | sync przed | DMA + silnik | sync po | kopia wyniku | razem |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| add | 25,4 (było 10,6) | 82,9 ms | 5,5 ms | 42,1 ms | 1,9 ms | 31,5 ms | 164 ms |
+| div | 8,4 (było 5,8) | 57,9 ms | 5,5 ms | 419,5 ms | 2,3 ms | 15,6 ms | 501 ms |
+| `PositSw` (vecops) na A53, add | 0,55 | | | | | | |
+| NumPy float32 na A53, add | 211 | | | | | | |
+
+- DMA i silnik działają dokładnie z przewidywaną prędkością: add 42 ms = 1 element / takt przy 100 MHz,
+  div 420 ms = 10 taktów / element. Sprzęt nie ma tu nic do oddania.
+- Synchronizacja cache jest tania (7 ms na 48 MB).
+- Dla add ok. 70% czasu to procesor: pakowanie `{b, a}` (zapisy z krokiem 8 B, ok. 400 MB/s na A53) i kopia
+  wyniku. Usunie je dopiero własny master AXI4 z etapu 6, który czyta `a` i `b` z dwóch osobnych tablic
+  (bez pakowania) i może pisać wynik od razu do bufora użytkownika. Wcześniej da się zyskać do ok. 1,5×,
+  nakładając pakowanie kolejnej porcji na DMA bieżącej (podwójny bufor).
+- Sprzęt jest ok. 46 × szybszy od `PositSw` na tym samym A53; float32 w NumPy wciąż ok. 8 × szybszy od sprzętu.
