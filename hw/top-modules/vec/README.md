@@ -72,6 +72,11 @@ OP, `quire_clear`, MM2S porcjami, czekanie na CNT_ELEMENTS, `quire_round`, STATU
 Synteza poza kontekstem (`top-modules/ooc`, `vec_p32`): 5 090 LUT, 3 010 FF, 8 DSP, 122 MHz po routingu —
 quire nie zmienił Fmax silnika (szczegóły w `hw/top-modules/ooc/README.md`).
 
+Na płytce (2026-11-13, `posit32_vec` 3.0): iloczyn skalarny z quire na 4 194 304 elementach — **41,1 M elementów / s**
+(NumPy float32 `np.dot`, BLAS: 244 M / s). Redukcja nie ma S2MM ani kopii wyniku, więc jest szybsza niż
+operacje element po elemencie (add: 25,4 M / s); silnik i DMA biorą 42 ms (1 element / takt), resztę
+z ok. 100 ms zabiera pakowanie `{b, a}` po stronie procesora.
+
 **Bitstream z etapu 2 nie ma quire** — trzeba go zbudować od nowa (te same kroki niżej); `PositVecHw.reduce`
 sprawdza `CONFIG.has_quire` i bez niego zgłasza błąd.
 
