@@ -1,5 +1,7 @@
 """PositArray: operators, broadcasting, level 0, NaR semantics, NumPy protocols, backends, stats."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -95,8 +97,6 @@ def test_ufuncs_and_functions():
     assert np.concatenate([x, y]).shape == (6,) and np.stack([x, y]).shape == (2, 3)
     assert np.where(x > 0, x, y).to_float().tolist() == [1.0, 0.5, 4.0]
     assert np.argsort(x).tolist() == [1, 0, 2] and np.array_equal(x, x.copy())
-    with pytest.raises(TypeError, match="stage 4"):
-        np.sum(x)
     with pytest.raises(TypeError, match="stage 7"):
         np.sin(x)
     with pytest.raises(TypeError):
@@ -135,3 +135,87 @@ def test_rsub_is_negated_sub_exhaustive_p8():
     c = pn.P8
     a, b = np.meshgrid(np.arange(256), np.arange(256), indexing="ij")
     assert np.array_equal(vecops.op(c, "sub", b, a).bits, vecops.neg(c, vecops.op(c, "sub", a, b).bits))
+
+
+# ---- quire reductions (stage 4) ----------------------------------------------------------------
+
+from fractions import Fraction  # noqa: E402
+
+from positnp import ref  # noqa: E402
+
+
+def _val(c, bits):
+    d = ref.decode(c, int(bits))
+    return Fraction(d[0]) * Fraction(2) ** d[1]
+
+
+def _neighbours(c, r):
+    """Values of r and the posits just below and above it (in posit order), skipping NaR."""
+    s = int(vecops.to_signed(c, [r])[0])
+    out = []
+    for t in (s - 1, s, s + 1):
+        b = t & c.mask
+        if b != c.nar and -(1 << (c.n - 1)) < t < (1 << (c.n - 1)):
+            out.append(_val(c, b))
+    return out
+
+
+def test_sum_is_exact():
+    x = pn.array([1e8, 1.0, -1e8])
+    assert float(np.sum(x)) == 1.0                                   # float32 / naive posit: 0
+    assert float(np.sum(np.array([1e8, 1.0, -1e8], np.float32))) == 0.0
+    rnd = np.random.default_rng(0)
+    a = pn.from_bits(rnd.integers(0, 1 << 32, 2000))
+    a = pn.from_bits(np.where(a.isnar(), 0, a.bits))
+    exact = sum(_val(pn.P32, b) for b in a.bits.tolist())
+    r = int(np.sum(a).bits)
+    assert r == ref.quire_round(pn.P32, int(exact * (1 << pn.P32.quire_frac)))[0]
+
+
+def test_sum_axis_and_dot():
+    a = pn.array(np.arange(12.0).reshape(3, 4))
+    assert np.array_equal(np.sum(a, axis=0).to_float(), [12, 15, 18, 21])
+    assert np.array_equal(a.sum(axis=1).to_float(), [6, 22, 38])
+    v = pn.array([1.0, 2.0, 3.0])
+    assert float(np.dot(v, v)) == 14.0 and float(v.dot([1, 1, 1])) == 6.0
+    with pytest.raises(TypeError, match="stage 7"):
+        np.dot(a, a)
+
+
+@pytest.mark.parametrize("c", [pn.P16, pn.P32])
+def test_mean_and_norm_correctly_rounded(c):
+    rnd = np.random.default_rng(c.n)
+    for size in (1, 3, 10, 257):
+        x = pn.array(rnd.standard_normal(size) * 10, c)
+        exact_sum = sum(_val(c, b) for b in x.bits.tolist())
+        m = int(np.mean(x).bits)
+        target = exact_sum / size
+        assert abs(_val(c, m) - target) == min(abs(v - target) for v in _neighbours(c, m))
+        sq = sum(_val(c, b) ** 2 for b in x.bits.tolist())
+        r = int(np.linalg.norm(x).bits)
+        vals = _neighbours(c, r)
+        v = _val(c, r)
+        lo = max((u for u in vals if u < v), default=None)
+        hi = min((u for u in vals if u > v), default=None)
+        assert lo is None or ((lo + v) / 2) ** 2 <= sq        # sqrt(sq) is not closer to the posit below
+        assert hi is None or ((v + hi) / 2) ** 2 >= sq        # nor to the one above
+
+
+def test_reductions_hw_equals_sw_and_quire():
+    c = pn.P32
+    x = pn.array(np.random.default_rng(5).standard_normal(3000), c)
+    y = pn.array(np.random.default_rng(6).standard_normal(3000), c)
+    want = (np.sum(x), np.dot(x, y), np.mean(x), np.linalg.norm(x), pn.quire(x, y))
+    hw = fake_hw(c)
+    with pn.using(hw):
+        got = (np.sum(x), np.dot(x, y), np.mean(x), np.linalg.norm(x), pn.quire(x, y))
+        assert hw.stats()["elements"] == 4 * 3000 + 3000
+    for g, w in zip(got[:4], want[:4]):
+        assert g.equal_bits(w)
+    assert got[4] == want[4] and isinstance(got[4], Fraction)
+
+
+def test_reduction_nar():
+    x = pn.array([1.0, np.nan, 2.0])
+    assert np.isnan(float(np.sum(x))) and np.isnan(float(np.mean(x))) and np.isnan(float(np.linalg.norm(x)))
+    assert math.isnan(pn.quire(x))

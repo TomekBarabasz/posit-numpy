@@ -259,3 +259,63 @@ def neg(c: PositConfig, bits) -> np.ndarray:
 def absolute(c: PositConfig, bits) -> np.ndarray:
     s = to_signed(c, bits)
     return np.abs(s) & c.mask          # |NaR| = NaR (the minimum maps to itself)
+
+
+# ---- quire (stage 4) ---------------------------------------------------------------------------
+
+LIMB = 16
+
+
+def quire(c: PositConfig, mode: str, a, b=None):
+    """Exact sum of terms (sum: a, dot: a*b, sumsq: a*a) as a Python int in quire units; (q, nar).
+
+    Vectorised and exact: every term (a 2F+2 bit product at a bit position in the quire) is cut
+    into 16-bit limbs, the limbs of all terms are summed per position with np.bincount (float64
+    sums of integers below 2**53 are exact for up to 2**37 terms), and the positions are joined
+    with Python integers at the end.
+    """
+    _check(c)
+    from .ref import QUIRE_MODES
+    if mode not in QUIRE_MODES:
+        raise ValueError(f"quire mode {mode!r}, expected one of {QUIRE_MODES}")
+    da = decode(c, np.asarray(a).ravel())
+    if mode == "sum":
+        F = frac_bits(c)
+        db = Decoded(np.zeros_like(da.nar), np.zeros_like(da.zero), np.zeros_like(da.sign),
+                     np.zeros_like(da.scale), np.full_like(da.sig, 1 << F))
+    elif mode == "sumsq":
+        db = da
+    else:
+        db = decode(c, np.asarray(b).ravel())
+    nar = bool((da.nar | db.nar).any())
+    if nar:
+        return 0, True
+    F = frac_bits(c)
+    live = ~(da.zero | db.zero)
+    prod = (da.sig * db.sig)[live]                                  # 2F + 2 bits, exact
+    pos = (da.scale + db.scale)[live] + c.quire_frac - 2 * F        # bit position of the product's LSB
+    sign = np.where((da.sign ^ db.sign)[live], -1.0, 1.0)
+    low = pos < 0                                                   # trailing zeros below the quire LSB
+    prod = np.where(low, prod >> np.where(low, -pos, 0), prod)
+    pos = np.where(low, 0, pos)
+    base, off = pos // LIMB, pos % LIMB
+    nlimbs = c.quire_width(64) // LIMB + 8
+    acc = np.zeros(nlimbs)
+    mask = (1 << LIMB) - 1
+    for t in range((2 * F + 2 + LIMB - 1) // LIMB):
+        piece = (prod >> (LIMB * t)) & mask                         # 16-bit slice of the product
+        shifted = piece << off                                      # < 2**31
+        idx = base + t
+        acc += np.bincount(idx, weights=sign * (shifted & mask), minlength=nlimbs)[:nlimbs]
+        acc += np.bincount(idx + 1, weights=sign * (shifted >> LIMB), minlength=nlimbs)[:nlimbs]
+    q = 0
+    for i in range(nlimbs - 1, -1, -1):
+        q = (q << LIMB) + int(acc[i])
+    return q, False
+
+
+def quire_round(c: PositConfig, q: int, nar: bool) -> Rounded:
+    from . import ref
+    bits, f = ref.quire_round(c, q, nar)
+    return Rounded(np.array([bits]), np.array([f.nar]), np.array([f.sat]), np.array([f.inexact]))
+

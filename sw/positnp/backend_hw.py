@@ -363,6 +363,55 @@ class PositVecHw(PositAluHw):
         s["elements"] = self.read(regs.CNT_ELEMENTS)
         return s
 
+    def has_quire(self) -> bool:
+        return bool(self.read(regs.CONFIG) >> regs.CONFIG_HAS_QUIRE & 1)
+
+    def reduce(self, mode: str, a, b=None):
+        """Quire reduction on the FPGA: (bits, Flags, q, nar), q the exact quire as an int.
+
+        sum: a, dot: a*b, sumsq: a*a. Only MM2S runs (no results on the stream); the engine
+        accumulates every chunk into the same quire, then one CTRL.quire_round.
+        """
+        if mode not in regs.REDUCE:
+            raise ValueError(f"quire mode {mode!r}, expected one of {tuple(regs.REDUCE)}")
+        if not self.has_quire():
+            raise PositAluError("this bitstream has no quire (stage 4, PositVecAxi 3.0)")
+        av = self._bits(a)
+        bv = self._bits(b) if mode == "dot" else None
+        if bv is not None and bv.size != av.size:
+            raise ValueError(f"a has {av.size} elements, b {bv.size}")
+        self.write(regs.OP, regs.REDUCE[mode])
+        self.write(regs.CTRL, 1 << regs.CTRL_QUIRE_CLEAR)
+        before = self.read(regs.CNT_ELEMENTS)
+        step = max(1, min(self.buf.size // self.in_bytes, DMA_MAX_LENGTH // self.in_bytes))
+        for i in range(0, av.size, step):
+            k = min(step, av.size - i)
+            pairs = self.buf.view(self.out_dtype, 0, 2 * k).reshape(k, 2)
+            pairs[:, 0] = av[i:i + k]
+            if bv is not None:
+                pairs[:, 1] = bv[i:i + k]
+            self.buf.sync_for_device(0, k * self.in_bytes, 1)
+            self.dma.start_mm2s(self.buf.phys_addr, k * self.in_bytes)
+            self.dma.wait_mm2s()
+        # MM2S done = data left memory; wait until the engine took every element
+        for _ in range(self.timeout_polls):
+            if (self.read(regs.CNT_ELEMENTS) - before) & 0xFFFFFFFF >= av.size:
+                break
+        else:
+            raise PositAluError(f"quire took {(self.read(regs.CNT_ELEMENTS) - before) & 0xFFFFFFFF} "
+                                f"of {av.size} elements")
+        self.write(regs.CTRL, 1 << regs.CTRL_QUIRE_ROUND)
+        st = self._wait_done()
+        bits = self.read(regs.RESULT) & self.config.mask
+        flags = Flags.from_bits(st >> regs.STATUS_FLAGS_SHIFT & 7)
+        nar = bool(st >> regs.STATUS_QUIRE_NAR & 1)
+        width = self.read(regs.QUIRE_CFG) & 0xFFFF
+        raw = 0
+        for k in range(width // 32 - 1, -1, -1):
+            raw = (raw << 32) | self.read(regs.QUIRE + 4 * k)
+        q = 0 if nar else ref.quire_from_raw(self.config, raw)
+        return bits, flags, q, nar
+
     def time_array(self, name: str = "add", size: int = 1 << 20) -> float:
         """Elements per second for one array_op on `size` random elements (DMA, packing and copies included)."""
         rnd = np.random.default_rng(0)

@@ -17,7 +17,8 @@ sw/                     bindingi Pythona (positnp): ref.py, regs.py, backend_hw.
 Stan:
 - etap 1 (ALU za AXI4-Lite, wywołanie z Pythona): sprawdzony na płytce — `hw/top-modules/alu/README.md`;
 - etap 2 (tablice przez AXI4-Stream i AXI DMA): sprawdzony na płytce — `hw/top-modules/vec/README.md`;
-- etap 3 (`PositArray` z protokołami NumPy, `vecops`, konwersje, `stats()`, notatnik): `sw/README.md`.
+- etap 3 (`PositArray` z protokołami NumPy, `vecops`, konwersje, `stats()`, notatnik): sprawdzony na płytce — `sw/README.md`;
+- etap 4 (quire: dokładne `sum`, `dot`, `mean`, `norm`): w symulacji i na atrapach — `hw/top-modules/vec/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

@@ -36,13 +36,41 @@ def entries():
             yield pytest.param(int(n), int(es), name, kind, int(count), digest, id=f"p{n}_{es}_{name}_{kind}")
 
 
+QUIRE_OPS = {"qsum": "sum", "qdot": "dot", "qsumsq": "sumsq"}
+
+
+def quire_vectors(n, es, kind, count):
+    """Pairs split into vectors of length 1, 2, ..., 37, 1, 2, ... (RefDigest.quireVectors)."""
+    it = iter(list(pairs(n, es, kind, count)))
+    i = 0
+    while True:
+        v = [p for _, p in zip(range(1 + i % 37), it)]
+        if not v:
+            return
+        yield v
+        i += 1
+
+
+def quire_line(c, mode, vec, accumulate):
+    a = [x for x, _ in vec]
+    b = [y for _, y in vec]
+    q, nar = accumulate(c, mode, a, b)
+    r, f = ref.quire_round(c, q, nar)
+    raw = "nar" if nar else f"{ref.quire_raw(c, q):x}"
+    return f"{r:x} {f.bits} {raw}\n"
+
+
 @pytest.mark.parametrize("n,es,name,kind,count,digest", list(entries()))
 def test_digest_matches_scala(n, es, name, kind, count, digest):
     c = PositConfig(n, es)
     md = hashlib.sha256()
-    for a, b in pairs(n, es, kind, count):
-        r, f = ref.op(c, name, a, b)
-        md.update(f"{r:x} {f.bits}\n".encode("ascii"))
+    if name in QUIRE_OPS:
+        for vec in quire_vectors(n, es, kind, count):
+            md.update(quire_line(c, QUIRE_OPS[name], vec, ref.quire_accumulate).encode("ascii"))
+    else:
+        for a, b in pairs(n, es, kind, count):
+            r, f = ref.op(c, name, a, b)
+            md.update(f"{r:x} {f.bits}\n".encode("ascii"))
     assert md.hexdigest() == digest
 
 

@@ -102,3 +102,47 @@ def test_throughput(hw, sw):
     print("\n" + "\n".join(f"{k:>20}: {v / 1e6:9.3f} M elem/s" for k, v in rows))
     for name, t in phases.items():
         print(f"hw {name}, {size} elements: " + ", ".join(f"{k} {v * 1e3:.1f} ms" for k, v in t.items()))
+
+
+# ---- stage 4: quire ---------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mode", ["sum", "dot", "sumsq"])
+@pytest.mark.parametrize("size", (1, 2, 3, 1000, 1_000_001))
+def test_reduce_matches_sw(hw, sw, mode, size):
+    if not hw.has_quire():
+        pytest.skip("bitstream without quire (stage 4)")
+    rnd = np.random.default_rng(size + len(mode))
+    a = rnd.integers(0, 1 << hw.config.n, size)
+    b = rnd.integers(0, 1 << hw.config.n, size)
+    assert hw.reduce(mode, a, b) == sw.reduce(mode, a, b)
+
+
+def test_quire_cancellation_on_hw(hw):
+    if not hw.has_quire():
+        pytest.skip("bitstream without quire (stage 4)")
+    import positnp as pn
+    with pn.using(hw):
+        x = pn.array([1e8, 1.0, -1e8], hw.config)
+        assert float(np.sum(x)) == 1.0
+        v = pn.array(np.random.default_rng(1).standard_normal(100_000), hw.config)
+        assert np.linalg.norm(v).equal_bits(_sw_norm(v))
+
+
+def _sw_norm(v):
+    import positnp as pn
+    with pn.using(None):
+        return np.linalg.norm(v)
+
+
+def test_reduce_throughput(hw):
+    if not hw.has_quire():
+        pytest.skip("bitstream without quire (stage 4)")
+    size = 1 << 22
+    a = np.random.default_rng(0).integers(0, 1 << hw.config.n, size).astype(hw.out_dtype)
+    t0 = time.perf_counter()
+    hw.reduce("dot", a, a)
+    dt = time.perf_counter() - t0
+    f = np.random.default_rng(0).random(size, dtype=np.float32)
+    t1 = time.perf_counter()
+    np.dot(f, f)
+    print(f"\nquire dot hw: {size / dt / 1e6:.2f} M elem/s; numpy float32 dot: {size / (time.perf_counter() - t1) / 1e6:.1f} M elem/s")

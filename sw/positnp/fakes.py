@@ -29,6 +29,8 @@ class FakeVecMmio(FakeAluMmio):
         super().__init__(config, ops, busy_reads)
         self.regs[regs.STREAM_CFG] = 0
         self.counters["elements"] = 0
+        self.quire, self.quire_nar = 0, False
+        self.quire_raw = 0
 
     def read(self, offset: int) -> int:
         if offset == regs.ID_VERSION:
@@ -36,10 +38,17 @@ class FakeVecMmio(FakeAluMmio):
             return regs.ID << 16 | regs.VERSION_VEC
         if offset == regs.CONFIG:
             self.log.append(("r", offset))
-            return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM
+            reduce_mask = sum(1 << v for v in regs.REDUCE.values())
+            return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | reduce_mask << 16
         if offset == regs.CNT_ELEMENTS:
             self.log.append(("r", offset))
             return self.counters["elements"]
+        if offset == regs.QUIRE_CFG:
+            return self.config.quire_frac << 16 | self.config.quire_width()
+        if regs.QUIRE <= offset < regs.QUIRE + self.config.quire_width() // 8:
+            return (self.quire_raw >> (8 * (offset - regs.QUIRE))) & 0xFFFFFFFF
+        if offset == regs.STATUS:
+            return super().read(offset) | int(self.quire_nar) << regs.STATUS_QUIRE_NAR
         return super().read(offset)
 
     def write(self, offset: int, value: int) -> None:
@@ -49,7 +58,33 @@ class FakeVecMmio(FakeAluMmio):
             return
         if offset == regs.CTRL and value >> regs.CTRL_CLEAR_COUNTERS & 1:
             self.counters["elements"] = 0
+        if offset == regs.CTRL and value >> regs.CTRL_QUIRE_CLEAR & 1:
+            self.quire, self.quire_nar = 0, False
+        if offset == regs.CTRL and value >> regs.CTRL_QUIRE_ROUND & 1:
+            r, f = ref.quire_round(self.config, self.quire, self.quire_nar)
+            self.regs[regs.RESULT] = r
+            self.flags = f.bits
+            for k in ("nar", "sat", "inexact"):
+                self.counters[k] += getattr(f, k)
+            self.quire_raw = ref.quire_raw(self.config, self.quire)
+            self.done, self.error, self.busy = True, False, False
+            return
+        if offset == regs.OP:
+            self.log.append(("w", offset, value))
+            self.regs[offset] = value & 0xF
+            return
         super().write(offset, value)
+
+    def is_reduce(self) -> bool:
+        return self.regs[regs.OP] in regs.REDUCE.values()
+
+    def process_quire(self, words: np.ndarray) -> None:
+        n = self.config.n
+        mode = next(k for k, v in regs.REDUCE.items() if v == self.regs[regs.OP])
+        a = [w & self.config.mask for w in words.tolist()]
+        b = [(w >> n) & self.config.mask for w in words.tolist()]
+        self.quire, self.quire_nar = ref.quire_accumulate(self.config, mode, a, b, self.quire, self.quire_nar)
+        self.counters["elements"] += len(words)
 
     def process_stream(self, words: np.ndarray) -> np.ndarray:
         """{b, a} words -> results with the current OP / STREAM_CFG / OPERAND_B, like PositStreamAlu."""
@@ -113,6 +148,12 @@ class FakeDma:
         nbytes = self.r[d.MM2S_LENGTH]
         if nbytes % in_b:
             raise AssertionError(f"MM2S length {nbytes} not a multiple of the {in_b}-byte word")
+        if self.vec.is_reduce() and self.fault is None:
+            in_dtype = {8: np.uint16, 16: np.uint32, 32: np.uint64}[n]
+            src = self.r[d.MM2S_SA] - self.mem.phys_addr
+            self.vec.process_quire(np.frombuffer(self.mem.memory, in_dtype, nbytes // in_b, src))
+            self.r[d.MM2S_DMASR] |= d.SR_IOC | d.SR_IDLE
+            return
         if self.fault == "hang" or not self.s2mm_armed:
             return  # no IOC: the driver must time out
         if self.fault == "slverr":

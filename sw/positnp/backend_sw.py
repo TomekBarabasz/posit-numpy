@@ -52,6 +52,19 @@ class PositSw:
         self._count(r)
         return r.bits.astype(self.dtype)
 
+    def reduce(self, mode: str, a, b=None):
+        """Quire reduction (sum: a, dot: a*b, sumsq: a*a), one rounding: (bits, Flags, q, nar).
+
+        q is the exact quire (int, units of 2**-quire_frac), as PositVecHw.reduce returns it.
+        """
+        q, nar = vecops.quire(self.config, mode, a, b)
+        bits, f = ref.quire_round(self.config, q, nar)
+        self._stats["nar"] += f.nar
+        self._stats["sat"] += f.sat
+        self._stats["inexact"] += f.inexact
+        self._stats["elements"] += int(np.size(a))
+        return bits, f, q, nar
+
     def _count(self, r: vecops.Rounded) -> None:
         self._stats["nar"] += int(r.nar.sum())
         self._stats["sat"] += int(r.sat.sum())

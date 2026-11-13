@@ -38,6 +38,40 @@ Mapa z etapu 1 (`hw/top-modules/alu/README.md`) plus:
 ID_VERSION = `0x5053_0200`. Liczniki NaR / sat / inexact liczą wyniki obu ścieżek; CYCLES — takty z czymkolwiek w ALU.
 `posit.kv260.PositVecRegs` = stałe etapu 2 w `sw/positnp/regs.py` (sprawdza `PositVecAxiTestplan.vec_regs_python_match`).
 
+## Etap 4: quire (wersja 3.0)
+
+`PositQuire` (posit-vector) w tym samym IP: OP = SUM / DOT / SUMSQ kieruje `s_axis` do akumulatora quire
+zamiast do ALU. Quire to liczba stałopozycyjna w U2 o szerokości 16 n (512 b dla posit32), LSB = minpos²,
+więc każda suma iloczynów positów jest w nim dokładna, a zaokrąglenie jest jedno, przy odczycie.
+
+```
+s_axis {b, a} --> dekoder --> iloczyn (DSP) --> wyrównanie --> akumulator 8 x 64 b + rejestry przeniesień
+                                                                  |  CTRL.quire_round
+                                                                  v
+                                       moduł (segmentowo) -> wiodąca jedynka -> enkoder -> RESULT + flagi
+```
+
+- 1 element / takt; przeniesienia między segmentami 64 b idą przez rejestry (sumator 64 b zamiast 512 b),
+  quire ustala się sam w ≤ 7 taktów po ostatnim elemencie; odczyt zajmuje ok. 9 taktów;
+- odczyt nie niszczy quire: kolejne transfery DMA dodają się dalej, zeruje `CTRL.quire_clear`;
+- NaR w dowolnym elemencie: wynik NaR (`STATUS.quire_nar`) do zerowania;
+- redukcja nie wysyła nic na `m_axis`: w DMA działa tylko MM2S.
+
+| offset | rejestr | |
+| --- | --- | --- |
+| 0x10 | OP | 4 SUM (Σa), 5 DOT (Σa·b), 6 SUMSQ (Σa·a) |
+| 0x08 | CTRL | bit 3 `quire_clear`, bit 4 `quire_round` (wynik w RESULT, flagi w STATUS[10:8], STATUS.done) |
+| 0x0C | STATUS | bit 4 `quire_busy`, bit 5 `quire_nar` |
+| 0x04 | CONFIG | bit 13 `has_quire`, maska operacji z bitami 4–6 |
+| 0x54 | QUIRE_CFG | [15:0] szerokość quire, [31:16] quireFrac |
+| 0x80 + 4k | QUIRE[k] | słowo k surowego quire (U2), od najmłodszego |
+
+ID_VERSION = `0x5053_0300`. CNT_ELEMENTS liczy też elementy quire. Sekwencja w `PositVecHw.reduce`:
+OP, `quire_clear`, MM2S porcjami, czekanie na CNT_ELEMENTS, `quire_round`, STATUS.done, RESULT i QUIRE[k].
+
+**Bitstream z etapu 2 nie ma quire** — trzeba go zbudować od nowa (te same kroki niżej); `PositVecHw.reduce`
+sprawdza `CONFIG.has_quire` i bez niego zgłasza błąd.
+
 ## Krok po kroku
 
 1. RTL (z `hw/`):
@@ -96,6 +130,8 @@ Jak w etapie 1 (zegar PL0, reset, AFI, węzły UIO), plus:
 | --- | --- | --- |
 | silnik | `posit-vector/.../PositStreamAluTestplan` | tablice o losowych długościach, `last`, tablica ⊕ skalar, przeplot z rejestrami, przepustowość |
 | IP | `posit-kv260/.../PositVecAxiTestplan` | AXI4-Lite + AXI4-Stream jak z AXI DMA, długości 1, 2, 3, 1000, liczniki, miękki reset, nazwy portów |
+| quire | `posit-vector/.../PositQuireTestplan` | wszystkie pary posit8 jako wektory dł. 1, losowe posit16/32, znoszenie się, przeniesienia przez cały quire, NaR, kontynuacja, permutacja, 200k × maxpos² — wynik, flagi i surowy quire kontra `QuireRef` |
+| quire w IP | `posit-kv260/.../PositVecQuireTestplan` | sum/dot/sumsq przez AXI4-Lite + AXI4-Stream, kontynuacja, NaR, przeplot z tablicami |
 | sterownik | `sw/tests/test_vec_fake.py` | `PositVecHw` na atrapach rejestrów, DMA i bufora: porcjowanie, protokół cache, błędy DMA |
 | płytka | `sw/tests/test_board_vec.py` | długości 1 … 1 000 001, wszystkie operacje kontra `ref.py`, tablica ⊕ skalar, liczniki, przepustowość |
 
