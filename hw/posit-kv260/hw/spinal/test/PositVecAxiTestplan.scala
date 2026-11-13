@@ -36,7 +36,7 @@ object PositVecAxiPlan {
 
     Testpoint("vec_id_config", Stage.V1,
       "ID_VERSION i CONFIG etapu 2",
-      checking = Seq("ID_VERSION == 0x50530300", "CONFIG: n, es, maska operacji (z sum/dot/sumsq), bity HAS_STREAM i HAS_QUIRE")),
+      checking = Seq("ID_VERSION == 0x50530400", "CONFIG: n, es, maska operacji (z sum/dot/sumsq), bity HAS_STREAM i HAS_QUIRE")),
 
     Testpoint("vec_arrays", Stage.V1,
       "Tablice przez AXI4-Stream jak z AXI DMA",
@@ -138,7 +138,7 @@ class PositVecAxiTestplan extends TestplanSuite {
   // ---- bez symulacji --------------------------------------------------------------
 
   testpoint("vec_regs_python_match") {
-    val Line = """^([A-Z_]+)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\b.*""".r
+    val Line = """^([A-Z][A-Z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\b.*""".r
     val py = Source.fromFile("../../sw/positnp/regs.py").getLines().collect { case Line(k, v) =>
       k -> (if (v.startsWith("0x")) java.lang.Long.parseLong(v.drop(2), 16) else v.toLong)
     }.toMap
@@ -166,7 +166,7 @@ class PositVecAxiTestplan extends TestplanSuite {
 
   testpoint("vec_id_config") {
     run(vec16, "vec_id_config") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530300L, f"ID_VERSION = 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == 0x50530400L, f"ID_VERSION = 0x${e.rd(ID_VERSION)}%x")
       val w = e.rd(CONFIG)
       assert((w & 0xff) == 16 && ((w >> 8) & 0xf) == 2 && (w >> 16) == 0x7f && ((w >> CONFIG_HAS_STREAM) & 1) == 1 &&
              ((w >> PositVecRegs.CONFIG_HAS_QUIRE) & 1) == 1, f"CONFIG = 0x$w%x")

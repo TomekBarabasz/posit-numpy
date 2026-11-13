@@ -97,6 +97,36 @@ def test_input_validation():
         hw.array_op("add", np.array([1.5]), np.array([1.0]))
     with pytest.raises(ValueError):
         hw.array_op("add", [1, 2], [1])
-    with pytest.raises(PositAluError):
-        make(16, ops=("add",)).array_op("div", [1], [1])
+    only_add = make(16, ops=("add",))              # missing operation: PositSw, counted in stats()
+    assert only_add.array_op("div", [0x4800], [0x4000]).tolist() == [0x4800]
+    assert only_add.stats()["fallback"] == 1
     assert hw.array_op("add", [], []).size == 0
+
+
+# ---- stage 5 ------------------------------------------------------------------------------------
+
+def test_stage5_ops_match_sw():
+    hw = make(32)
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(5)
+    a, b, c = (rnd.integers(0, 1 << 32, 700) for _ in range(3))
+    s = int(rnd.integers(0, 1 << 32))
+    assert np.array_equal(hw.array_op("sqrt", a, scalar=0), sw.array_op("sqrt", a))
+    assert np.array_equal(hw.array_op("f2p", a, scalar=0), sw.array_op("f2p", a))
+    assert np.array_equal(hw.array_op("p2f", a, scalar=0), sw.array_op("p2f", a))
+    assert np.array_equal(hw.array_op("fma", a, b, c=s), sw.array_op("fma", a, b, c=s))          # OP_FMA
+    assert np.array_equal(hw.array_op("fma", a, scalar=s, c=c), sw.array_op("fma", a, scalar=s, c=c))  # OP_AXPY
+    assert hw.stats()["fallback"] == 0
+    assert hw.read(regs.OP) == regs.OP_AXPY
+    assert np.array_equal(hw.array_op("fma", a, b, c=c), sw.array_op("fma", a, b, c=c))          # 3 arrays: sw
+    assert hw.stats()["fallback"] == 700
+
+
+def test_stage5_absent_falls_back():
+    from positnp.backend_hw import PositVecHw
+    mem = FakeUDmaBuf(1 << 16)
+    vec = FakeVecMmio(PositConfig(16), stage5=False)
+    hw = PositVecHw(vec, FakeDma(mem, vec), mem)
+    a = np.arange(1, 100)
+    assert np.array_equal(hw.array_op("sqrt", a, scalar=0), PositSw(hw.config).array_op("sqrt", a))
+    assert hw.stats()["fallback"] == 99 and vec.counters["elements"] == 0

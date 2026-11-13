@@ -143,6 +143,7 @@ class PositAluAxiLite(val cfg : PositAluConfig) extends Component {
       cmd.op   := opReg
       cmd.a    := aReg
       cmd.b    := bReg
+      cmd.addend := 0
     }
   }
 

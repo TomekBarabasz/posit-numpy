@@ -219,3 +219,52 @@ def test_reduction_nar():
     x = pn.array([1.0, np.nan, 2.0])
     assert np.isnan(float(np.sum(x))) and np.isnan(float(np.mean(x))) and np.isnan(float(np.linalg.norm(x)))
     assert math.isnan(pn.quire(x))
+
+
+# ---- stage 5: sqrt, fma, float32 ---------------------------------------------------------------
+
+def test_sqrt_matches_ref_and_nar():
+    c = pn.P16
+    x = pn.from_bits(np.arange(1 << 16), c)
+    r = np.sqrt(x)
+    want = [ref.sqrt(c, v)[0] for v in range(1 << 16)]
+    assert r.bits.astype(np.int64).tolist() == want
+    assert np.isnan(float(np.sqrt(pn.array(-4.0)))) and float(np.sqrt(pn.array(9.0))) == 3.0
+
+
+def test_fma_single_rounding_and_routes():
+    c = pn.P32
+    rnd = np.random.default_rng(3)
+    a, b, y = (pn.array(rnd.standard_normal(2000) * 1e3, c) for _ in range(3))
+    s = pn.array(0.75, c)
+    want = [ref.fma(c, int(p), int(q), int(r))[0] for p, q, r in zip(a.bits, b.bits, y.bits)]
+    assert pn.fma(a, b, y).bits.astype(np.int64).tolist() == want
+    assert (pn.fma(a, b, y).bits != (a * b + y).bits).any()          # single rounding differs somewhere
+    hw = fake_hw(c)
+    with pn.using(hw):
+        assert pn.fma(a, b, 1.5).equal_bits(pn.fma(a, b, pn.array(1.5, c)))
+        got_axpy = pn.axpy(s, a, y)                                  # OP_AXPY, one stream pass
+        assert hw.stats()["fallback"] == 0
+        got3 = pn.fma(a, b, y)                                       # three arrays: PositSw
+        assert hw.stats()["fallback"] == 2000
+    assert got_axpy.equal_bits(pn.fma(a, s, y)) and got3.bits.astype(np.int64).tolist() == want
+
+
+def test_float32_conversions():
+    f = np.array([0.0, -0.0, 1.0, -2.5, np.nan, np.inf, -np.inf, 1e-45, 3.4e38, 1e-38, 0.1], np.float32)
+    x = pn.array(f)
+    assert x.bits[4] == x.bits[5] == x.bits[6] == pn.P32.nar
+    back = x.to_float32()
+    assert back.dtype == np.float32 and np.isnan(back[4])
+    assert back[:4].tolist() == [0.0, 0.0, 1.0, -2.5] and back[10] == np.float32(0.1)
+    hw = fake_hw(pn.P32)
+    rnd = np.random.default_rng(9)
+    g = rnd.integers(0, 1 << 32, 5000, dtype=np.uint64).astype(np.uint32).view(np.float32)
+    want_p = pn.array(g)
+    want_f = want_p.to_float32()
+    with pn.using(hw):
+        got_p = pn.array(g)
+        got_f = got_p.to_float32()
+        assert hw.stats()["elements"] == 10000                       # F2P and P2F ran on the "hardware"
+    assert got_p.equal_bits(want_p) and np.array_equal(got_f.view(np.uint32), want_f.view(np.uint32))
+    assert x.astype(np.float64).dtype == np.float64

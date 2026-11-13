@@ -103,6 +103,56 @@ object PositRef {
   }
 
   def apply(c: PositConfig, op: PositOp, a: BigInt, b: BigInt): BigInt = withFlags(c, op, a, b)._1
+
+  // ---- etap 5: sqrt, FMA, konwersje float32 --------------------------------------------------
+
+  /** Correctly rounded square root; negative -> NaR. */
+  def sqrt(c: PositConfig, a: BigInt): (BigInt, Flags) = decode(c, a) match {
+    case None                    => round(c, None)
+    case Some(d) if d.m == 0     => (BigInt(0), Flags())
+    case Some(d) if d.m < 0      => round(c, None)
+    case Some(d) =>
+      val (m, e) = if ((d.e & 1) != 0) (d.m << 1, d.e - 1) else (d.m, d.e)   // even exponent
+      val extra  = 64 + c.n
+      val big    = m << (2 * extra)
+      val r      = BigInt(big.bigInteger.sqrt())
+      round(c, Some(Dyadic(r, e / 2 - extra)), inexact = r * r != big)
+  }
+
+  /** a * b + d with one rounding. */
+  def fma(c: PositConfig, a: BigInt, b: BigInt, d: BigInt): (BigInt, Flags) =
+    (decode(c, a), decode(c, b), decode(c, d)) match {
+      case (Some(x), Some(y), Some(z)) => round(c, Some(x * y + z))
+      case _                           => round(c, None)
+    }
+
+  /** IEEE float32 bits -> exact value (None for NaN and infinities). */
+  def float32(bits: BigInt): Option[Dyadic] = {
+    val b    = bits.toLong & 0xffffffffL
+    val sign = (b >> 31) & 1
+    val e    = ((b >> 23) & 0xff).toInt
+    val f    = b & 0x7fffff
+    if (e == 0xff) None
+    else {
+      val (m, ex) = if (e == 0) (BigInt(f), -149) else (BigInt(f | (1L << 23)), e - 150)
+      Some(Dyadic(if (sign == 1) -m else m, ex))
+    }
+  }
+
+  /** float32 -> posit, one rounding; NaN, inf -> NaR. */
+  def fromFloat32(c: PositConfig, bits: BigInt): (BigInt, Flags) = round(c, float32(bits))
+
+  /** posit -> float32 bits, round to nearest even (via the exact double); NaR -> quiet NaN.
+    * Flags: nar for NaR, inexact when the float differs from the posit. */
+  def toFloat32(c: PositConfig, a: BigInt): (BigInt, Flags) = decode(c, a) match {
+    case None    => (BigInt(0x7fc00000L), Flags(nar = true))
+    case Some(d) =>
+      require(d.m.bitLength <= 53, s"$c: posit wider than a double")
+      val v = Math.scalb(d.m.toDouble, d.e)                   // exact for n <= 32 (BigDecimal.pow(-e) is not)
+      val f = v.toFloat                                       // one RNE rounding
+      val bits = BigInt(java.lang.Float.floatToRawIntBits(f).toLong & 0xffffffffL)
+      (bits, Flags(inexact = f.toDouble != v))
+  }
 }
 
 /** Exact quire model: an unbounded integer in units of 2^-quireFrac (minpos^2), NaR as a flag.

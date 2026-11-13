@@ -1,7 +1,7 @@
 """Register maps of the posit engine.
 
 Stage 1 (PositAluAxiLite, version 1.0): mirror of posit.kv260.PositAluRegs.
-Stage 2-4 (PositVecAxi, version 3.0): the same map plus the stream and quire additions below,
+Stage 2-5 (PositVecAxi, version 4.0): the same map plus the stream, quire and stage 5 additions below,
 mirror of posit.kv260.PositVecRegs. PositAluAxiLiteTestplan / PositVecAxiTestplan
 fail when Scala and this file differ, so change both together.
 """
@@ -56,8 +56,17 @@ STATUS_QUIRE_BUSY = 4
 STATUS_QUIRE_NAR = 5
 CONFIG_HAS_QUIRE = 13
 
-VERSION_VEC = 0x0300
+# ---- stage 5: sqrt, FMA / AXPY, float32 conversions (PositVecAxi, version 4.0) ----------------
+OPERAND_C = 0x58      # RW  [n-1:0] third operand of FMA: a * b + c
+OP_SQRT = 7           # sqrt(a)
+OP_FMA = 8            # a * b + OPERAND_C
+OP_AXPY = 9           # a * OPERAND_B + b (stream): y = alpha * x + y in one pass
+OP_F2P = 10           # a = float32 bits -> posit32
+OP_P2F = 11           # posit32 -> float32 bits
+
+VERSION_VEC = 0x0400
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
+STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}
 
 # Flag bits as in STATUS[10:8] >> STATUS_FLAGS_SHIFT and in ref.Flags.bits.
 FLAG_NAR = 1

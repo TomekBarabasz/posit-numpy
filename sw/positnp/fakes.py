@@ -25,9 +25,12 @@ from .udmabuf import FakeUDmaBuf
 class FakeVecMmio(FakeAluMmio):
     """PositVecAxi registers: stage 1 map plus STREAM_CFG, CNT_ELEMENTS, version 2.0."""
 
-    def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1):
+    def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1,
+                 stage5: bool = True):
         super().__init__(config, ops, busy_reads)
+        self.stage5 = ("sqrt", "fma", "axpy") + (("f2p", "p2f") if config.n == 32 else ()) if stage5 else ()
         self.regs[regs.STREAM_CFG] = 0
+        self.regs[regs.OPERAND_C] = 0
         self.counters["elements"] = 0
         self.quire, self.quire_nar = 0, False
         self.quire_raw = 0
@@ -39,7 +42,8 @@ class FakeVecMmio(FakeAluMmio):
         if offset == regs.CONFIG:
             self.log.append(("r", offset))
             reduce_mask = sum(1 << v for v in regs.REDUCE.values())
-            return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | reduce_mask << 16
+            s5 = sum(1 << regs.STAGE5[n] for n in self.stage5)
+            return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | (reduce_mask | s5) << 16
         if offset == regs.CNT_ELEMENTS:
             self.log.append(("r", offset))
             return self.counters["elements"]
@@ -55,6 +59,10 @@ class FakeVecMmio(FakeAluMmio):
         if offset == regs.STREAM_CFG:
             self.log.append(("w", offset, value))
             self.regs[offset] = value & 1
+            return
+        if offset == regs.OPERAND_C:
+            self.log.append(("w", offset, value))
+            self.regs[offset] = value & self.config.mask
             return
         if offset == regs.CTRL and value >> regs.CTRL_CLEAR_COUNTERS & 1:
             self.counters["elements"] = 0
@@ -97,7 +105,19 @@ class FakeVecMmio(FakeAluMmio):
             a, b = w & self.config.mask, (w >> n) & self.config.mask
             if scalar_b:
                 b = self.regs[regs.OPERAND_B]
-            if name is None:
+            s5 = {v: k for k, v in regs.STAGE5.items() if k in self.stage5}.get(code)
+            c = self.regs[regs.OPERAND_C]
+            if s5 == "sqrt":
+                r, f = ref.sqrt(self.config, a)
+            elif s5 == "fma":
+                r, f = ref.fma(self.config, a, b, c)
+            elif s5 == "axpy":                        # a * OPERAND_B + b (stream)
+                r, f = ref.fma(self.config, a, self.regs[regs.OPERAND_B], b)
+            elif s5 == "f2p":
+                r, f = ref.from_float32(self.config, a)
+            elif s5 == "p2f":
+                r, f = ref.to_float32(self.config, a)
+            elif name is None:
                 r, f = self.config.nar, ref.Flags(nar=True)
             else:
                 r, f = ref.op(self.config, name, a, b)

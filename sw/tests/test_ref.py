@@ -37,6 +37,26 @@ def entries():
 
 
 QUIRE_OPS = {"qsum": "sum", "qdot": "dot", "qsumsq": "sumsq"}
+STAGE5_OPS = ("sqrt", "fma", "f2p", "p2f")
+
+
+def stage5_values(n, kind, count, name):
+    """RefDigest.values: all n-bit values ("one") or LCG values (fma: triples)."""
+    k = 3 if name == "fma" else 1
+    if kind == "one":
+        return list(range(1 << n))
+    flat = [v for ab in lcg(n, int(kind[3:]), (count * k + 1) // 2) for v in ab]
+    return flat[:count * k]
+
+
+def stage5_ref(c, name, vals):
+    if name == "sqrt":
+        return [ref.sqrt(c, v) for v in vals]
+    if name == "fma":
+        return [ref.fma(c, *vals[i:i + 3]) for i in range(0, len(vals), 3)]
+    if name == "f2p":
+        return [ref.from_float32(c, v) for v in vals]
+    return [ref.to_float32(c, v) for v in vals]
 
 
 def quire_vectors(n, es, kind, count):
@@ -67,6 +87,9 @@ def test_digest_matches_scala(n, es, name, kind, count, digest):
     if name in QUIRE_OPS:
         for vec in quire_vectors(n, es, kind, count):
             md.update(quire_line(c, QUIRE_OPS[name], vec, ref.quire_accumulate).encode("ascii"))
+    elif name in STAGE5_OPS:
+        for r, f in stage5_ref(c, name, stage5_values(n, kind, count, name)):
+            md.update(f"{r:x} {f.bits}\n".encode("ascii"))
     else:
         for a, b in pairs(n, es, kind, count):
             r, f = ref.op(c, name, a, b)

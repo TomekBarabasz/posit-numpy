@@ -9,7 +9,7 @@ import pytest
 from positnp import ref, vecops
 from positnp.ref import PositConfig
 
-from test_ref import QUIRE_OPS, entries, lcg, quire_line, quire_vectors
+from test_ref import QUIRE_OPS, STAGE5_OPS, entries, lcg, quire_line, quire_vectors, stage5_values
 
 DIGEST_ENTRIES = list(entries())
 
@@ -25,6 +25,13 @@ def test_digest_matches_scala(n, es, name, kind, count, digest):
         md = hashlib.sha256()
         for vec in quire_vectors(n, es, kind, count):
             md.update(quire_line(c, QUIRE_OPS[name], vec, _vec_quire).encode("ascii"))
+        assert md.hexdigest() == digest
+        return
+    if name in STAGE5_OPS:
+        v = np.array(stage5_values(n, kind, count, name), dtype=np.int64)
+        r = {"sqrt": lambda: vecops.sqrt(c, v), "fma": lambda: vecops.fma(c, v[0::3], v[1::3], v[2::3]),
+             "f2p": lambda: vecops.from_float32(c, v), "p2f": lambda: vecops.to_float32(c, v)}[name]()
+        md = hashlib.sha256("".join(f"{x:x} {f}\n" for x, f in zip(r.bits.tolist(), r.flags.tolist())).encode("ascii"))
         assert md.hexdigest() == digest
         return
     if kind == "all":

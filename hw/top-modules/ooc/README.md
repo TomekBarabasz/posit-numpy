@@ -10,7 +10,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `full/` | `PositPipeline.full`: rejestry po dekoderze, operacji i enkoderze |
 | `div/` | dzielniki sekwencyjne: `Iterative(1)`, `Iterative(4)`, `Pipelined(4)` |
 | `alu_p16/`, `alu_p32/` | `PositAluAxiLite` z etapu 1 (k = 4, potok full), ta sama konfiguracja co `top-modules/alu` |
-| `vec_p16/`, `vec_p32/` | `PositVecAxi` z etapu 2 (rejestry + AXI4-Stream), ta sama konfiguracja co `top-modules/vec` |
+| `vec_p16/`, `vec_p32/` | `PositVecAxi` (rejestry, AXI4-Stream, quire, sqrt / FMA / konwersje), ta sama konfiguracja co `top-modules/vec` |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 
@@ -93,7 +93,49 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
 - Koszt quire posit32 względem `alu_p32`: ok. +3 600 LUT, +2 300 FF (dwa rejestry 512 b: akumulator i odczyt,
   plus potok) i +4 DSP (mnożarka 28 × 28 b w quire, osobna od ALU). Cały silnik to ok. 4,3% LUT układu.
 
-### Jednostki posit-core (2026-11-13)
+### Etap 5, przebieg kontrolny: `PositVecAxi` 4.0 bez nowych operacji (2026-11-13)
+
+Do tego przebiegu `OocUnits` generował `vec_p*` jeszcze bez `sqrt / fma / convert`, więc tabela pokazuje
+silnik z etapu 4 po przebudowie ALU (wspólna ścieżka iteracyjna, wynik surowy dla P2F), a nie koszt etapu 5.
+Wyniki z pełną konfiguracją są wyżej.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p16` | synth | 2 792 | 1 657 | 106 | 2 | 0 | 2,907 | 141,0 |
+| `vec_p16` | impl | 2 759 | 1 657 | 106 | 2 | 0 | 2,783 | 138,6 |
+| `vec_p32` | synth | 5 062 | 3 036 | 226 | 8 | 0 | 1,859 | 122,8 |
+| `vec_p32` | impl | 5 009 | 3 036 | 226 | 8 | 0 | 1,146 | 112,9 |
+
+- Zasoby jak w etapie 4 (±2%), czyli przebudowa ALU nic nie kosztuje, gdy nowe operacje są wyłączone.
+- `vec_p32` po routingu 113 MHz (było 122) przy lepszej syntezie (123 vs 120 MHz): to rozrzut place & route
+  na tej samej logice, nie nowa ścieżka. Zapas przy 100 MHz nadal 1,1 ns.
+
+### Silnik z etapu 5: `PositVecAxi` 4.0 z sqrt, FMA / AXPY i konwersjami (2026-11-13)
+
+Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`, konfiguracja jak bitstream (`VecKv260.config`; konwersje tylko w posit32).
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p16` | synth | 3 350 | 1 828 | 133 | 2 | 0 | 1,891 | 123,3 |
+| `vec_p16` | impl | 3 346 | 1 828 | 133 | 2 | 0 | 0,415 | 104,3 |
+| `vec_p32` | synth | 6 517 | 3 423 | 278 | 8 | 0 | 0,326 | 103,4 |
+| `vec_p32` | impl | 6 550 | 3 423 | 278 | 8 | 0 | 0,516 | 105,4 |
+
+- Koszt etapu 5 w posit32 (względem przebiegu kontrolnego niżej): +1 540 LUT (+31%), +390 FF, +52 CARRY8, 0 DSP.
+- Timing: 100 MHz trzymane, ale zapas spadł do ok. 0,5 ns (było 1,1–1,8 ns), w posit16 ze 139 do 104 MHz.
+  Ścieżka krytyczna (`timing_impl.rpt`, 35 poziomów logiki, 9,5 ns): koniec FMA w jednym takcie — porównanie
+  modułów, przesunięcie wyrównujące, sumator 2F + 5 b, LZC, normalizacja, sticky (`opStage_out_rData_u_sticky`).
+  **Poprawione:** `PositFma.align` w kroku ścieżki iteracyjnej (zamiast pustego), więc wyrównanie i dodawanie
+  są w osobnych taktach; FMA nadal 3 takty / element.
+  Po poprawce (`vec_p32`, impl): WNS 1,244 ns → **114,2 MHz** (było 105,4), +122 FF (3 551 przerzutników
+  według sprawdzenia szerokości impulsu). Ścieżka krytyczna (8,8 ns, 29 poziomów) to znów zwykłe dodawanie
+  `PositOps.add` (zamiana, wyrównanie, LZC, skala) z rejestru polecenia do `opStage_out` — ta sama co przed
+  etapem 5 (`alu_p32`: 120 MHz, etap 4: 113–122 MHz), więc etap 5 nie ogranicza już zegara.
+- Naruszenia hold (−0,13 ns, 260 punktów) to artefakt OOC: wejścia `s_axi_*` z `set_input_delay 0` idą prosto
+  do przerzutników. W układzie sterują nimi rejestry interkonektu, więc w `build.tcl` ich nie ma; tabela
+  ocenia tylko setup.
+
+### Etap 5, przebieg kontrolny: `PositVecAxi` 4.0 bez nowych operacji (2026-11-13)
 
 Vivado 2026.1, `xck26-sfvc784-2LV-c`, 100 MHz, `-impl` (cały zestaw z `OocUnits`, bez `vec_p*`).
 W tabeli wyniki po routingu, w ostatniej kolumnie Fmax z samej syntezy; komplet w `out/ooc_results.csv`.
