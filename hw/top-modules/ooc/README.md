@@ -76,6 +76,23 @@ i potokiem full, razem z rejestrami AXI4-Lite i licznikami.
   są oczekiwane: rejestry są wyrównane do słowa, bity ochrony nieużywane, `AxiLite4SlaveFactory` ignoruje
   `wstrb` (`backend_hw` zapisuje zawsze pełne słowo 32 b).
 
+### Silnik z etapu 4: `PositVecAxi` 3.0 z quire (2026-11-13)
+
+Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i quire (16 n bitów) razem z rejestrami AXI4-Lite.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p16` | synth | 2 790 | 1 641 | 106 | 2 | 0 | 2,884 | 140,5 |
+| `vec_p16` | impl | 2 762 | 1 641 | 106 | 2 | 0 | 2,673 | 136,5 |
+| `vec_p32` | synth | 5 143 | 3 010 | 226 | 8 | 0 | 1,694 | 120,4 |
+| `vec_p32` | impl | 5 090 | 3 010 | 226 | 8 | 0 | 1,816 | 122,2 |
+
+- Quire nie pogorszył timingu: `vec_p32` ma po routingu 122 MHz, tyle co samo ALU z etapu 1 (`alu_p32`: 120 MHz).
+  Segmenty 64 b z rejestrami przeniesień zdjęły z ścieżki krytycznej sumator 512 b, a przesuwnik wyrównujący
+  (~570 b) i odczyt (wybór segmentu, LZC 64 b) mieszczą się w jednym takcie.
+- Koszt quire posit32 względem `alu_p32`: ok. +3 600 LUT, +2 300 FF (dwa rejestry 512 b: akumulator i odczyt,
+  plus potok) i +4 DSP (mnożarka 28 × 28 b w quire, osobna od ALU). Cały silnik to ok. 4,3% LUT układu.
+
 ### Jednostki posit-core (2026-11-13)
 
 Vivado 2026.1, `xck26-sfvc784-2LV-c`, 100 MHz, `-impl` (cały zestaw z `OocUnits`, bez `vec_p*`).

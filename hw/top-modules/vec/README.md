@@ -69,6 +69,9 @@ s_axis {b, a} --> dekoder --> iloczyn (DSP) --> wyrównanie --> akumulator 8 x 6
 ID_VERSION = `0x5053_0300`. CNT_ELEMENTS liczy też elementy quire. Sekwencja w `PositVecHw.reduce`:
 OP, `quire_clear`, MM2S porcjami, czekanie na CNT_ELEMENTS, `quire_round`, STATUS.done, RESULT i QUIRE[k].
 
+Synteza poza kontekstem (`top-modules/ooc`, `vec_p32`): 5 090 LUT, 3 010 FF, 8 DSP, 122 MHz po routingu —
+quire nie zmienił Fmax silnika (szczegóły w `hw/top-modules/ooc/README.md`).
+
 **Bitstream z etapu 2 nie ma quire** — trzeba go zbudować od nowa (te same kroki niżej); `PositVecHw.reduce`
 sprawdza `CONFIG.has_quire` i bez niego zgłasza błąd.
 
