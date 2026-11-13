@@ -76,4 +76,58 @@ i potokiem full, razem z rejestrami AXI4-Lite i licznikami.
   są oczekiwane: rejestry są wyrównane do słowa, bity ochrony nieużywane, `AxiLite4SlaveFactory` ignoruje
   `wstrb` (`backend_hw` zapisuje zawsze pełne słowo 32 b).
 
-Jednostki posit-core (`comb`, `op`, `full`, `div`): do uzupełnienia.
+### Jednostki posit-core (2026-11-13)
+
+Vivado 2026.1, `xck26-sfvc784-2LV-c`, 100 MHz, `-impl` (cały zestaw z `OocUnits`, bez `vec_p*`).
+W tabeli wyniki po routingu, w ostatniej kolumnie Fmax z samej syntezy; komplet w `out/ooc_results.csv`.
+
+| wariant | moduł | LUT | FF | CARRY8 | DSP | WNS ns | Fmax MHz | 100 MHz | Fmax po syntezie |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: |
+| `comb` | `PositAdd_16_2` | 478 | 0 | 7 | 0 | 0,238 | 102,4 | ✓ | 84,1 |
+| `comb` | `PositAdd_32_2` | 999 | 0 | 26 | 0 | -4,050 | 71,2 | ✗ | 71,0 |
+| `comb` | `PositDiv_16_2` | 501 | 0 | 29 | 0 | -8,600 | 53,8 | ✗ | 52,5 |
+| `comb` | `PositDiv_32_2` | 2839 | 0 | 136 | 0 | -47,812 | 17,3 | ✗ | 21,0 |
+| `comb` | `PositMul_16_2` | 305 | 0 | 2 | 1 | 0,204 | 102,1 | ✓ | 101,7 |
+| `comb` | `PositMul_32_2` | 781 | 0 | 23 | 4 | -3,456 | 74,3 | ✗ | 79,6 |
+| `comb` | `PositSub_16_2` | 465 | 0 | 7 | 0 | -0,020 | 99,8 | ✗ | 84,9 |
+| `comb` | `PositSub_32_2` | 996 | 0 | 26 | 0 | -4,236 | 70,2 | ✗ | 72,0 |
+| `op` | `PositAdd_16_2` | 359 | 27 | 7 | 0 | 0,467 | 104,9 | ✓ | 112,6 |
+| `op` | `PositAdd_32_2` | 971 | 44 | 27 | 0 | 0,258 | 102,6 | ✓ | 91,6 |
+| `op` | `PositDiv_16_2` | 500 | 26 | 29 | 0 | -4,957 | 66,9 | ✗ | 61,5 |
+| `op` | `PositDiv_32_2` | 2848 | 43 | 136 | 0 | -34,948 | 22,2 | ✗ | 22,1 |
+| `op` | `PositMul_16_2` | 270 | 36 | 2 | 1 | 2,464 | 132,7 | ✓ | 163,1 |
+| `op` | `PositMul_32_2` | 707 | 69 | 23 | 4 | 0,462 | 104,8 | ✓ | 116,8 |
+| `op` | `PositSub_16_2` | 382 | 27 | 7 | 0 | 1,299 | 114,9 | ✓ | 109,6 |
+| `op` | `PositSub_32_2` | 1013 | 44 | 27 | 0 | 0,147 | 101,5 | ✓ | 92,7 |
+| `full` | `PositAdd_16_2` | 368 | 87 | 7 | 0 | 3,303 | 149,3 | ✓ | 153,1 |
+| `full` | `PositAdd_32_2` | 849 | 154 | 27 | 0 | 1,640 | 119,6 | ✓ | 134,3 |
+| `full` | `PositDiv_16_2` | 470 | 86 | 29 | 0 | -2,303 | 81,3 | ✗ | 75,3 |
+| `full` | `PositDiv_32_2` | 1911 | 153 | 136 | 0 | -23,708 | 29,7 | ✗ | 30,3 |
+| `full` | `PositMul_16_2` | 298 | 96 | 2 | 1 | 5,934 | 245,9 | ✓ | 312,9 |
+| `full` | `PositMul_32_2` | 690 | 146 | 23 | 4 | 3,742 | 159,8 | ✓ | 205,8 |
+| `full` | `PositSub_16_2` | 367 | 87 | 7 | 0 | 3,102 | 145,0 | ✓ | 153,1 |
+| `full` | `PositSub_32_2` | 848 | 154 | 27 | 0 | 1,687 | 120,3 | ✓ | 134,9 |
+| `div` | `PositDivIter1_16_2` | 311 | 54 | 5 | 0 | 4,985 | 199,4 | ✓ | 253,2 |
+| `div` | `PositDivIter1_32_2` | 671 | 104 | 24 | 0 | 3,631 | 157,0 | ✓ | 207,3 |
+| `div` | `PositDivIter4_16_2` | 344 | 55 | 11 | 0 | 4,653 | 187,0 | ✓ | 245,3 |
+| `div` | `PositDivIter4_32_2` | 524 | 42 | 20 | 0 | 3,749 | 160,0 | ✓ | 209,4 |
+| `div` | `PositDivPipe4_16_2` | 554 | 169 | 35 | 0 | 1,743 | 121,1 | ✓ | 133,6 |
+| `div` | `PositDivPipe4_32_2` | 2017 | 661 | 148 | 0 | 0,163 | 101,7 | ✓ | 110,4 |
+
+**Wnioski (decyzje etapu 0):**
+
+- **Domyślny potok: `PositPipeline.full`.** Add, sub i mul domykają 100 MHz w obu formatach z zapasem
+  (posit32: add/sub 120 MHz, mul 160 MHz). `op` (rejestr tylko po operacji) dla posit32 add/sub mieści się
+  o włos (WNS 0,15–0,26 ns), a `comb` nie domyka nic poza posit16 mul i add. Tak skonfigurowane jest już ALU
+  z etapów 1–2 (`alu_p32`: 120 MHz).
+- **Dzielenie kombinacyjne odpada w każdym potoku**: posit32 17–30 MHz, posit16 54–81 MHz. W silniku zostaje
+  dzielnik sekwencyjny.
+- **Dzielniki sekwencyjne:** `Iterative(1)` i `Iterative(4)` dla posit32 mają ok. 160 MHz przy ~520–670 LUT;
+  przy 100 MHz zostaje miejsce na więcej bitów ilorazu na takt (krótsze dzielenie niż obecne 10 taktów).
+  `Pipelined(4)` daje 1 dzielenie / takt, ale dla posit32 domyka 100 MHz ledwo (WNS 0,16 ns, ~2 000 LUT, 661 FF):
+  jeśli dzielenie na tablicach ma być szybsze, to raczej potok z mniejszym `k` (2–3 bity na etap).
+- **Synteza zawyża Fmax zwykle o ok. 10–30%** względem wyniku po routingu, a przy ścieżkach bliskich granicy potrafi
+  pomylić się w obie strony (posit16 add w `comb`: −1,9 ns po syntezie, +0,24 ns po routingu). Decyzje
+  podejmować na liczbach z `-impl`.
+- **Zasoby są pomijalne:** największa jednostka posit32 (dzielnik kombinacyjny) to ~2 800 LUT, ok. 2,4% układu;
+  mnożenie posit32 bierze 4 DSP z 1 248.
