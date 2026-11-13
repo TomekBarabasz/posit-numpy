@@ -180,7 +180,8 @@ synchronizacją cache i kopiami):
 
 **Bitstream z etapu 4 nie ma tych operacji** — trzeba go zbudować od nowa (te same kroki niżej).
 Synteza poza kontekstem (`top-modules/ooc`, `vec_p32`): 6 550 LUT (+31% względem etapu 4), 3 423 FF, 8 DSP,
-105 MHz po routingu — 100 MHz trzymane z zapasem ok. 0,5 ns.
+po rozdzieleniu wyrównania i dodawania w FMA 114 MHz po routingu (zapas 1,2 ns przy 100 MHz; ścieżka krytyczna
+to znów dodawanie z etapu 1). Szczegóły w `hw/top-modules/ooc/README.md`.
 
 ## Weryfikacja
 

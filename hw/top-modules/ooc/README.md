@@ -126,7 +126,11 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`, konfiguracja jak bitstream (`Ve
   Ścieżka krytyczna (`timing_impl.rpt`, 35 poziomów logiki, 9,5 ns): koniec FMA w jednym takcie — porównanie
   modułów, przesunięcie wyrównujące, sumator 2F + 5 b, LZC, normalizacja, sticky (`opStage_out_rData_u_sticky`).
   **Poprawione:** `PositFma.align` w kroku ścieżki iteracyjnej (zamiast pustego), więc wyrównanie i dodawanie
-  są w osobnych taktach; FMA nadal 3 takty / element, +ok. 130 FF. Wyniki po poprawce — do powtórzenia.
+  są w osobnych taktach; FMA nadal 3 takty / element.
+  Po poprawce (`vec_p32`, impl): WNS 1,244 ns → **114,2 MHz** (było 105,4), +122 FF (3 551 przerzutników
+  według sprawdzenia szerokości impulsu). Ścieżka krytyczna (8,8 ns, 29 poziomów) to znów zwykłe dodawanie
+  `PositOps.add` (zamiana, wyrównanie, LZC, skala) z rejestru polecenia do `opStage_out` — ta sama co przed
+  etapem 5 (`alu_p32`: 120 MHz, etap 4: 113–122 MHz), więc etap 5 nie ogranicza już zegara.
 - Naruszenia hold (−0,13 ns, 260 punktów) to artefakt OOC: wejścia `s_axi_*` z `set_input_delay 0` idą prosto
   do przerzutników. W układzie sterują nimi rejestry interkonektu, więc w `build.tcl` ich nie ma; tabela
   ocenia tylko setup.
