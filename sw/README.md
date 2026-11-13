@@ -6,7 +6,7 @@ x = pn.array(np.linspace(-2, 2, 5))          # posit<32,2>; pn.array(x, pn.P16) 
 y = x * x - x / 3 + 1                         # każdy operator = jedno array_op na backendzie
 np.sort(y), np.max(y), np.argmax(y), -y, abs(y), y < 0, y[1:3]
 y.to_float()                                  # float64, NaR -> nan
-with pn.using(PositVecHw.open()):             # KV260 (domyślnie PositSw na vecops)
+with pn.using(PositVecHw.open(32)):           # KV260, silnik posit32 (domyślnie PositSw na vecops)
     z = x * x
 pn.stats()                                    # NaR / nasycenia / niedokładne / elementy
 np.sum(x), np.dot(x, y), np.mean(x), np.linalg.norm(x)   # quire: dokładnie, jedno zaokrąglenie
@@ -36,7 +36,8 @@ a testy porównują oba. Bez PYNQ: na płytce Ubuntu z `xmutil`, rejestry przez 
 positnp/
   ref.py           model referencyjny z flagami (port PositRef ze Scali)       etap 1
   regs.py          mapa rejestrów ALU (= posit.kv260.PositAluRegs)             etap 1
-  backend_hw.py    PositAluHw (etap 1) i PositVecHw (etap 2: tablice przez DMA)
+  backend_hw.py    PositAluHw (etap 1) i PositVecHw (etap 2: tablice przez DMA; vec_engines(),
+                   open(n), open_all(), close() dla bitstreamów z kilkoma silnikami)
                    na UioMmio (/dev/uioN); FakeAluMmio do testów bez płytki     etap 1-2
   dma.py           AXI DMA w trybie prostym (PG021) przez UIO                  etap 2
   udmabuf.py       bufor ciągły z modułu u-dma-buf, synchronizacja cache        etap 2

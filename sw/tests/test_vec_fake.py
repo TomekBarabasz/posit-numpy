@@ -130,3 +130,50 @@ def test_stage5_absent_falls_back():
     a = np.arange(1, 100)
     assert np.array_equal(hw.array_op("sqrt", a, scalar=0), PositSw(hw.config).array_op("sqrt", a))
     assert hw.stats()["fallback"] == 99 and vec.counters["elements"] == 0
+
+
+# ---- several engines in one overlay: discovery, selection, close ------------------------------------
+
+def _uio_tree(tmp_path, names):
+    for i, nm in enumerate(names):
+        (tmp_path / f"uio{i}").mkdir()
+        (tmp_path / f"uio{i}" / "name").write_text(nm + "\n")
+    return tmp_path
+
+
+def test_vec_engines_found_by_name(tmp_path, monkeypatch):
+    from positnp import backend_hw as bh
+    monkeypatch.setattr(bh, "UIO_CLASS", _uio_tree(tmp_path, [
+        "posit_dma_p8", "posit_vec_p8", "posit_vec_p32", "posit_dma_p32", "posit_vec_p16", "posit_dma_p16", "other"]))
+    es = bh.vec_engines()
+    assert [(e.name, e.dma, e.buf, e.n) for e in es] == [
+        ("posit_vec_p32", "posit_dma_p32", "udmabuf-posit-p32", 32),
+        ("posit_vec_p16", "posit_dma_p16", "udmabuf-posit-p16", 16),
+        ("posit_vec_p8", "posit_dma_p8", "udmabuf-posit-p8", 8)]
+    assert bh.select_engine(es, 16).n == 16
+    with pytest.raises(PositAluError, match="posit_vec_p32, posit_vec_p16, posit_vec_p8"):
+        bh.select_engine(es)                       # several: n is needed
+    with pytest.raises(PositAluError, match="no posit<12>"):
+        bh.select_engine(es, 12)
+
+
+def test_vec_engines_legacy_overlay(tmp_path, monkeypatch):
+    from positnp import backend_hw as bh
+    monkeypatch.setattr(bh, "UIO_CLASS", _uio_tree(tmp_path, ["posit_vec", "posit_dma"]))
+    es = bh.vec_engines()
+    assert [(e.name, e.dma, e.buf, e.n) for e in es] == [("posit_vec", "posit_dma", "udmabuf-posit", None)]
+    assert bh.select_engine(es) is es[0] and bh.select_engine(es, 32) is es[0]   # format checked after open
+    monkeypatch.setattr(bh, "UIO_CLASS", tmp_path / "missing")
+    with pytest.raises(PositAluError, match="overlay loaded"):
+        bh.select_engine(bh.vec_engines())
+
+
+def test_close_is_idempotent_and_blocks_use():
+    hw = make()
+    a = np.arange(10)
+    assert hw.array_op("add", a, a).size == 10
+    with hw:
+        pass                                       # __exit__ closes
+    hw.close()
+    with pytest.raises(PositAluError, match="closed"):
+        hw.array_op("add", a, a)

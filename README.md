@@ -90,12 +90,13 @@ scripts/install_overlay.sh posit32_alu           # na KV260, z sw/
 sudo python3 -m pytest -v tests/test_board.py    # na KV260, z sw/
 ```
 
-## etap 2 na płytce
+## silniki na tablicach na płytce (etap 2+)
+Jeden albo kilka formatów w jednym bitstreamie (`-engines`, szczegóły w `hw/top-modules/vec/README.md`):
 ```
-sbt "top-vec/runMain posit.top.vec.VecKv260"     # z hw/
-vivado -mode batch -nojournal -log build.log -source build.tcl    # z hw/top-modules/vec/vivado
+sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"                                  # z hw/
+vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"   # z hw/top-modules/vec/vivado
 scripts/build_udmabuf.sh                         # na KV260, z sw/, raz na jądro
-scripts/install_overlay.sh posit32_vec           # na KV260, z sw/
+scripts/install_overlay.sh posit32_16_8_vec      # na KV260, z sw/
 sudo python3 -m pytest -v -s tests/test_board_vec.py
 ```
 

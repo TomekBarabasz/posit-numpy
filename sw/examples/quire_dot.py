@@ -71,7 +71,7 @@ def main() -> None:
     args = ap.parse_args()
     if args.hw:
         from positnp.backend_hw import PositVecHw
-        pn.set_backend(PositVecHw.open())
+        pn.set_backend(PositVecHw.open(32))
     rows = experiment()
     names = list(rows[0][2])
     print(f"{'cond':>10}  " + "  ".join(f"{k:>18}" for k in names) + "   (relative error vs exact)")

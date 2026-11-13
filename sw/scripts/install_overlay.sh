@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Instalacja i wgranie aplikacji PL na KV260 (Ubuntu + xmutil / dfx-mgr), bez PYNQ.
 #
-#   sw/scripts/install_overlay.sh [nazwa]        domyslnie posit32_alu; etap 2: posit32_vec
+#   sw/scripts/install_overlay.sh [nazwa]        domyslnie posit32_alu; silniki: posit32_vec, posit32_16_8_vec, ...
 #   sw/scripts/install_overlay.sh --unload       zdejmuje biezaca aplikacje
 #
 # Zrodlo: sw/positnp/overlays/<nazwa>/ z build.tcl (.bit.bin, .dtsi, shell.json, .json).
 # Kroki: dtc .dtsi -> .dtbo, kopia do /lib/firmware/xilinx/<nazwa>/, xmutil unloadapp,
-# xmutil loadapp <nazwa>, sprawdzenie urzadzen z <nazwa>.json: /dev/uioN dla "ip"
-# (i "dma"), /dev/<udmabuf> dla bufora DMA (modul u-dma-buf: build_udmabuf.sh).
+# xmutil loadapp <nazwa>, sprawdzenie urzadzen z <nazwa>.json: /dev/uioN dla rejestrow i DMA
+# kazdego silnika, /dev/<udmabuf> dla jego bufora DMA (modul u-dma-buf: build_udmabuf.sh).
 # Wymaga: dtc (apt install device-tree-compiler), xmutil, sudo.
 set -euo pipefail
 
@@ -37,12 +37,21 @@ sudo rm -f "$FW/$name"/*
 sudo cp "$src/$name.bit.bin" "$tmp/$name.dtbo" "$src/shell.json" "$FW/$name/"
 [[ -f "$src/$name.json" ]] && sudo cp "$src/$name.json" "$FW/$name/"
 
-# nazwy urzadzen z <nazwa>.json (bez jq: python3)
-json_get() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ''))" "$src/$name.json" "$1" 2>/dev/null || true; }
-UIO_NAMES="$(json_get ip) $(json_get dma)"
+# nazwy urzadzen z <nazwa>.json (bez jq: python3): "engines" (silniki PositVecAxi, kazdy z DMA
+# i buforem) albo starsze pola "ip" / "dma" / "udmabuf" na najwyzszym poziomie
+json_names() {
+    python3 - "$src/$name.json" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+keys = {"uio": ("ip", "dma"), "buf": ("udmabuf",)}[sys.argv[2]]
+items = d.get("engines") or [d]
+print(" ".join(e[k] for e in items for k in keys if e.get(k)))
+PY
+}
+UIO_NAMES=$(json_names uio)
 [[ -n "${UIO_NAMES// /}" ]] || UIO_NAMES=posit_alu
-UDMABUF=$(json_get udmabuf)
-if [[ -n "$UDMABUF" ]]; then
+UDMABUFS=$(json_names buf)
+if [[ -n "$UDMABUFS" ]]; then
     sudo modprobe u-dma-buf || { echo "brak modulu u-dma-buf: scripts/build_udmabuf.sh" >&2; exit 1; }
 fi
 
@@ -66,14 +75,14 @@ for want in $UIO_NAMES; do
     done
     if [[ -n "$dev" ]]; then echo "ok: $want -> $dev"; else echo "brak /dev/uio* o nazwie $want" >&2; ok=0; fi
 done
-if [[ -n "$UDMABUF" ]]; then
-    s=/sys/class/u-dma-buf/$UDMABUF
-    if [[ -e /dev/$UDMABUF ]]; then
-        echo "ok: /dev/$UDMABUF ($(cat $s/size) B @ $(cat $s/phys_addr))"
+for buf in $UDMABUFS; do
+    s=/sys/class/u-dma-buf/$buf
+    if [[ -e /dev/$buf ]]; then
+        echo "ok: /dev/$buf ($(cat $s/size) B @ $(cat $s/phys_addr))"
     else
-        echo "brak /dev/$UDMABUF (modul u-dma-buf, wezel w .dtsi)" >&2; ok=0
+        echo "brak /dev/$buf (modul u-dma-buf, wezel w .dtsi; za malo CMA? grep Cma /proc/meminfo)" >&2; ok=0
     fi
-fi
+done
 if [[ $ok == 1 ]]; then
     echo "$name wgrany; test: cd sw && sudo python3 -m pytest -v tests/"
     exit 0

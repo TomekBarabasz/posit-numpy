@@ -5,7 +5,7 @@
     y = x * x - x / 3 + 1                        # every arithmetic operator is one array_op on the backend
     np.sort(y), np.max(y), np.argmax(y), -y, abs(y), y < 0
     y.to_float()                                 # float64; NaR -> nan
-    with pn.using(PositVecHw.open()):            # the KV260 for this block (default: PositSw, vecops)
+    with pn.using(PositVecHw.open(32)):            # the KV260 for this block (default: PositSw, vecops)
         z = x * x
     pn.stats()                                   # NaR / saturation / inexact counts of the backend
 
