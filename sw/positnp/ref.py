@@ -11,6 +11,7 @@ Both models are pinned to the same digests in sw/tests/ref_digests.txt
 from __future__ import annotations
 
 import math
+import struct
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -253,4 +254,54 @@ def quire_raw(c: PositConfig, q: int, seg_bits: int = 64) -> int:
 def quire_from_raw(c: PositConfig, raw: int, seg_bits: int = 64) -> int:
     w = c.quire_width(seg_bits)
     return raw - (1 << w) if raw >> (w - 1) & 1 else raw
+
+
+# ---- stage 5: sqrt, FMA, float32 conversions --------------------------------------------------
+
+def sqrt(c: PositConfig, a: int) -> Tuple[int, Flags]:
+    """Correctly rounded square root; negative -> NaR."""
+    x = decode(c, a)
+    if x is None or x[0] < 0:
+        return round_(c, None)
+    if x[0] == 0:
+        return 0, Flags()
+    m, e = x
+    if e & 1:
+        m, e = m << 1, e - 1
+    extra = 64 + c.n
+    big = m << (2 * extra)
+    r = math.isqrt(big)
+    return round_(c, (r, e // 2 - extra), r * r != big)
+
+
+def fma(c: PositConfig, a: int, b: int, d: int) -> Tuple[int, Flags]:
+    """a * b + d with one rounding."""
+    x, y, z = decode(c, a), decode(c, b), decode(c, d)
+    if x is None or y is None or z is None:
+        return round_(c, None)
+    return round_(c, _add(_mul(x, y), z))
+
+
+def float32_value(bits: int) -> Optional[Dyadic]:
+    """IEEE float32 bits -> exact value; None for NaN and infinities."""
+    b = bits & 0xFFFFFFFF
+    e, f = (b >> 23) & 0xFF, b & 0x7FFFFF
+    if e == 0xFF:
+        return None
+    m, ex = (f, -149) if e == 0 else (f | 1 << 23, e - 150)
+    return (-m if b >> 31 else m, ex)
+
+
+def from_float32(c: PositConfig, bits: int) -> Tuple[int, Flags]:
+    return round_(c, float32_value(bits))
+
+
+def to_float32(c: PositConfig, a: int) -> Tuple[int, Flags]:
+    """posit -> float32 bits, round to nearest even; NaR -> quiet NaN. Flags: nar, inexact."""
+    x = decode(c, a)
+    if x is None:
+        return 0x7FC00000, Flags(nar=True)
+    v = math.ldexp(x[0], x[1])                         # exact for n <= 32
+    f = struct.unpack("<f", struct.pack("<f", v))[0]   # one RNE rounding
+    return struct.unpack("<I", struct.pack("<f", v))[0], Flags(inexact=f != v)
 

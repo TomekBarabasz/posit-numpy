@@ -3,6 +3,7 @@ package posit
 import java.security.MessageDigest
 import scala.io.Source
 import newhope.vertebra._
+import PositRef.Flags
 
 // =====================================================================
 //  Skroty SHA-256 wynikow PositRef - wspolny wzorzec dla modelu w Scali
@@ -14,6 +15,9 @@ import newhope.vertebra._
 //  Quire (etap 4, op qsum / qdot / qsumsq): pary z LCG dzielone na wektory
 //  o dlugosciach 1, 2, ..., 37, 1, 2, ...; linia na wektor:
 //  "<wynik hex> <flagi> <surowy quire hex, quireWidth(64) b U2 albo nar>\n".
+//  Etap 5: sqrt (wszystkie posit8, posit16; posit32 z LCG), fma (trojki z LCG),
+//  f2p (bity float32 z LCG -> posit32), p2f (posit32 z LCG -> bity float32);
+//  linia "<wynik hex> <flagi>\n" na wartosc / trojke.
 //
 //  Plik: sw/tests/ref_digests.txt. Po swiadomej zmianie modelu:
 //    sbt "posit-core/Test/runMain posit.RefDigest"
@@ -32,13 +36,35 @@ object RefDigest {
   case class Entry(n : Int, es : Int, op : String, set : String, count : Int)
 
   val quireOps = Seq("qsum", "qdot", "qsumsq")
+  val stage5Ops = Seq("sqrt", "fma", "f2p", "p2f")
 
   val entries : Seq[Entry] =
     (for (es <- Seq(2, 0); op <- PositOp.all) yield Entry(8, es, op.name, "all", 65536)) ++
     (for ((n, es, seed) <- Seq((12, 3, 3), (16, 2, 1), (32, 2, 2)); op <- PositOp.all)
       yield Entry(n, es, op.name, s"lcg$seed", 20000)) ++
     (for ((n, es, seed) <- Seq((8, 2, 4), (16, 2, 5), (32, 2, 6)); op <- quireOps)
-      yield Entry(n, es, op, s"lcg$seed", 20000))
+      yield Entry(n, es, op, s"lcg$seed", 20000)) ++
+    Seq(Entry(8, 2, "sqrt", "one", 256), Entry(16, 2, "sqrt", "one", 65536), Entry(32, 2, "sqrt", "lcg7", 20000),
+        Entry(8, 2, "fma", "lcg8", 20000), Entry(16, 2, "fma", "lcg9", 20000), Entry(32, 2, "fma", "lcg10", 20000),
+        Entry(32, 2, "f2p", "lcg11", 20000), Entry(32, 2, "p2f", "lcg12", 20000))
+
+  /** Wartosci dla operacji etapu 5: "one" = wszystkie n-bitowe, lcgS = kolejne wartosci LCG
+    * (fma: trojki a, b, c z trzech kolejnych wartosci). */
+  def values(e : Entry) : Iterator[BigInt] =
+    if (e.set == "one") Iterator.range(0, 1 << e.n).map(BigInt(_))
+    else lcg(e.n, e.set.drop(3).toLong, (e.count * (if (e.op == "fma") 3 else 1) + 1) / 2).flatMap { case (a, b) => Seq(a, b) }
+      .take(e.count * (if (e.op == "fma") 3 else 1))
+
+  def stage5Digest(e : Entry, md : MessageDigest) : Unit = {
+    val c = PositConfig(e.n, e.es)
+    val results : Iterator[(BigInt, Flags)] = e.op match {
+      case "sqrt" => values(e).map(PositRef.sqrt(c, _))
+      case "fma"  => values(e).grouped(3).map { case Seq(a, b, d) => PositRef.fma(c, a, b, d) }
+      case "f2p"  => values(e).map(PositRef.fromFloat32(c, _))
+      case "p2f"  => values(e).map(PositRef.toFloat32(c, _))
+    }
+    for ((r, f) <- results) md.update(s"${r.toString(16)} ${f.bits}\n".getBytes("US-ASCII"))
+  }
 
   /** Wektory quire: kolejne pary z LCG, dlugosci 1, 2, ..., 37, 1, 2, ... */
   def quireVectors(e : Entry) : Iterator[Seq[(BigInt, BigInt)]] = {
@@ -65,6 +91,7 @@ object RefDigest {
   def digest(e : Entry) : String = {
     val md = MessageDigest.getInstance("SHA-256")
     if (quireOps.contains(e.op)) { quireDigest(e, md); return md.digest().map("%02x".format(_)).mkString }
+    if (stage5Ops.contains(e.op)) { stage5Digest(e, md); return md.digest().map("%02x".format(_)).mkString }
     val c  = PositConfig(e.n, e.es)
     val op = PositOp.all.find(_.name == e.op).get
     for ((a, b) <- pairs(e)) {

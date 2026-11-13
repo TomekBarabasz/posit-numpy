@@ -142,18 +142,20 @@ def roundtrip(c: PositConfig, d: Decoded) -> Rounded:
 GUARD = 3
 
 
-def _add(c: PositConfig, a: Decoded, b: Decoded, negate_b: bool) -> Rounded:
-    F, G = frac_bits(c), GUARD
-    sign_b = b.sign ^ negate_b
-    swap = (b.scale > a.scale) | ((b.scale == a.scale) & (b.sig > a.sig))
-    big_scale = np.where(swap, b.scale, a.scale)
-    big_sig = np.where(swap, b.sig, a.sig)
-    big_sign = np.where(swap, sign_b, a.sign)
-    small_scale = np.where(swap, a.scale, b.scale)
-    small_sig = np.where(swap, a.sig, b.sig)
-    small_sign = np.where(swap, a.sign, sign_b)
+def _sum(sign_a, scale_a, sig_a, sign_b, scale_b, sig_b, L: int):
+    """Exact sum of two values sig * 2**(scale - L) (leading one of sig at bit L, or sig = 0 for zero)
+    up to a sticky bit folded into the LSB, as the hardware adder does: (sign, scale, sig, S, zero)
+    with the leading one of sig at bit S."""
+    G = GUARD
+    swap = (scale_b > scale_a) | ((scale_b == scale_a) & (sig_b > sig_a))
+    big_scale = np.where(swap, scale_b, scale_a)
+    big_sig = np.where(swap, sig_b, sig_a)
+    big_sign = np.where(swap, sign_b, sign_a)
+    small_scale = np.where(swap, scale_a, scale_b)
+    small_sig = np.where(swap, sig_a, sig_b)
+    small_sign = np.where(swap, sign_a, sign_b)
 
-    w = F + 1 + G
+    w = L + 1 + G
     d = big_scale - small_scale
     far = d >= w
     ds = np.where(far, 0, d)
@@ -164,15 +166,19 @@ def _add(c: PositConfig, a: Decoded, b: Decoded, negate_b: bool) -> Rounded:
     st = np.where(far, small_sig != 0, lostbits != 0)
     Y = Y | st.astype(np.int64)                             # sticky folded into the LSB
     s = np.where(big_sign != small_sign, X - Y, X + Y)      # >= 0: |big| >= |small|
-
-    nar = a.nar | b.nar
-    zero = (s == 0) & ~nar
+    zero = s == 0
     lp = bit_length(s) - 1
-    S = F + 1 + G                                           # highest possible leading one (carry)
-    shift = np.where(zero | nar, 0, S - lp)
-    sig = s << shift
-    scale = big_scale + lp - F - G
-    return encode(c, big_sign, scale, sig, S, False, nar, zero)
+    S = L + 1 + G                                           # highest possible leading one (carry)
+    sig = s << np.where(zero, 0, S - lp)
+    scale = big_scale + lp - L - G
+    return big_sign, scale, sig, S, zero
+
+
+def _add(c: PositConfig, a: Decoded, b: Decoded, negate_b: bool) -> Rounded:
+    F = frac_bits(c)
+    sign, scale, sig, S, zero = _sum(a.sign, a.scale, a.sig, b.sign ^ negate_b, b.scale, b.sig, F)
+    nar = a.nar | b.nar
+    return encode(c, sign, scale, sig, S, False, nar, zero & ~nar)
 
 
 def add(c: PositConfig, a: Decoded, b: Decoded) -> Rounded:
@@ -318,4 +324,69 @@ def quire_round(c: PositConfig, q: int, nar: bool) -> Rounded:
     from . import ref
     bits, f = ref.quire_round(c, q, nar)
     return Rounded(np.array([bits]), np.array([f.nar]), np.array([f.sat]), np.array([f.inexact]))
+
+
+# ---- stage 5: sqrt, FMA, float32 conversions ----------------------------------------------------
+
+def _isqrt(R: np.ndarray) -> np.ndarray:
+    """floor(sqrt(R)) for int64 R < 2**62: float estimate, then exact integer correction."""
+    r = np.floor(np.sqrt(R.astype(np.float64))).astype(np.int64)
+    for _ in range(2):
+        r = np.where(r * r > R, r - 1, r)
+        r = np.where((r + 1) * (r + 1) <= R, r + 1, r)
+    return r
+
+
+def sqrt(c: PositConfig, a_bits) -> Rounded:
+    """Correctly rounded square root (digit recurrence result, computed here by isqrt); negative -> NaR."""
+    _check(c)
+    F = frac_bits(c)
+    Q = F + 3                                               # root bits: leading one, F fraction, 2 guard
+    d = decode(c, np.asarray(a_bits))
+    nar = d.nar | (d.sign & ~d.zero)
+    odd = (d.scale & 1) == 1
+    sig = np.where(odd, d.sig << 1, d.sig)                  # value in [1, 4)
+    R = sig << (2 * Q - 2 - F)                              # root in [2**(Q-1), 2**Q)
+    r = _isqrt(R)
+    sticky = r * r != R
+    scale = (d.scale - odd.astype(np.int64)) >> 1
+    return encode(c, False, scale, r, Q - 1, sticky, nar, d.zero & ~nar)
+
+
+def fma(c: PositConfig, a_bits, b_bits, c_bits) -> Rounded:
+    """a * b + c with one rounding (broadcast like NumPy)."""
+    _check(c)
+    F = frac_bits(c)
+    a, b, d = (decode(c, x) for x in np.broadcast_arrays(np.asarray(a_bits), np.asarray(b_bits), np.asarray(c_bits)))
+    L = 2 * F + 1                                           # common frame: leading one at bit 2F + 1
+    prod = a.sig * b.sig
+    top = (prod >> L) & 1 == 1
+    p_sig = np.where(top, prod, prod << 1)
+    p_zero = a.zero | b.zero
+    p_scale = np.where(p_zero, ZERO_SCALE, a.scale + b.scale + top.astype(np.int64))
+    p_sig = np.where(p_zero, 0, p_sig)
+    c_sig = d.sig << (F + 1)
+    sign, scale, sig, S, zero = _sum(a.sign ^ b.sign, p_scale, p_sig, d.sign, d.scale, c_sig, L)
+    drop = S - (F + 4)                                      # keep F + 4 bits below the leading one, rest -> sticky
+    sticky = (sig & ((np.int64(1) << drop) - 1)) != 0
+    nar = a.nar | b.nar | d.nar
+    return encode(c, sign, scale, sig >> drop, F + 4, sticky, nar, zero & ~nar)
+
+
+def from_float32(c: PositConfig, bits) -> Rounded:
+    """IEEE float32 bit patterns -> posit (one rounding); NaN, inf -> NaR."""
+    f = np.asarray(bits).astype(np.uint32).view(np.float32)
+    with np.errstate(invalid="ignore"):            # signalling NaN patterns: still NaN -> NaR
+        return from_float(c, f.astype(np.float64))
+
+
+def to_float32(c: PositConfig, bits) -> Rounded:
+    """posit -> float32 bit patterns (round to nearest even); NaR -> quiet NaN. Flags: nar, inexact."""
+    v = to_float(c, bits)
+    f = v.astype(np.float32)
+    nar = np.isnan(v)
+    inexact = ~nar & (f.astype(np.float64) != v)
+    out = f.view(np.uint32).astype(np.int64)
+    out = np.where(nar, 0x7FC00000, out)
+    return Rounded(out, nar, np.zeros_like(nar), inexact)
 
