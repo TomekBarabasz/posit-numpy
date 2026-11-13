@@ -104,3 +104,38 @@ object PositRef {
 
   def apply(c: PositConfig, op: PositOp, a: BigInt, b: BigInt): BigInt = withFlags(c, op, a, b)._1
 }
+
+/** Exact quire model: an unbounded integer in units of 2^-quireFrac (minpos^2), NaR as a flag.
+  * Independent of the hardware algorithm (no alignment, no segments, no carries).
+  */
+object QuireRef {
+  import PositRef.{Dyadic, decode}
+
+  /** a * b (dot) or a (sum) in quire units; None for NaR. */
+  def term(c: PositConfig, a: BigInt, b: Option[BigInt]): Option[BigInt] = {
+    val x = decode(c, a)
+    val y = b.map(decode(c, _)).getOrElse(Some(Dyadic(1, 0)))
+    for (u <- x; v <- y) yield {
+      val p = u * v
+      val e = p.e + c.quireFrac
+      require(e >= 0 || (p.m % (BigInt(1) << -e)) == 0, s"$c: term below the quire LSB")
+      if (e >= 0) p.m << e else p.m >> -e
+    }
+  }
+
+  /** Sum of terms; (quire, nar). */
+  def accumulate(c: PositConfig, terms: Iterator[(BigInt, Option[BigInt])]): (BigInt, Boolean) =
+    terms.foldLeft((BigInt(0), false)) { case ((q, nar), (a, b)) =>
+      term(c, a, b) match {
+        case Some(t) => (q + t, nar)
+        case None    => (q, true)
+      }
+    }
+
+  def round(c: PositConfig, q: BigInt, nar: Boolean): (BigInt, PositRef.Flags) =
+    if (nar) PositRef.round(c, None) else PositRef.round(c, Some(Dyadic(q, -c.quireFrac)))
+
+  /** The quire as the hardware register holds it: width bits, two's complement. */
+  def raw(c: PositConfig, q: BigInt, width: Int): BigInt = q & ((BigInt(1) << width) - 1)
+}
+
