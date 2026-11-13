@@ -177,7 +177,8 @@ na 4 194 304 elementach (z pakowaniem, synchronizacją cache i kopiami):
   przez float64 i odciążają procesor przy danych, które i tak idą do PL.
 
 **Bitstream z etapu 4 nie ma tych operacji** — trzeba go zbudować od nowa (te same kroki niżej).
-OOC z pełną konfiguracją etapu 5: `top-modules/ooc` (`-only "vec_*/*" -impl`, do powtórzenia po poprawce `OocUnits`).
+Synteza poza kontekstem (`top-modules/ooc`, `vec_p32`): 6 550 LUT (+31% względem etapu 4), 3 423 FF, 8 DSP,
+105 MHz po routingu — 100 MHz trzymane z zapasem ok. 0,5 ns.
 
 ## Weryfikacja
 

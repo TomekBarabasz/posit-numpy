@@ -97,7 +97,7 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
 
 Do tego przebiegu `OocUnits` generował `vec_p*` jeszcze bez `sqrt / fma / convert`, więc tabela pokazuje
 silnik z etapu 4 po przebudowie ALU (wspólna ścieżka iteracyjna, wynik surowy dla P2F), a nie koszt etapu 5.
-Teraz `vec_p*` mają tę samą konfigurację co bitstream — **do powtórzenia** `-impl -only "vec_*/*"`.
+Wyniki z pełną konfiguracją są wyżej.
 
 | wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -110,7 +110,22 @@ Teraz `vec_p*` mają tę samą konfigurację co bitstream — **do powtórzenia*
 - `vec_p32` po routingu 113 MHz (było 122) przy lepszej syntezie (123 vs 120 MHz): to rozrzut place & route
   na tej samej logice, nie nowa ścieżka. Zapas przy 100 MHz nadal 1,1 ns.
 
-### Jednostki posit-core (2026-11-13)
+### Silnik z etapu 5: `PositVecAxi` 4.0 z sqrt, FMA / AXPY i konwersjami (2026-11-13)
+
+Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`, konfiguracja jak bitstream (`VecKv260.config`; konwersje tylko w posit32).
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p16` | synth | 3 350 | 1 828 | 133 | 2 | 0 | 1,891 | 123,3 |
+| `vec_p16` | impl | 3 346 | 1 828 | 133 | 2 | 0 | 0,415 | 104,3 |
+| `vec_p32` | synth | 6 517 | 3 423 | 278 | 8 | 0 | 0,326 | 103,4 |
+| `vec_p32` | impl | 6 550 | 3 423 | 278 | 8 | 0 | 0,516 | 105,4 |
+
+- Koszt etapu 5 w posit32 (względem przebiegu kontrolnego niżej): +1 540 LUT (+31%), +390 FF, +52 CARRY8, 0 DSP.
+- Timing: 100 MHz trzymane, ale zapas spadł do ok. 0,5 ns (było 1,1–1,8 ns), w posit16 ze 139 do 104 MHz —
+  nowa ścieżka krytyczna weszła razem z sqrt / FMA. Do ustalenia z `out/vec_p*/PositVecAxi/timing_impl.rpt`.
+
+### Etap 5, przebieg kontrolny: `PositVecAxi` 4.0 bez nowych operacji (2026-11-13)
 
 Vivado 2026.1, `xck26-sfvc784-2LV-c`, 100 MHz, `-impl` (cały zestaw z `OocUnits`, bez `vec_p*`).
 W tabeli wyniki po routingu, w ostatniej kolumnie Fmax z samej syntezy; komplet w `out/ooc_results.csv`.
