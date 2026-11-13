@@ -244,8 +244,9 @@ class PositAlu(val cfg : PositAluConfig) extends Component {
       val L       = cfg.slowUnits
       val isSlow  = kinds.map(_.isOp).reduce(_ || _)
       // bilet: 0 = wynik szybki (w fastQ), j + 1 = tor wielotaktowy j
-      val tickets = StreamFifo(UInt(log2Up(L + 1) bits), cfg.ticketDepth)
-      val fastQ   = StreamFifo(OpOut(fracW), cfg.fastDepth)
+      // latency = 0: pusta kolejka przepuszcza element w tym samym takcie (szybkie operacje bez dodatkowej latencji)
+      val tickets = StreamFifo(UInt(log2Up(L + 1) bits), cfg.ticketDepth, latency = 0)
+      val fastQ   = StreamFifo(OpOut(fracW), cfg.fastDepth, latency = 0)
       val rr      = L > 1 generate Counter(L)                     // nastepny tor (kolejno, wiec tez w kolejnosci zwalniania)
       def chosen(j : Int) : Bool = if (L == 1) True else rr.value === j
 
