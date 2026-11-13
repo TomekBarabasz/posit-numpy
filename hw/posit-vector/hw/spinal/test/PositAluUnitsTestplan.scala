@@ -120,6 +120,7 @@ class PositAluUnitsTestplan extends TestplanSuite {
     SimEnv(Conventions.spinal, s"salu_u$units").compile(new PositStreamAlu(x)).doSim(label, seed = SimSeed(label)) { d =>
       val cd  = d.clockDomain
       val rnd = new Random(SimSeed(label))
+      d.io.input.valid #= false                   // przed resetem: w GHDL niezainicjowane 'U' psuje FIFO
       d.io.reg.valid #= false
       d.io.op #= PositAluOp.code(PositOp.Div)
       d.io.scalarB #= false
@@ -128,6 +129,7 @@ class PositAluUnitsTestplan extends TestplanSuite {
       d.io.output.ready #= true
       d.io.regRsp.ready #= true
       cd.forkStimulus(10)
+      SimTimeout(10L * 100000)                      // 100k taktow: ok. 5 razy wiecej niz 2000 dzielen na 1 torze
       cd.waitSampling(4)
       val pairs = stress(p32, 2000, rnd).toIndexedSeq
       val want  = mutable.Queue[(BigInt, Boolean)]()
