@@ -26,8 +26,9 @@ class FakeVecMmio(FakeAluMmio):
     """PositVecAxi registers: stage 1 map plus STREAM_CFG, CNT_ELEMENTS, version 2.0."""
 
     def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1,
-                 stage5: bool = True):
+                 stage5: bool = True, k: int = 4, units: int = 1):
         super().__init__(config, ops, busy_reads)
+        self.engine_cfg = units << 8 | k
         self.stage5 = ("sqrt", "fma", "axpy") + (("f2p", "p2f") if config.n == 32 else ()) if stage5 else ()
         self.regs[regs.STREAM_CFG] = 0
         self.regs[regs.OPERAND_C] = 0
@@ -47,6 +48,8 @@ class FakeVecMmio(FakeAluMmio):
         if offset == regs.CNT_ELEMENTS:
             self.log.append(("r", offset))
             return self.counters["elements"]
+        if offset == regs.ENGINE_CFG:
+            return self.engine_cfg
         if offset == regs.QUIRE_CFG:
             return self.config.quire_frac << 16 | self.config.quire_width()
         if regs.QUIRE <= offset < regs.QUIRE + self.config.quire_width() // 8:

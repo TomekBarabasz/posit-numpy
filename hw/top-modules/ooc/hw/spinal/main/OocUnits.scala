@@ -20,6 +20,7 @@ import posit.kv260.PositGen.{DividerJob, UnitJob}
 //                   ta sama konfiguracja co top-modules/alu
 //    hw/gen/vec_p16/, vec_p32/  PositVecAxi (rejestry, AXI4-Stream, quire, operacje etapu 5),
 //                   ta sama konfiguracja co top-modules/vec (VecKv260.config)
+//    hw/gen/vec_p32_u4/  to samo z 4 torami div / sqrt / FMA (slowUnits = 4): koszt torow
 //
 //  sbt "top-ooc/runMain posit.top.ooc.OocUnits"
 //  Synteza: vivado/ooc_synth.tcl (opis w README.md).
@@ -42,5 +43,8 @@ object OocUnits {
       Kv260.spinal.copy(targetDirectory = s"hw/gen/vec_p${c.n}")
         .generateVerilog(new PositVecAxi(PositAluConfig(c, PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full,
                                                         sqrt = true, fma = true, convert = c.n == 32 && c.es == 2)))
+    Kv260.spinal.copy(targetDirectory = "hw/gen/vec_p32_u4")
+      .generateVerilog(new PositVecAxi(PositAluConfig(PositConfig(32), PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full,
+                                                      sqrt = true, fma = true, convert = true, slowUnits = 4)))
   }
 }

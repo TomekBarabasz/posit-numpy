@@ -48,10 +48,11 @@ def check(hw, sw, name, a, b=None, scalar=None):
 
 
 def test_id_and_config(hw):
-    assert hw.read(regs.ID_VERSION) == regs.ID << 16 | regs.VERSION_VEC
+    idv = hw.read(regs.ID_VERSION)
+    assert idv >> 16 == regs.ID and idv & 0xFFFF >= regs.VERSION_STREAM_MIN, f"ID_VERSION 0x{idv:08x}"
     if hw.engine.n is not None:
         assert hw.config.n == hw.engine.n, f"{hw.engine.name} computes {hw.config}"
-    print(f"\n{hw.engine.name}: {hw}, buffer {hw.buf.size >> 20} MB @ 0x{hw.buf.phys_addr:x}, {hw.chunk_elements()} elements/chunk")
+    print(f"\n{hw.engine.name}: {hw}, {hw.engine_cfg()}, buffer {hw.buf.size >> 20} MB @ 0x{hw.buf.phys_addr:x}, {hw.chunk_elements()} elements/chunk")
 
 
 @pytest.mark.parametrize("name", ref.OPS)

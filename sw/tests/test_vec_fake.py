@@ -177,3 +177,9 @@ def test_close_is_idempotent_and_blocks_use():
     hw.close()
     with pytest.raises(PositAluError, match="closed"):
         hw.array_op("add", a, a)
+
+
+def test_engine_cfg():
+    mem = FakeUDmaBuf(1 << 16)
+    vec = FakeVecMmio(PositConfig(32), k=4, units=4)
+    assert PositVecHw(vec, FakeDma(mem, vec), mem).engine_cfg() == {"k": 4, "units": 4}

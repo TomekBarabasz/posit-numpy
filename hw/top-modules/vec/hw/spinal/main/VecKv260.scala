@@ -12,23 +12,26 @@ import posit.kv260._
 //  sbt "top-vec/runMain posit.top.vec.VecKv260"              posit<32,2>, k = 4
 //  sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"      trzy silniki
 //  sbt "top-vec/runMain posit.top.vec.VecKv260 16:2:1"       posit<16,2>, k = 1
-//    silnik: n[:es[:k]], n = 8, 16 albo 32 (tdata w pelnych bajtach), jeden silnik na n
+//  sbt "top-vec/runMain posit.top.vec.VecKv260 32:2:4:4"     posit<32,2>, k = 4, 4 tory div / sqrt / FMA
+//    silnik: n[:es[:k[:u]]], n = 8, 16 albo 32 (tdata w pelnych bajtach), jeden silnik na n;
+//    k: bity dzielnika i pierwiastka na takt (4), u: tory wielotaktowe (slowUnits, 1)
 //
 //  Wynik: hw/gen/p<n>/PositVecAxi_p<n>.v dla kazdego silnika; dalej vivado/build.tcl -engines "32 16 8".
 //  Nazwy modulow maja przedrostek p<n>_ (globalPrefix), wiec silniki roznych formatow
 //  nie zderzaja sie nazwami w jednym projekcie Vivado.
 // =====================================================================
 object VecKv260 {
-  def config(n : Int = 32, es : Int = 2, k : Int = 4) : PositAluConfig =
+  def config(n : Int = 32, es : Int = 2, k : Int = 4, units : Int = 1) : PositAluConfig =
     PositAluConfig(PositConfig(n, es), PositOp.all, divBitsPerCycle = k, pipe = PositPipeline.full,
-                   sqrt = true, fma = true, convert = n == 32 && es == 2)
+                   sqrt = true, fma = true, convert = n == 32 && es == 2, slowUnits = units)
 
-  /** "n[:es[:k]]" -> konfiguracja silnika. */
+  /** "n[:es[:k[:u]]]" -> konfiguracja silnika. */
   def parse(spec : String) : PositAluConfig = spec.split(":").toSeq.map(_.trim.toInt) match {
+    case Seq(n, es, k, u) => config(n, es, k, u)
     case Seq(n, es, k) => config(n, es, k)
     case Seq(n, es)    => config(n, es)
     case Seq(n)        => config(n)
-    case _             => sys.error(s"silnik '$spec': n[:es[:k]]")
+    case _             => sys.error(s"silnik '$spec': n[:es[:k[:u]]]")
   }
 
   def topName(n : Int) : String = s"PositVecAxi_p$n"

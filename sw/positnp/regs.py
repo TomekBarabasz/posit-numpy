@@ -64,7 +64,11 @@ OP_AXPY = 9           # a * OPERAND_B + b (stream): y = alpha * x + y in one pas
 OP_F2P = 10           # a = float32 bits -> posit32
 OP_P2F = 11           # posit32 -> float32 bits
 
-VERSION_VEC = 0x0400
+# ---- 4.1: engine parameters (build options, VecKv260 n:es:k:u) ---------------------------------
+ENGINE_CFG = 0x5C     # RO  [7:0] k: divider / sqrt bits per cycle, [15:8] div / sqrt / FMA lanes (slowUnits)
+
+VERSION_VEC = 0x0401
+VERSION_STREAM_MIN = 0x0200   # oldest PositVecAxi with the stream path that PositVecHw drives
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
 STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}
 

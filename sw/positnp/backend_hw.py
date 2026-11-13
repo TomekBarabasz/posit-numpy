@@ -311,7 +311,7 @@ class PositVecHw(PositAluHw):
     def __init__(self, mmio: Mmio, dma_mmio: Mmio, buf, timeout_polls: int = 100_000):
         super().__init__(mmio, timeout_polls)
         cfg = self.read(regs.CONFIG)
-        if not cfg >> regs.CONFIG_HAS_STREAM & 1 or self.version < regs.VERSION_VEC:
+        if not cfg >> regs.CONFIG_HAS_STREAM & 1 or self.version < regs.VERSION_STREAM_MIN:
             raise PositAluError(f"engine without the stream path (CONFIG 0x{cfg:08x}, version 0x{self.version:04x})")
         n = self.config.n
         if n not in self.IN_DTYPE:
@@ -371,6 +371,14 @@ class PositVecHw(PositAluHw):
                 hw.close()
             raise
         return out
+
+    def engine_cfg(self) -> Optional[Dict[str, int]]:
+        """Build parameters of the engine (version >= 4.1): k = divider / sqrt bits per cycle,
+        units = div / sqrt / FMA lanes (VecKv260 n:es:k:units). None for older bitstreams."""
+        if self.version < 0x0401:
+            return None
+        v = self.read(regs.ENGINE_CFG)
+        return {"k": v & 0xFF, "units": v >> 8 & 0xFF}
 
     def close(self) -> None:
         """Unmap the registers, the DMA and the buffer (before xmutil unloadapp). Idempotent."""

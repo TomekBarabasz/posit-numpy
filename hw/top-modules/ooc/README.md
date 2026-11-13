@@ -11,6 +11,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `div/` | dzielniki sekwencyjne: `Iterative(1)`, `Iterative(4)`, `Pipelined(4)` |
 | `alu_p16/`, `alu_p32/` | `PositAluAxiLite` z etapu 1 (k = 4, potok full), ta sama konfiguracja co `top-modules/alu` |
 | `vec_p16/`, `vec_p32/` | `PositVecAxi` (rejestry, AXI4-Stream, quire, sqrt / FMA / konwersje), ta sama konfiguracja co `top-modules/vec` |
+| `vec_p32_u4/` | to samo z 4 torami div / sqrt / FMA (`slowUnits = 4`) — koszt torów względem `vec_p32` |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 

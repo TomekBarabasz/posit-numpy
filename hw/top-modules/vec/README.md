@@ -101,12 +101,40 @@ Python może używać kilku naraz, a tablica każdego formatu idzie do swojego s
   to kilkanaście procent LUT układu.
 - Aplikacje zbudowane wcześniej (jeden silnik, węzły `posit_vec` / `posit_dma` / `udmabuf-posit`) dalej działają.
 
+## Tory wielotaktowe (`slowUnits`, wersja 4.1)
+
+Dzielenie, sqrt i FMA liczą jednostki iteracyjne (`divCycles` = 10, `sqrtCycles` = 10, `fmaCycles` = 3 takty
+dla posit32, k = 4). Silnik może mieć ich kilka kopii — **torów**: kolejne elementy idą na zmianę do kolejnych
+torów, a kolejka biletów wydaje wyniki w kolejności poleceń. Add / sub / mul / konwersje dalej 1 element / takt
+w jednym potoku (ich nie ma sensu powielać przed etapem 6 — ogranicza procesor, nie silnik).
+
+```
+                    +--> szybki potok (add, sub, mul, F2P, P2F) --> kolejka wyników (fastDepth) --+
+dekoder -> prepare -+                                                                            +--> bilety -> enkoder
+ (raz na element)   +--> tor 0 | tor 1 | ... | tor L-1  (kroki div / sqrt / FMA + finish)  ------+   (kolejność poleceń)
+```
+
+| | 1 tor | L torów |
+| --- | ---: | ---: |
+| div, sqrt (posit32, k = 4) | 10 taktów / element | 10 / L (np. 2,5 przy L = 4) |
+| FMA, AXPY | 3 takty / element | max(1, 3 / L) |
+
+- Wspólne dla torów: dekodery i `prepare` (np. mnożarka FMA w DSP — tory nie dokładają DSP);
+  powielone: rejestry stanu, kroki rekurencji, wyrównanie FMA i `finish`.
+- Wolne operacje nie blokują już potoku: szybkie wyniki za nimi czekają w kolejce (do `fastDepth` = 4).
+- Przy 1 torze odstępy są takie jak wcześniej (testy `alu_div_latency`, `sqrt_p32` bez zmian).
+- Ustawienie przy generowaniu: silnik `n:es:k:u`, np. `VecKv260 32:2:4:4 16:2:4:2`.
+  Odczyt: rejestr ENGINE_CFG (0x5C): [7:0] k, [15:8] tory; w Pythonie `PositVecHw.engine_cfg()`.
+- Na płytce przy 4 torach div powinien dojść do granicy procesora (ok. 20–25 M/s zamiast 8,4) — do zmierzenia.
+- Koszt: OOC `vec_p32_u4` (`top-modules/ooc`).
+
 ## Krok po kroku
 
 1. RTL (z `hw/`) — jeden plik na silnik, `hw/gen/p<n>/PositVecAxi_p<n>.v`:
    ```
    sbt "top-vec/runMain posit.top.vec.VecKv260"            # posit<32,2>
-   sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"    # trzy silniki; silnik = n[:es[:k]], np. 16:2:1
+   sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"    # trzy silniki; silnik = n[:es[:k[:u]]], np. 16:2:1
+   sbt "top-vec/runMain posit.top.vec.VecKv260 32:2:4:4"   # posit32 z 4 torami div / sqrt / FMA
    ```
 2. Bitstream i aplikacja (z `hw/top-modules/vec/vivado`):
    ```
@@ -174,6 +202,7 @@ i przez rejestry. Każda zaokrągla raz (RNE), bit w bit z `PositRef.sqrt / fma 
 | offset | rejestr | |
 | --- | --- | --- |
 | 0x58 | OPERAND_C | trzeci argument FMA (tablica · tablica + stała) |
+| 0x5C | ENGINE_CFG | (4.1) [7:0] k, [15:8] tory div / sqrt / FMA |
 | 0x04 | CONFIG | maska operacji [31:16] z bitami 7–11 (F2P / P2F tylko dla posit⟨32,2⟩) |
 
 ID_VERSION = `0x5053_0400`. Iloczyn FMA jest dokładny (2F + 2 b), suma wyrównana z bitami ochronnymi
@@ -218,6 +247,7 @@ to znów dodawanie z etapu 1). Szczegóły w `hw/top-modules/ooc/README.md`.
 | quire | `posit-vector/.../PositQuireTestplan` | wszystkie pary posit8 jako wektory dł. 1, losowe posit16/32, znoszenie się, przeniesienia przez cały quire, NaR, kontynuacja, permutacja, 200k × maxpos² — wynik, flagi i surowy quire kontra `QuireRef` |
 | quire w IP | `posit-kv260/.../PositVecQuireTestplan` | sum/dot/sumsq przez AXI4-Lite + AXI4-Stream, kontynuacja, NaR, przeplot z tablicami |
 | etap 5, ALU | `posit-vector/.../PositAluStage5Testplan` | sqrt: wszystkie posit8/16 i losowe posit32, odstęp = `sqrtCycles`; FMA z znoszeniem się; konwersje z przypadkami brzegowymi; przeplot wszystkich operacji; ALU bez etapu 5 |
+| tory | `posit-vector/.../PositAluUnitsTestplan` | div / sqrt / FMA na 2 i 4 torach: średni odstęp = cycles / L; przeplot wszystkich operacji na 3 torach (kolejność, losowe valid / ready); add / mul nadal 1 / takt; `PositStreamAlu` z 4 torami ok. 4 razy szybszy na div |
 | etap 5, IP | `posit-kv260/.../PositVecStage5Testplan` | sqrt, FMA, AXPY (też z `scalar_b`), F2P, P2F na tablicach przez AXI; sqrt i FMA przez rejestry |
 | sterownik | `sw/tests/test_vec_fake.py` | `PositVecHw` na atrapach rejestrów, DMA i bufora: porcjowanie, protokół cache, błędy DMA |
 | płytka | `sw/tests/test_board_vec.py` | długości 1 … 1 000 001, wszystkie operacje kontra `ref.py`, tablica ⊕ skalar, liczniki, przepustowość; etap 5: sqrt, FMA / AXPY, F2P / P2F kontra `PositSw`, `PositArray` na sprzęcie, przepustowość |

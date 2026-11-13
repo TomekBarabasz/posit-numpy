@@ -63,11 +63,15 @@ object PositVecRegs {
   val OP_F2P    = PositAluOp.F2P
   val OP_P2F    = PositAluOp.P2F
 
-  val VERSION = 0x0400           // 4.0
+  // 4.1: parametry silnika do odczytu (tory wielotaktowe, slowUnits)
+  val ENGINE_CFG = 0x5C  // RO  [7:0] k: bity dzielnika i sqrt na takt, [15:8] tory div / sqrt / FMA (slowUnits)
+
+  val VERSION = 0x0401           // 4.1
 
   def idVersion : Long = (ID.toLong << 16) | VERSION
   def config(cfg : PositAluConfig) : Long =
     PositAluRegs.config(cfg) | (1L << CONFIG_HAS_STREAM) | (1L << CONFIG_HAS_QUIRE) | (REDUCE_MASK.toLong << 16)
+  def engineCfg(cfg : PositAluConfig) : Long = (cfg.slowUnits.toLong << 8) | cfg.divBitsPerCycle
   def quireCfg(cfg : PositAluConfig) : Long = (cfg.c.quireFrac.toLong << 16) | PositQuireConfig(cfg.c).width
 
   /** Stale dodane w etapie 2 (nazwa -> wartosc) - do porownania z regs.py. */
@@ -80,7 +84,7 @@ object PositVecRegs {
     "STATUS_QUIRE_BUSY" -> STATUS_QUIRE_BUSY, "STATUS_QUIRE_NAR" -> STATUS_QUIRE_NAR,
     "CONFIG_HAS_QUIRE" -> CONFIG_HAS_QUIRE,
     "OPERAND_C" -> OPERAND_C, "OP_SQRT" -> OP_SQRT, "OP_FMA" -> OP_FMA, "OP_AXPY" -> OP_AXPY,
-    "OP_F2P" -> OP_F2P, "OP_P2F" -> OP_P2F)
+    "OP_F2P" -> OP_F2P, "OP_P2F" -> OP_P2F, "ENGINE_CFG" -> ENGINE_CFG)
 }
 
 class PositVecAxi(val cfg : PositAluConfig) extends Component {
@@ -256,5 +260,6 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   bus.read(cycles, CYCLES)
   bus.read(cntElements, CNT_ELEMENTS)
   bus.read(B(quireCfg(cfg), 32 bits), QUIRE_CFG)
+  bus.read(B(engineCfg(cfg), 32 bits), ENGINE_CFG)
   for (k <- 0 until quire.qc.width / 32) bus.read(quire.io.raw(32 * k + 31 downto 32 * k), QUIRE + 4 * k)
 }
