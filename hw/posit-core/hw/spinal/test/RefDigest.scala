@@ -11,6 +11,9 @@ import newhope.vertebra._
 //  Zestaw: wszystkie pary posit<8,2> i posit<8,0>, oraz pary z LCG
 //  (ten sam generator w obu jezykach) dla posit<12,3>, <16,2>, <32,2>.
 //  Linia skrotu: "<wynik hex> <flagi>\n" dla kazdej pary w kolejnosci.
+//  Quire (etap 4, op qsum / qdot / qsumsq): pary z LCG dzielone na wektory
+//  o dlugosciach 1, 2, ..., 37, 1, 2, ...; linia na wektor:
+//  "<wynik hex> <flagi> <surowy quire hex, quireWidth(64) b U2 albo nar>\n".
 //
 //  Plik: sw/tests/ref_digests.txt. Po swiadomej zmianie modelu:
 //    sbt "posit-core/Test/runMain posit.RefDigest"
@@ -28,18 +31,42 @@ object RefDigest {
 
   case class Entry(n : Int, es : Int, op : String, set : String, count : Int)
 
+  val quireOps = Seq("qsum", "qdot", "qsumsq")
+
   val entries : Seq[Entry] =
     (for (es <- Seq(2, 0); op <- PositOp.all) yield Entry(8, es, op.name, "all", 65536)) ++
     (for ((n, es, seed) <- Seq((12, 3, 3), (16, 2, 1), (32, 2, 2)); op <- PositOp.all)
-      yield Entry(n, es, op.name, s"lcg$seed", 20000))
+      yield Entry(n, es, op.name, s"lcg$seed", 20000)) ++
+    (for ((n, es, seed) <- Seq((8, 2, 4), (16, 2, 5), (32, 2, 6)); op <- quireOps)
+      yield Entry(n, es, op, s"lcg$seed", 20000))
+
+  /** Wektory quire: kolejne pary z LCG, dlugosci 1, 2, ..., 37, 1, 2, ... */
+  def quireVectors(e : Entry) : Iterator[Seq[(BigInt, BigInt)]] = {
+    val it = pairs(e)
+    Iterator.from(0).map(i => it.take(1 + i % 37).toSeq).takeWhile(_.nonEmpty)
+  }
+
+  def quireDigest(e : Entry, md : MessageDigest) : Unit = {
+    val c = PositConfig(e.n, e.es)
+    val w = c.quireWidth(64)
+    for (v <- quireVectors(e)) {
+      val terms = v.iterator.map { case (a, b) => e.op match {
+        case "qsum" => (a, None); case "qdot" => (a, Some(b)); case _ => (a, Some(a)) } }
+      val (q, nar) = QuireRef.accumulate(c, terms)
+      val (r, f) = QuireRef.round(c, q, nar)
+      val raw = if (nar) "nar" else QuireRef.raw(c, q, w).toString(16)
+      md.update(s"${r.toString(16)} ${f.bits} $raw\n".getBytes("US-ASCII"))
+    }
+  }
 
   def pairs(e : Entry) : Iterator[(BigInt, BigInt)] =
     if (e.set == "all") PositSimKit.exhaustive(PositConfig(e.n, e.es)) else lcg(e.n, e.set.drop(3).toLong, e.count)
 
   def digest(e : Entry) : String = {
+    val md = MessageDigest.getInstance("SHA-256")
+    if (quireOps.contains(e.op)) { quireDigest(e, md); return md.digest().map("%02x".format(_)).mkString }
     val c  = PositConfig(e.n, e.es)
     val op = PositOp.all.find(_.name == e.op).get
-    val md = MessageDigest.getInstance("SHA-256")
     for ((a, b) <- pairs(e)) {
       val (r, f) = PositRef.withFlags(c, op, a, b)
       md.update(s"${r.toString(16)} ${f.bits}\n".getBytes("US-ASCII"))

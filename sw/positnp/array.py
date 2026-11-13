@@ -23,11 +23,13 @@ Design (plan, stage 3 options):
 from __future__ import annotations
 
 import contextlib
+import math
+from fractions import Fraction
 from typing import Any, Dict, Optional
 
 import numpy as np
 
-from . import vecops
+from . import ref, vecops
 from .backend_sw import PositSw, bits_dtype
 from .ref import PositConfig
 
@@ -110,10 +112,52 @@ def zeros(shape, config: PositConfig = P32) -> "PositArray":
 # ---- the class ----------------------------------------------------------------------------------
 
 _LATER = {
-    "sum": "stage 4 (quire)", "mean": "stage 4 (quire)", "dot": "stage 4 (quire)", "inner": "stage 4 (quire)",
-    "prod": "stage 4", "cumsum": "stage 4", "matmul": "stage 7", "sqrt": "stage 5", "exp": "stage 7",
+    "prod": "no exact posit product reduction planned", "cumsum": "not planned (one quire per prefix)",
+    "matmul": "stage 7", "sqrt": "stage 5", "exp": "stage 7",
     "log": "stage 7", "sin": "stage 7", "cos": "stage 7", "tanh": "stage 7",
 }
+
+
+# ---- quire reductions (stage 4) -----------------------------------------------------------------
+#
+# sum, dot and sumsq go to the backend's quire (PositVecHw: the FPGA; PositSw: vecops) and come
+# back rounded once, plus the exact quire. mean and norm are rounded once here, from the exact
+# quire: q / N through the reference division, sqrt(q) through an integer square root with a
+# sticky bit - so they are correctly rounded too (no double rounding through the backend).
+
+def _quire(x: "PositArray", mode: str, y: Optional["PositArray"] = None):
+    be = get_backend(x.config)
+    return be.reduce(mode, x.bits.ravel(), None if y is None else y.bits.ravel())
+
+
+def quire(x, y=None, mode: Optional[str] = None):
+    """The exact quire of sum(x) (or dot(x, y), or mode="sumsq") as a Fraction; nan for NaR."""
+    x = x if isinstance(x, PositArray) else array(x)
+    if y is not None:
+        y = x._coerce(y)
+    mode = mode or ("sum" if y is None else "dot")
+    _, _, q, nar = _quire(x, mode, y)
+    return float("nan") if nar else Fraction(q, 1 << x.config.quire_frac)
+
+
+def _mean_bits(c: PositConfig, q: int, nar: bool, count: int) -> int:
+    if nar or count == 0:
+        return c.nar
+    if q == 0:
+        return 0
+    quot, inexact = ref._div((q, -c.quire_frac), (count, 0))
+    return ref.round_(c, quot, inexact)[0]
+
+
+def _sqrt_bits(c: PositConfig, q: int, nar: bool) -> int:
+    if nar or q < 0:
+        return c.nar
+    if q == 0:
+        return 0
+    extra = 64 + c.n                       # quire_frac is even: sqrt(q * 2**-F) = isqrt(q << 2e) * 2**(-F/2 - e)
+    s = math.isqrt(q << (2 * extra))
+    inexact = s * s != q << (2 * extra)
+    return ref.round_(c, (s, -(c.quire_frac // 2) - extra), inexact)[0]
 
 
 class PositArray:
@@ -298,6 +342,42 @@ class PositArray:
     def argmin(self, axis=None):
         return np.argmin(self._signed(), axis=axis)
 
+    # ---- quire reductions (stage 4) -----------------------------------------------------------
+
+    def _along(self, axis, fn) -> "PositArray":
+        """fn(1-D PositArray) -> bits, for axis None (all elements) or one axis."""
+        if axis is None:
+            return PositArray(fn(self.ravel()), self.config)
+        moved = np.moveaxis(self.bits, axis, -1)
+        flat = moved.reshape(-1, moved.shape[-1])
+        out = [fn(PositArray(row, self.config)) for row in flat]
+        return PositArray(np.array(out, dtype=np.int64).reshape(moved.shape[:-1]), self.config)
+
+    def sum(self, axis=None) -> "PositArray":
+        """Exact sum in the quire, rounded once."""
+        return self._along(axis, lambda v: _quire(v, "sum")[0])
+
+    def mean(self, axis=None) -> "PositArray":
+        """Exact sum / N, rounded once."""
+        def one(v):
+            _, _, q, nar = _quire(v, "sum")
+            return _mean_bits(self.config, q, nar, v.size)
+        return self._along(axis, one)
+
+    def dot(self, other) -> "PositArray":
+        """1-D . 1-D: exact sum of products in the quire, rounded once."""
+        o = self._coerce(other)
+        if self.ndim != 1 or o.ndim != 1:
+            raise TypeError(f"dot of shapes {self.shape} and {o.shape}: only vectors (matrices: stage 7)")
+        if o.size != self.size:
+            raise ValueError(f"dot of {self.size} and {o.size} elements")
+        return PositArray(_quire(self, "dot", o)[0], self.config)
+
+    def norm(self) -> "PositArray":
+        """Euclidean norm of all elements: exact sum of squares, square root rounded once."""
+        _, _, q, nar = _quire(self.ravel(), "sumsq")
+        return PositArray(_sqrt_bits(self.config, q, nar), self.config)
+
     # ---- NumPy protocols ----------------------------------------------------------------------
 
     _UFUNCS = {
@@ -398,7 +478,19 @@ _FUNCTIONS: Dict[Any, Any] = {
     np.transpose: lambda a, axes=None: PositArray(np.transpose(a.bits, axes), a.config),
     np.array_equal: lambda a, b, **kw: isinstance(a, PositArray) and a.equal_bits(b),
     np.isnan: lambda a: a.isnar(),
+    np.sum: lambda a, axis=None, **kw: a.sum(axis),
+    np.mean: lambda a, axis=None, **kw: a.mean(axis),
+    np.dot: lambda a, b, **kw: (a if isinstance(a, PositArray) else b._coerce(a)).dot(b),
+    np.inner: lambda a, b: (a if isinstance(a, PositArray) else b._coerce(a)).dot(b),
+    np.vdot: lambda a, b: (a if isinstance(a, PositArray) else b._coerce(a)).dot(b),
+    np.linalg.norm: lambda x, ord=None, axis=None, keepdims=False: _norm(x, ord, axis),
 }
+
+
+def _norm(x, ord, axis):
+    if ord is not None or axis is not None:
+        raise TypeError("np.linalg.norm on posit arrays: only the Euclidean norm of all elements")
+    return x.norm()
 for _alias in ("amax", "amin"):
     if hasattr(np, _alias) and getattr(np, _alias) not in _FUNCTIONS:
         _FUNCTIONS[getattr(np, _alias)] = _FUNCTIONS[np.max if _alias == "amax" else np.min]

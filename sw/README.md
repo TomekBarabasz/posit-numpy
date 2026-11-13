@@ -9,6 +9,8 @@ y.to_float()                                  # float64, NaR -> nan
 with pn.using(PositVecHw.open()):             # KV260 (domyślnie PositSw na vecops)
     z = x * x
 pn.stats()                                    # NaR / nasycenia / niedokładne / elementy
+np.sum(x), np.dot(x, y), np.mean(x), np.linalg.norm(x)   # quire: dokładnie, jedno zaokrąglenie
+pn.quire(x, y)                                # dokładna wartość quire jako Fraction
 ```
 
 - Własna klasa, nie podklasa `ndarray`: nic nie przechodzi po cichu do arytmetyki na liczbach całkowitych;
@@ -16,6 +18,8 @@ pn.stats()                                    # NaR / nasycenia / niedokładne /
 - Poziom 0 (neg, abs, porównania, sort, min, max, argmin, argmax) na bitach jako liczbach ze znakiem.
 - NaR według standardu: równy sobie, mniejszy od każdej liczby (sortuje się na początek, jest minimum).
 - Rozgłaszanie jak w NumPy; tablica ⊕ skalar idzie trybem skalarnym backendu.
+- Redukcje (etap 4) idą przez quire backendu (`reduce`: FPGA albo `vecops.quire`): `sum`, `dot`, suma kwadratów
+  są dokładne i zaokrąglone raz; `mean` (= quire / N) i `norm` (= √quire) zaokrągla raz Python z dokładnego quire.
 
 Bindingi Pythona do silnika posit na KV260. Jedna klasa `PositArray`, dwa wymienne backendy:
 sprzętowy i programowy, bitowo zgodny ze sprzętem — biblioteka działa też na PC bez płytki,
@@ -45,11 +49,14 @@ tests/
   test_board_vec.py     na KV260, etap 2-3: tablice przez DMA kontra PositSw, PositArray na sprzęcie,
                         przepustowość z rozbiciem na fazy
   test_vecops.py        vecops kontra skróty ze Scali, round-tripy, konwersje kontra ref.py
-  test_examples.py      examples/formats.py
+  test_quire.py         modele quire (ref.py, vecops) kontra Fraction, znoszenie się, kolejność
+  test_examples.py      examples/formats.py, examples/quire_dot.py
 examples/
   formats.py            float32 / posit32 / posit16 / float64: Horner i suma drzewem (--hw: posit32 na KV260)
+  quire_dot.py          źle uwarunkowany iloczyn skalarny: float32, float64, posit32 bez i z quire
 notebooks/
   01_formats.ipynb      to samo z wykresami
+  02_quire_dot.ipynb    quire: błąd w funkcji uwarunkowania
 scripts/
   install_overlay.sh    na płytce: dtc, /lib/firmware/xilinx/<nazwa>/, xmutil loadapp, sprawdzenie urządzeń
   build_udmabuf.sh      na płytce, raz na jądro: moduł u-dma-buf (bufory DMA)

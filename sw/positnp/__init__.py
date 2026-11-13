@@ -6,13 +6,13 @@
 """
 
 from . import ref, regs, vecops
-from .array import (P8, P16, P32, PositArray, array, clear_stats, from_bits, get_backend, nar, set_backend,
-                    stats, using, zeros)
+from .array import (P8, P16, P32, PositArray, array, clear_stats, from_bits, get_backend, nar, quire,
+                    set_backend, stats, using, zeros)
 from .backend_sw import PositSw
 from .ref import Flags, PositConfig
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = ["ref", "regs", "vecops", "Flags", "PositConfig", "PositArray", "PositSw", "P8", "P16", "P32",
-           "array", "from_bits", "zeros", "nar", "set_backend", "get_backend", "using", "stats", "clear_stats",
+           "array", "from_bits", "zeros", "nar", "quire", "set_backend", "get_backend", "using", "stats", "clear_stats",
            "__version__"]

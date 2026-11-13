@@ -9,14 +9,24 @@ import pytest
 from positnp import ref, vecops
 from positnp.ref import PositConfig
 
-from test_ref import entries, lcg
+from test_ref import QUIRE_OPS, entries, lcg, quire_line, quire_vectors
 
 DIGEST_ENTRIES = list(entries())
+
+
+def _vec_quire(c, mode, a, b):
+    return vecops.quire(c, mode, np.array(a, dtype=np.int64), np.array(b, dtype=np.int64))
 
 
 @pytest.mark.parametrize("n,es,name,kind,count,digest", DIGEST_ENTRIES)
 def test_digest_matches_scala(n, es, name, kind, count, digest):
     c = PositConfig(n, es)
+    if name in QUIRE_OPS:
+        md = hashlib.sha256()
+        for vec in quire_vectors(n, es, kind, count):
+            md.update(quire_line(c, QUIRE_OPS[name], vec, _vec_quire).encode("ascii"))
+        assert md.hexdigest() == digest
+        return
     if kind == "all":
         a, b = np.meshgrid(np.arange(1 << n), np.arange(1 << n), indexing="ij")
         a, b = a.ravel(), b.ravel()

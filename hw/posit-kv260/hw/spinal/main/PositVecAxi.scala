@@ -18,6 +18,13 @@ import posit.vector._
 //  Liczniki NaR / sat / inexact licza wyniki obu sciezek, CNT_ELEMENTS
 //  tylko wyniki strumienia; CYCLES: takty z czymkolwiek w ALU.
 //
+//  Etap 4 (wersja 3.0): quire. OP = SUM / DOT / SUMSQ kieruje s_axis do
+//  PositQuire zamiast do ALU (bez wynikow na m_axis: tylko MM2S w DMA).
+//  CTRL.quire_clear zeruje quire, CTRL.quire_round zaokragla biezacy stan
+//  do RESULT (+ flagi, STATUS.done), surowy quire w QUIRE[k] od 0x80.
+//  Quire nie jest niszczony odczytem: tablice dluzsze niz jeden transfer
+//  DMA akumuluja sie dalej. CNT_ELEMENTS liczy tez elementy quire.
+//
 //  Mapa rejestrow: PositVecRegs (= PositAluRegs + rozszerzenia),
 //  w Pythonie sw/positnp/regs.py. Porty: s_axi_*, s_axis_*, m_axis_*, aclk, aresetn.
 // =====================================================================
@@ -30,16 +37,35 @@ object PositVecRegs {
   val STATUS_STREAM_ACTIVE = 3   // element(y) w ALU
   val CONFIG_HAS_STREAM    = 12  // bit CONFIG: silnik ma porty strumieniowe
 
-  val VERSION = 0x0200           // 2.0
+  // etap 4: quire
+  val QUIRE_CFG     = 0x54  // RO  [15:0] szerokosc quire w bitach, [31:16] quireFrac (LSB = 2^-quireFrac)
+  val QUIRE         = 0x80  // RO  QUIRE + 4 k: slowo k surowego quire (U2), od najmlodszego
+  val OP_SUM        = 4     // sum a
+  val OP_DOT        = 5     // sum a * b
+  val OP_SUMSQ      = 6     // sum a * a
+  val CTRL_QUIRE_CLEAR  = 3
+  val CTRL_QUIRE_ROUND  = 4
+  val STATUS_QUIRE_BUSY = 4
+  val STATUS_QUIRE_NAR  = 5
+  val CONFIG_HAS_QUIRE  = 13
+  val REDUCE_MASK = (1 << OP_SUM) | (1 << OP_DOT) | (1 << OP_SUMSQ)
+
+  val VERSION = 0x0300           // 3.0
 
   def idVersion : Long = (ID.toLong << 16) | VERSION
-  def config(cfg : PositAluConfig) : Long = PositAluRegs.config(cfg) | (1L << CONFIG_HAS_STREAM)
+  def config(cfg : PositAluConfig) : Long =
+    PositAluRegs.config(cfg) | (1L << CONFIG_HAS_STREAM) | (1L << CONFIG_HAS_QUIRE) | (REDUCE_MASK.toLong << 16)
+  def quireCfg(cfg : PositAluConfig) : Long = (cfg.c.quireFrac.toLong << 16) | PositQuireConfig(cfg.c).width
 
   /** Stale dodane w etapie 2 (nazwa -> wartosc) - do porownania z regs.py. */
   val all : Seq[(String, Long)] = Seq[(String, Long)](
     "STREAM_CFG" -> STREAM_CFG, "CNT_ELEMENTS" -> CNT_ELEMENTS,
     "STREAM_CFG_SCALAR_B" -> STREAM_CFG_SCALAR_B, "STATUS_STREAM_ACTIVE" -> STATUS_STREAM_ACTIVE,
-    "CONFIG_HAS_STREAM" -> CONFIG_HAS_STREAM, "VERSION_VEC" -> VERSION)
+    "CONFIG_HAS_STREAM" -> CONFIG_HAS_STREAM, "VERSION_VEC" -> VERSION,
+    "QUIRE_CFG" -> QUIRE_CFG, "QUIRE" -> QUIRE, "OP_SUM" -> OP_SUM, "OP_DOT" -> OP_DOT, "OP_SUMSQ" -> OP_SUMSQ,
+    "CTRL_QUIRE_CLEAR" -> CTRL_QUIRE_CLEAR, "CTRL_QUIRE_ROUND" -> CTRL_QUIRE_ROUND,
+    "STATUS_QUIRE_BUSY" -> STATUS_QUIRE_BUSY, "STATUS_QUIRE_NAR" -> STATUS_QUIRE_NAR,
+    "CONFIG_HAS_QUIRE" -> CONFIG_HAS_QUIRE)
 }
 
 class PositVecAxi(val cfg : PositAluConfig) extends Component {
@@ -72,14 +98,18 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   // ---- CTRL: impulsy na zapis -----------------------------------------------------
   val ctrlData  = Bits(32 bits)
   bus.nonStopWrite(ctrlData, 0)
-  val start, softReset, clearCnt = Bool()
-  start     := False
-  softReset := False
-  clearCnt  := False
+  val start, softReset, clearCnt, quireClear, quireRound = Bool()
+  start      := False
+  softReset  := False
+  clearCnt   := False
+  quireClear := False
+  quireRound := False
   bus.onWrite(CTRL) {
-    start     := ctrlData(CTRL_START)
-    softReset := ctrlData(CTRL_SOFT_RESET)
-    clearCnt  := ctrlData(CTRL_CLEAR_COUNTERS)
+    start      := ctrlData(CTRL_START)
+    softReset  := ctrlData(CTRL_SOFT_RESET)
+    clearCnt   := ctrlData(CTRL_CLEAR_COUNTERS)
+    quireClear := ctrlData(CTRL_QUIRE_CLEAR)
+    quireRound := ctrlData(CTRL_QUIRE_ROUND)
   }
 
   // ---- rejestry ---------------------------------------------------------------------
@@ -95,19 +125,30 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   // ---- silnik: miekki reset przerywa dzialanie i oproznia potok -----------------------
   val core = new ResetArea(softReset, cumulative = true) {
     val engine = new PositStreamAlu(cfg)
+    val quire  = new PositQuire(PositQuireConfig(c))
   }
   val engine = core.engine
+  val quire  = core.quire
 
   engine.io.op      := opReg
   engine.io.scalarB := streamCfg(STREAM_CFG_SCALAR_B)
   engine.io.b       := bReg
 
-  // AXI4-Stream wejscie: {b, a}
-  engine.io.input.valid         := io.s_axis.tvalid
-  engine.io.input.fragment.a    := io.s_axis.tdata(c.n - 1 downto 0)
-  engine.io.input.fragment.b    := io.s_axis.tdata(2 * c.n - 1 downto c.n)
+  // AXI4-Stream wejscie: {b, a}; OP sum/dot/sumsq -> quire, reszta -> ALU
+  val reduce = opReg === OP_SUM || opReg === OP_DOT || opReg === OP_SUMSQ
+  val inA    = io.s_axis.tdata(c.n - 1 downto 0)
+  val inB    = io.s_axis.tdata(2 * c.n - 1 downto c.n)
+  engine.io.input.valid         := io.s_axis.tvalid && !reduce
+  engine.io.input.fragment.a    := inA
+  engine.io.input.fragment.b    := inB
   engine.io.input.last          := io.s_axis.tlast
-  io.s_axis.tready              := engine.io.input.ready
+  quire.io.input.valid          := io.s_axis.tvalid && reduce
+  quire.io.input.a              := inA
+  quire.io.input.b              := Mux(opReg === OP_SUMSQ, inA, inB)
+  quire.io.input.dot            := opReg =/= OP_SUM
+  quire.io.clear                := quireClear
+  quire.io.round                := quireRound
+  io.s_axis.tready              := Mux(reduce, quire.io.input.ready, engine.io.input.ready)
 
   // AXI4-Stream wyjscie: wynik
   io.m_axis.tvalid              := engine.io.output.valid
@@ -132,24 +173,32 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
 
   // ---- liczniki -----------------------------------------------------------------------
   val cntNar, cntSat, cntInexact, cycles, cntElements = Reg(UInt(32 bits)) init 0
-  when(busy || engine.io.inFlight) { cycles := cycles + 1 }
+  when(busy || engine.io.inFlight || quire.io.busy) { cycles := cycles + 1 }
 
-  def count(f : PositFlags) : Unit = {
-    when(f.nar)     { cntNar     := cntNar + 1 }
-    when(f.sat)     { cntSat     := cntSat + 1 }
-    when(f.inexact) { cntInexact := cntInexact + 1 }
-  }
-  // oba wyniki w jednym takcie sa niemozliwe: ALU wydaje jeden wynik na takt
+  // Trzy zrodla wynikow (rejestry, strumien, quire) moga trafic na ten sam takt:
+  // liczniki dodaja sume przyrostow, nie nadpisuja sie nawzajem.
+  val sources = Seq(
+    (engine.io.regRsp.fire,   engine.io.regRsp.flags),
+    (engine.io.output.fire,   engine.io.output.fragment.flags),
+    (quire.io.result.valid,   quire.io.result.flags))
+  def inc(pick : PositFlags => Bool) : UInt =
+    sources.map { case (v, f) => (v && pick(f)).asUInt.resize(2) }.reduce(_ + _)
+  cntNar      := cntNar + inc(_.nar)
+  cntSat      := cntSat + inc(_.sat)
+  cntInexact  := cntInexact + inc(_.inexact)
+  cntElements := cntElements + engine.io.output.fire.asUInt.resize(2) + quire.io.input.fire.asUInt.resize(2)
+
   when(engine.io.regRsp.fire) {
     result := engine.io.regRsp.bits
     flags  := engine.io.regRsp.flags.asBits
     busy   := False
     done   := True
-    count(engine.io.regRsp.flags)
   }
-  when(engine.io.output.fire) {
-    cntElements := cntElements + 1
-    count(engine.io.output.fragment.flags)
+  when(quireRound) { done := False }
+  when(quire.io.result.valid) {
+    result := quire.io.result.bits
+    flags  := quire.io.result.flags.asBits
+    done   := True
   }
 
   when(start && !busy) {
@@ -180,11 +229,13 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   // ---- odczyty ----------------------------------------------------------------------
   bus.read(B(idVersion, 32 bits), ID_VERSION)
   bus.read(B(config(cfg), 32 bits), CONFIG)
-  bus.read(flags ## B(0, 4 bits) ## engine.io.inFlight ## error ## done ## busy, STATUS)
+  bus.read(flags ## B(0, 2 bits) ## quire.io.nar ## quire.io.busy ## engine.io.inFlight ## error ## done ## busy, STATUS)
   bus.read(result, RESULT)
   bus.read(cntNar, CNT_NAR)
   bus.read(cntSat, CNT_SAT)
   bus.read(cntInexact, CNT_INEXACT)
   bus.read(cycles, CYCLES)
   bus.read(cntElements, CNT_ELEMENTS)
+  bus.read(B(quireCfg(cfg), 32 bits), QUIRE_CFG)
+  for (k <- 0 until quire.qc.width / 32) bus.read(quire.io.raw(32 * k + 31 downto 32 * k), QUIRE + 4 * k)
 }

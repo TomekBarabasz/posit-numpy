@@ -44,6 +44,15 @@ class PositConfig:
     def max_scale(self) -> int:
         return (self.n - 2) << self.es
 
+    @property
+    def quire_frac(self) -> int:
+        """Quire LSB = minpos**2 = 2**-quire_frac."""
+        return 2 * self.max_scale
+
+    def quire_width(self, seg_bits: int = 64) -> int:
+        """Sign + 31 carry-guard bits + 4 max_scale (= 16 n for es = 2), rounded up to seg_bits (as in hardware)."""
+        return -(-(4 * self.max_scale + 32) // seg_bits) * seg_bits
+
     def __str__(self) -> str:
         return f"posit<{self.n},{self.es}>"
 
@@ -195,3 +204,53 @@ def to_float(c: PositConfig, raw: int) -> float:
     if x is None:
         return float("nan")
     return math.ldexp(x[0], x[1])
+
+
+# ---- quire (stage 4): exact sums of products, one rounding --------------------------------
+
+QUIRE_MODES = ("sum", "dot", "sumsq")
+
+
+def quire_term(c: PositConfig, a: int, b: Optional[int] = None) -> Optional[int]:
+    """a * b (or a) as an exact integer in quire units (2**-quire_frac); None for NaR."""
+    x = decode(c, a)
+    y = decode(c, b) if b is not None else (1, 0)
+    if x is None or y is None:
+        return None
+    m, e = _mul(x, y)
+    e += c.quire_frac
+    if e >= 0:
+        return m << e
+    assert m % (1 << -e) == 0, "term below the quire LSB"
+    return m >> -e
+
+
+def quire_accumulate(c: PositConfig, mode: str, a, b=None, q: int = 0, nar: bool = False):
+    """Add the terms of `mode` (sum: a, dot: a*b, sumsq: a*a) to (q, nar); returns the new (q, nar)."""
+    if mode not in QUIRE_MODES:
+        raise ValueError(f"quire mode {mode!r}, expected one of {QUIRE_MODES}")
+    a = [int(x) for x in a]
+    bs = [None] * len(a) if mode == "sum" else (a if mode == "sumsq" else [int(x) for x in b])
+    for x, y in zip(a, bs):
+        t = quire_term(c, x, y)
+        if t is None:
+            nar = True
+        else:
+            q += t
+    return (0, True) if nar else (q, False)     # with NaR the value is meaningless: (0, True), as vecops
+
+
+def quire_round(c: PositConfig, q: int, nar: bool = False) -> Tuple[int, Flags]:
+    """The quire rounded once to posit<n,es>."""
+    return round_(c, None) if nar else round_(c, (q, -c.quire_frac))
+
+
+def quire_raw(c: PositConfig, q: int, seg_bits: int = 64) -> int:
+    """The quire as the hardware holds it: quire_width bits, two's complement."""
+    return q & ((1 << c.quire_width(seg_bits)) - 1)
+
+
+def quire_from_raw(c: PositConfig, raw: int, seg_bits: int = 64) -> int:
+    w = c.quire_width(seg_bits)
+    return raw - (1 << w) if raw >> (w - 1) & 1 else raw
+
