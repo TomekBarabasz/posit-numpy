@@ -101,3 +101,21 @@ Jak w etapie 1 (zegar PL0, reset, AFI, węzły UIO), plus:
 
 Bloku AXI DMA nie da się zasymulować (szyfrowane IP Xilinxa); jego zachowanie pokrywa atrapa `FakeDma`
 według PG021, a resztę — test na płytce.
+
+## Wyniki na płytce (2026-11-13)
+
+`posit32_vec` (posit⟨32,2⟩, dzielnik k = 4, 100 MHz), Ubuntu 24.04 na KV260:
+`test_board_vec.py` — 31 / 31, w tym tablice 1 … 1 000 001 elementów dla każdej operacji bit w bit z `ref.py`.
+
+Przepustowość jednego `array_op` na 4 194 304 elementach (pakowanie, synchronizacja cache, DMA i kopie w cenie):
+
+| | M elementów / s | |
+| --- | ---: | --- |
+| sprzęt, add | 10,6 | silnik: 100 M/s (1 / takt) |
+| sprzęt, div | 5,8 | silnik: 10 M/s (`divSteps / k + 2` = 10 taktów) |
+| `ref.py` na A53, add | 0,003 | ok. 3 500 × wolniej niż sprzęt |
+| NumPy float32 na A53, add | 247 | ok. 23 × szybciej niż sprzęt, jak przewidywał plan |
+
+- Dla add silnik i DMA zajmują ok. 40 ms z ok. 400 ms; resztę zabiera strona PS (rzutowania i pakowanie `{b, a}`
+  w NumPy, synchronizacja cache na 48 MB bufora, kopia wyniku). To jest pierwsze miejsce do przyspieszenia, nie sprzęt.
+- Dla div ograniczeniem jest już dzielnik iteracyjny (10 M/s), a narzut PS dokłada się do niego.
