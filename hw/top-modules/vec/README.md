@@ -132,6 +132,35 @@ Jak w etapie 1 (zegar PL0, reset, AFI, węzły UIO), plus:
   i przed każdym transferem robi `sync_for_device` (wejście i wynik), po nim `sync_for_cpu` (wynik).
   Mapowanie bez cache (`O_SYNC`) na arm64 to pamięć Device, w której `memcpy`/numpy padają z SIGBUS.
 
+## Etap 5: sqrt, FMA / AXPY, konwersje float32 (wersja 4.0)
+
+Nowe operacje w tym samym ALU (`PositAluConfig(sqrt, fma, convert)`), dostępne i w strumieniu,
+i przez rejestry. Każda zaokrągla raz (RNE), bit w bit z `PositRef.sqrt / fma / fromFloat32 / toFloat32`.
+
+| OP | nazwa | wynik | `s_axis {b, a}` | takty / element (posit32, k = 4) |
+| ---: | --- | --- | --- | ---: |
+| 7 | SQRT | √a, ujemne → NaR | `b` ignorowane | 10 (rekurencja jak dzielnik, `sqrtSteps / k + 2`) |
+| 8 | FMA | a · b + OPERAND_C | `b` z tablicy albo OPERAND_B (`scalar_b`) | 3 |
+| 9 | AXPY | a · OPERAND_B + b (BLAS `y = α x + y`) | `a` = x, `b` = y | 3 |
+| 10 | F2P | posit32 z bitów float32 `a` | NaN, ±inf → NaR; subnormale dokładnie | 1 |
+| 11 | P2F | bity float32 z posit32 `a` | NaR → 0x7fc00000 | 1 |
+
+| offset | rejestr | |
+| --- | --- | --- |
+| 0x58 | OPERAND_C | trzeci argument FMA (tablica · tablica + stała) |
+| 0x04 | CONFIG | maska operacji [31:16] z bitami 7–11 (F2P / P2F tylko dla posit⟨32,2⟩) |
+
+ID_VERSION = `0x5053_0400`. Iloczyn FMA jest dokładny (2F + 2 b), suma wyrównana z bitami ochronnymi
+i sticky, więc wynik różni się od `mul`, potem `add` (dwa zaokrąglenia) — test `fma_single_rounding`.
+SQRT i FMA dzielą z dzielnikiem ścieżkę iteracyjną (jedna operacja naraz); pozostałe są w potoku.
+
+Trzy tablice (`fma(x, y, z)`) wymagają trzeciego strumienia, czyli własnego mastera AXI4 z etapu 6;
+do tego czasu `PositVecHw` liczy je w `PositSw` i dolicza do `stats()["fallback"]`. Tak samo każda
+operacja, której wgrany bitstream nie ma (maska w CONFIG) — kod Pythona działa bez zmian na starszych bitstreamach.
+
+**Bitstream z etapu 4 nie ma tych operacji** — trzeba go zbudować od nowa (te same kroki niżej).
+Warto też powtórzyć OOC `vec_p32` (`-only "vec_*/*" -impl`): sqrt i FMA dokładają logikę na ścieżce iteracyjnej.
+
 ## Weryfikacja
 
 | poziom | gdzie | |
@@ -140,8 +169,10 @@ Jak w etapie 1 (zegar PL0, reset, AFI, węzły UIO), plus:
 | IP | `posit-kv260/.../PositVecAxiTestplan` | AXI4-Lite + AXI4-Stream jak z AXI DMA, długości 1, 2, 3, 1000, liczniki, miękki reset, nazwy portów |
 | quire | `posit-vector/.../PositQuireTestplan` | wszystkie pary posit8 jako wektory dł. 1, losowe posit16/32, znoszenie się, przeniesienia przez cały quire, NaR, kontynuacja, permutacja, 200k × maxpos² — wynik, flagi i surowy quire kontra `QuireRef` |
 | quire w IP | `posit-kv260/.../PositVecQuireTestplan` | sum/dot/sumsq przez AXI4-Lite + AXI4-Stream, kontynuacja, NaR, przeplot z tablicami |
+| etap 5, ALU | `posit-vector/.../PositAluStage5Testplan` | sqrt: wszystkie posit8/16 i losowe posit32, odstęp = `sqrtCycles`; FMA z znoszeniem się; konwersje z przypadkami brzegowymi; przeplot wszystkich operacji; ALU bez etapu 5 |
+| etap 5, IP | `posit-kv260/.../PositVecStage5Testplan` | sqrt, FMA, AXPY (też z `scalar_b`), F2P, P2F na tablicach przez AXI; sqrt i FMA przez rejestry |
 | sterownik | `sw/tests/test_vec_fake.py` | `PositVecHw` na atrapach rejestrów, DMA i bufora: porcjowanie, protokół cache, błędy DMA |
-| płytka | `sw/tests/test_board_vec.py` | długości 1 … 1 000 001, wszystkie operacje kontra `ref.py`, tablica ⊕ skalar, liczniki, przepustowość |
+| płytka | `sw/tests/test_board_vec.py` | długości 1 … 1 000 001, wszystkie operacje kontra `ref.py`, tablica ⊕ skalar, liczniki, przepustowość; etap 5: sqrt, FMA / AXPY, F2P / P2F kontra `PositSw`, `PositArray` na sprzęcie, przepustowość |
 
 Bloku AXI DMA nie da się zasymulować (szyfrowane IP Xilinxa); jego zachowanie pokrywa atrapa `FakeDma`
 według PG021, a resztę — test na płytce.

@@ -29,6 +29,7 @@ class PositSw:
     def __init__(self, config: PositConfig = PositConfig(32)):
         self.config = config
         self.ops = ref.OPS
+        self.array_ops = ref.OPS + ("sqrt", "fma", "f2p", "p2f")
         self.dtype = bits_dtype(config)
         self.clear_stats()
 
@@ -38,19 +39,30 @@ class PositSw:
         self._count(r)
         return int(r.bits[0]), Flags.from_bits(int(r.flags[0]))
 
-    def array_op(self, name: str, a, b=None, scalar: Optional[int] = None) -> np.ndarray:
-        """Element-wise `name` on raw posit bits, a (+) b (broadcast) or a (+) scalar."""
-        if name not in self.ops:
-            raise ValueError(f"unknown operation {name!r}, expected one of {self.ops}")
-        if scalar is None:
-            if b is None:
-                raise ValueError("array_op needs b or scalar")
-            other = b
+    def array_op(self, name: str, a, b=None, scalar: Optional[int] = None, c=None) -> np.ndarray:
+        """Element-wise `name` on raw bits (broadcast like NumPy), the same interface as PositVecHw:
+        add/sub/mul/div (a (+) b or a (+) scalar), sqrt / f2p / p2f (unary), fma (a * b + c)."""
+        cfg = self.config
+        if name in ("sqrt", "f2p", "p2f"):
+            fn = {"sqrt": vecops.sqrt, "f2p": vecops.from_float32, "p2f": vecops.to_float32}[name]
+            r = fn(cfg, a)
+        elif name == "fma":
+            if c is None:
+                raise ValueError("fma needs c")
+            other = b if scalar is None else int(scalar) & cfg.mask
+            r = vecops.fma(cfg, a, other, c)
+        elif name in self.ops:
+            if scalar is None:
+                if b is None:
+                    raise ValueError("array_op needs b or scalar")
+                other = b
+            else:
+                other = int(scalar) & cfg.mask
+            r = vecops.op(cfg, name, a, other)
         else:
-            other = int(scalar) & self.config.mask
-        r = vecops.op(self.config, name, a, other)
+            raise ValueError(f"unknown operation {name!r}")
         self._count(r)
-        return r.bits.astype(self.dtype)
+        return r.bits.astype(self.dtype if name != "p2f" else np.uint32)
 
     def reduce(self, mode: str, a, b=None):
         """Quire reduction (sum: a, dot: a*b, sumsq: a*a), one rounding: (bits, Flags, q, nar).

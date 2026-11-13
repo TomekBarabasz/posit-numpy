@@ -146,3 +146,73 @@ def test_reduce_throughput(hw):
     t1 = time.perf_counter()
     np.dot(f, f)
     print(f"\nquire dot hw: {size / dt / 1e6:.2f} M elem/s; numpy float32 dot: {size / (time.perf_counter() - t1) / 1e6:.1f} M elem/s")
+
+
+# ---- stage 5: sqrt, FMA / AXPY, float32 conversions ---------------------------------------------------
+
+def _need(hw, *names):
+    missing = [n for n in names if n not in hw.array_ops]
+    if missing:
+        pytest.skip(f"bitstream without {', '.join(missing)} (stage 5)")
+
+
+def test_sqrt_matches_sw(hw, sw):
+    _need(hw, "sqrt")
+    n = hw.config.n
+    a = np.arange(1 << n) if n <= 16 else np.random.default_rng(5).integers(0, 1 << n, 1_000_001)
+    got, want = hw.array_op("sqrt", a), sw.array_op("sqrt", a)
+    assert np.array_equal(got, want), f"sqrt: {np.count_nonzero(got != want)} mismatches"
+
+
+@pytest.mark.parametrize("size", (1, 3, 1000, 1_000_001))
+def test_fma_and_axpy_match_sw(hw, sw, size):
+    _need(hw, "fma")
+    rnd = np.random.default_rng(size + 11)
+    a, b, y = (rnd.integers(0, 1 << hw.config.n, size) for _ in range(3))
+    k = int(rnd.integers(0, 1 << hw.config.n))
+    hw.clear_stats()
+    for kw in (dict(b=b, c=k), dict(scalar=k, c=y), dict(scalar=k, c=k)):
+        got, want = hw.array_op("fma", a, **kw), sw.array_op("fma", a, **kw)
+        assert np.array_equal(got, want), f"fma {sorted(kw)}: {np.count_nonzero(got != want)} mismatches"
+    assert hw.stats()["fallback"] == 0
+    hw.array_op("fma", a, b, c=y)                                    # three arrays: software, counted
+    assert hw.stats()["fallback"] == size
+
+
+def test_float32_conversions_match_sw(hw, sw):
+    _need(hw, "f2p", "p2f")
+    special = np.array([0.0, -0.0, 1.0, -1.0, np.nan, np.inf, -np.inf, 1e-45, -1e-45, 1e-38, 3.4028235e38,
+                        2.0 ** -120, 2.0 ** 120, 0.1], np.float32).view(np.uint32)
+    f = np.concatenate([special, np.random.default_rng(13).integers(0, 1 << 32, 1_000_000).astype(np.uint32)])
+    p = np.random.default_rng(14).integers(0, 1 << 32, 1_000_000)
+    for name, x in (("f2p", f), ("p2f", p)):
+        got, want = hw.array_op(name, x), sw.array_op(name, x)
+        assert np.array_equal(got, want), f"{name}: {np.count_nonzero(got != want)} mismatches"
+
+
+def test_stage5_positarray_on_hw(hw):
+    _need(hw, "sqrt", "fma", "f2p", "p2f")
+    import positnp as pn
+    f = np.random.default_rng(15).standard_normal(200_001).astype(np.float32)
+    want = [pn.array(f, hw.config)]
+    want += [np.sqrt(abs(want[0])), pn.axpy(0.5, want[0], want[0]), pn.fma(want[0], want[0], -1.0)]
+    want_f = want[0].to_float32()
+    hw.clear_stats()
+    with pn.using(hw):
+        x = pn.array(f, hw.config)
+        got = [x, np.sqrt(abs(x)), pn.axpy(0.5, x, x), pn.fma(x, x, -1.0)]
+        got_f = x.to_float32()
+    assert all(g.equal_bits(w) for g, w in zip(got, want))
+    assert np.array_equal(got_f.view(np.uint32), want_f.view(np.uint32))
+    assert hw.stats()["fallback"] == 0
+
+
+def test_stage5_throughput(hw):
+    _need(hw, "sqrt", "fma", "f2p", "p2f")
+    size = 1 << 22
+    rows = [(f"hw {name}", hw.time_array(name, size)) for name in ("sqrt", "fma", "axpy", "f2p", "p2f")]
+    f = np.random.default_rng(0).random(size, dtype=np.float32)
+    t0 = time.perf_counter()
+    np.sqrt(f)
+    rows.append(("numpy float32 sqrt", size / (time.perf_counter() - t0)))
+    print("\n" + "\n".join(f"{k:>20}: {v / 1e6:9.3f} M elem/s" for k, v in rows))

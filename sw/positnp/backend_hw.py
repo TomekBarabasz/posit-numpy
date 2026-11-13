@@ -138,6 +138,7 @@ class PositAluHw:
         self.config = PositConfig(cfg & 0xFF, (cfg >> 8) & 0xF)
         self.op_mask = cfg >> 16
         self.ops = tuple(name for name, code in regs.OPS.items() if self.op_mask >> code & 1)
+        self.array_ops = tuple(name for name, code in {**regs.OPS, **regs.STAGE5}.items() if self.op_mask >> code & 1)
 
     # ---- construction on the board ----------------------------------------------------
 
@@ -264,6 +265,10 @@ class PositVecHw(PositAluHw):
         self.out_dtype = self.OUT_DTYPE[n]
         self.in_bytes = 2 * n // 8
         self.out_bytes = n // 8
+        self._sw = None
+        self._fallback = 0
+        from .backend_sw import PositSw
+        self._sw = PositSw(self.config)
         self.dma.reset()
 
     @classmethod
@@ -285,34 +290,72 @@ class PositVecHw(PositAluHw):
         # n is the dtype width (8/16/32), so the C cast is exactly "& mask"
         return x.astype(self.out_dtype, copy=False).ravel()
 
-    def array_op(self, name: str, a, b=None, scalar: Optional[int] = None) -> np.ndarray:
-        """Element-wise `name` on raw posit bits: a (+) b, or a (+) scalar. Returns raw bits, shape of a.
+    UNARY = ("sqrt", "f2p", "p2f")
 
+    def array_op(self, name: str, a, b=None, scalar: Optional[int] = None, c=None) -> np.ndarray:
+        """Element-wise `name` on raw bits, shape of a. Returns raw bits.
+
+          add/sub/mul/div   a (+) b, or a (+) scalar
+          sqrt, f2p, p2f    unary (f2p: a = float32 bits; p2f: result = float32 bits)
+          fma               a * b + c: c an int -> OP_FMA (c in OPERAND_C; b an array or `scalar`);
+                            c an array and b `scalar` -> OP_AXPY (y = alpha * x + y in one stream pass)
+
+        An operation the bitstream lacks, or fma with three arrays (needs a third stream, stage 6),
+        is computed by PositSw instead; stats()["fallback"] counts those elements.
         Time per phase of the last call, in seconds: self.last_timing
         (pack, sync_device, dma, sync_cpu, copy_out, total).
         """
-        if name not in self.ops:
-            raise PositAluError(f"{name} is not built into this bitstream (ops: {self.ops})")
+        route = self._route(name, b, scalar, c)
+        if route is None:
+            self._fallback += int(np.size(a))
+            return self._sw.array_op(name, a, b, scalar=scalar, c=c).astype(self.out_dtype)
+        code, b, scalar, c_reg = route
+        return self._stream(code, a, b, scalar, c_reg)
+
+    def _route(self, name, b, scalar, c):
+        """(op code, stream b half, scalar for OPERAND_B, OPERAND_C) or None for the software path."""
+        codes = {**regs.OPS, **regs.STAGE5}
+        if name not in codes:
+            raise ValueError(f"unknown operation {name!r}")
+        if name not in self.array_ops:
+            return None
+        if name in self.UNARY:
+            return codes[name], None, 0, None
+        if name == "fma":
+            if c is None:
+                raise ValueError("fma needs c")
+            if np.ndim(c) == 0:
+                return regs.OP_FMA, b, scalar, int(c)
+            if scalar is not None:
+                return regs.OP_AXPY, c, scalar, None    # alpha in OPERAND_B, b half of the stream = the addend
+            return None                                 # three arrays: not with one {b, a} stream
+        if name == "axpy":
+            raise ValueError("use name='fma' with scalar=alpha and c=y")
+        return codes[name], b, scalar, None
+
+    def _stream(self, code: int, a, b=None, scalar: Optional[int] = None, c_reg: Optional[int] = None) -> np.ndarray:
         t_start = time.perf_counter()
         timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
         shape = np.shape(a)
         av = self._bits(a)
-        if scalar is None:
-            if b is None:
-                raise ValueError("array_op needs b or scalar")
+        if b is not None:
             bv = self._bits(b)
             if bv.size != av.size:
                 raise ValueError(f"a has {av.size} elements, b {bv.size}")
-        else:
+        elif scalar is not None:
             bv = None
+        else:
+            raise ValueError("array_op needs b or scalar")
         out = np.empty(av.size, self.out_dtype)
         if av.size == 0:
             return out.reshape(shape)
 
-        self.write(regs.OP, regs.OPS[name])
-        self.write(regs.STREAM_CFG, 0 if scalar is None else 1 << regs.STREAM_CFG_SCALAR_B)
+        self.write(regs.OP, code)
+        self.write(regs.STREAM_CFG, 1 << regs.STREAM_CFG_SCALAR_B if scalar is not None and bv is None else 0)
         if scalar is not None:
             self.write(regs.OPERAND_B, int(scalar) & self.config.mask)
+        if c_reg is not None:
+            self.write(regs.OPERAND_C, int(c_reg) & self.config.mask)
 
         step = self.chunk_elements()
         for i in range(0, av.size, step):
@@ -361,7 +404,12 @@ class PositVecHw(PositAluHw):
     def stats(self) -> Dict[str, int]:
         s = super().stats()
         s["elements"] = self.read(regs.CNT_ELEMENTS)
+        s["fallback"] = self._fallback
         return s
+
+    def clear_stats(self) -> None:
+        super().clear_stats()
+        self._fallback = 0
 
     def has_quire(self) -> bool:
         return bool(self.read(regs.CONFIG) >> regs.CONFIG_HAS_QUIRE & 1)
@@ -417,8 +465,10 @@ class PositVecHw(PositAluHw):
         rnd = np.random.default_rng(0)
         a = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
         b = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
+        args = {"fma": dict(b=b, c=int(a[0])),                       # OP_FMA, c in OPERAND_C
+                "axpy": dict(scalar=int(a[0]), c=b)}.get(name, dict(b=b))   # axpy: OP_AXPY
         t0 = time.perf_counter()
-        self.array_op(name, a, b)
+        self.array_op("fma" if name == "axpy" else name, a, **args)
         return size / (time.perf_counter() - t0)
 
 

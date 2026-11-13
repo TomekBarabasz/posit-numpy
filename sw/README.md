@@ -11,15 +11,22 @@ with pn.using(PositVecHw.open()):             # KV260 (domyślnie PositSw na vec
 pn.stats()                                    # NaR / nasycenia / niedokładne / elementy
 np.sum(x), np.dot(x, y), np.mean(x), np.linalg.norm(x)   # quire: dokładnie, jedno zaokrąglenie
 pn.quire(x, y)                                # dokładna wartość quire jako Fraction
+np.sqrt(x), pn.fma(x, y, 1.0), pn.axpy(0.5, x, y)   # etap 5: jedno zaokrąglenie
+pn.array(np.float32(...)), x.to_float32()     # float32 <-> posit32 (F2P / P2F w PL na KV260)
 ```
 
 - Własna klasa, nie podklasa `ndarray`: nic nie przechodzi po cichu do arytmetyki na liczbach całkowitych;
-  nieobsługiwane funkcje NumPy rzucają `TypeError` (`np.sum`, `np.dot`: etap 4, `np.sin`: etap 7).
+  nieobsługiwane funkcje NumPy rzucają `TypeError` (`np.matmul`, `np.sin`: etap 7).
 - Poziom 0 (neg, abs, porównania, sort, min, max, argmin, argmax) na bitach jako liczbach ze znakiem.
 - NaR według standardu: równy sobie, mniejszy od każdej liczby (sortuje się na początek, jest minimum).
 - Rozgłaszanie jak w NumPy; tablica ⊕ skalar idzie trybem skalarnym backendu.
 - Redukcje (etap 4) idą przez quire backendu (`reduce`: FPGA albo `vecops.quire`): `sum`, `dot`, suma kwadratów
   są dokładne i zaokrąglone raz; `mean` (= quire / N) i `norm` (= √quire) zaokrągla raz Python z dokładnego quire.
+- Etap 5: `np.sqrt`, `pn.fma(a, b, c)` (a · b + c, rozgłaszanie), `pn.axpy(α, x, y)`; na KV260 stała `c` idzie
+  przez OP_FMA, skalarne `b` (lub `a`) z tablicą `c` przez OP_AXPY — oba w jednym przejściu strumienia;
+  trzy tablice i operacje, których bitstream nie ma, liczy `PositSw` (`pn.stats()["fallback"]`).
+- `pn.array(tablica float32)` i `x.to_float32()` / `x.astype(np.float32)` dla posit32 idą przez F2P / P2F backendu
+  (bez rzutowania przez float64); dla innych formatów przez `vecops`.
 
 Bindingi Pythona do silnika posit na KV260. Jedna klasa `PositArray`, dwa wymienne backendy:
 sprzętowy i programowy, bitowo zgodny ze sprzętem — biblioteka działa też na PC bez płytki,
@@ -36,6 +43,7 @@ positnp/
   fakes.py         atrapy silnika etapu 2 i DMA do testów bez płytki           etap 2
   vecops.py        posit w NumPy: dekoder, enkoder z flagami, add/sub/mul/div,
                    konwersje float <-> posit, poziom 0; bit w bit z ref.py      etap 3
+                   quire, sqrt, fma, float32 <-> posit32                        etap 4-5
   backend_sw.py    PositSw: te same array_op na vecops (bez płytki, wzorzec)   etap 2-3
   array.py         PositArray z protokołami NumPy, pn.array, using, stats       etap 3
   overlays/        katalogi aplikacji dla xmutil: .bit.bin, .dtsi, shell.json (poza gitem)
@@ -46,8 +54,8 @@ tests/
   test_vec_fake.py      sterownik etapu 2 na atrapach: porcjowanie, protokół cache, błędy DMA
   test_array.py         PositArray, konwersje float <-> posit
   test_hypothesis.py    hypothesis: ścieżka sprzętowa (atrapy) == PositSw, konwersje == ref.py
-  test_board_vec.py     na KV260, etap 2-3: tablice przez DMA kontra PositSw, PositArray na sprzęcie,
-                        przepustowość z rozbiciem na fazy
+  test_board_vec.py     na KV260, etap 2-5: tablice przez DMA kontra PositSw, PositArray na sprzęcie,
+                        przepustowość z rozbiciem na fazy, quire, sqrt / FMA / konwersje
   test_vecops.py        vecops kontra skróty ze Scali, round-tripy, konwersje kontra ref.py
   test_quire.py         modele quire (ref.py, vecops) kontra Fraction, znoszenie się, kolejność
   test_examples.py      examples/formats.py, examples/quire_dot.py

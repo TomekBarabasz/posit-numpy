@@ -87,13 +87,52 @@ def clear_stats(config: Optional[PositConfig] = None) -> None:
 # ---- construction -------------------------------------------------------------------------------
 
 def array(x, config: Optional[PositConfig] = None) -> "PositArray":
-    """Posit array from numbers (rounded to nearest, ties to even; nan, inf -> NaR) or a PositArray."""
+    """Posit array from numbers (rounded to nearest, ties to even; nan, inf -> NaR) or a PositArray.
+
+    A float32 array going to posit32 is converted by the backend (F2P in the PL on the KV260)."""
     if isinstance(x, PositArray):
         if config is None or config == x.config:
             return x.copy()
         return array(x.to_float(), config)
     c = config or P32
+    if isinstance(x, np.ndarray) and x.dtype == np.float32 and c.n == 32 and c.es == 2 and x.size:
+        be = get_backend(c)
+        if "f2p" in getattr(be, "array_ops", ()):
+            return PositArray(be.array_op("f2p", x.view(np.uint32), scalar=0), c)
     return PositArray(vecops.from_float(c, np.asarray(x, dtype=np.float64)).bits, c)
+
+
+def fma(a, b, c) -> "PositArray":
+    """a * b + c with one rounding, broadcast like NumPy.
+
+    On the KV260: c a scalar -> OP_FMA (c in OPERAND_C); b a scalar and c an array -> OP_AXPY;
+    three arrays -> PositSw (needs a third stream, stage 6; counted in stats()["fallback"])."""
+    first = next((x for x in (a, b, c) if isinstance(x, PositArray)), None)
+    cfg = first.config if first is not None else P32
+    A, B, C = (x if isinstance(x, PositArray) else array(x, cfg) for x in (a, b, c))
+    if len({A.config, B.config, C.config}) != 1:
+        raise TypeError("fma: posit formats differ")
+    shape = np.broadcast_shapes(A.shape, B.shape, C.shape)
+    be = get_backend(cfg)
+    scalar = lambda x: x.size == 1 and x.ndim <= 1                                  # noqa: E731
+    full = lambda x: np.ascontiguousarray(np.broadcast_to(x.bits, shape)).ravel()   # noqa: E731
+    if scalar(C):
+        if scalar(B):
+            r = be.array_op("fma", full(A), scalar=int(B.bits.ravel()[0]), c=int(C.bits.ravel()[0]))
+        else:
+            r = be.array_op("fma", full(A), full(B), c=int(C.bits.ravel()[0]))
+    elif scalar(B):
+        r = be.array_op("fma", full(A), scalar=int(B.bits.ravel()[0]), c=full(C))
+    elif scalar(A):
+        r = be.array_op("fma", full(B), scalar=int(A.bits.ravel()[0]), c=full(C))     # a * b = b * a
+    else:
+        r = be.array_op("fma", full(A), full(B), c=full(C))
+    return PositArray(np.asarray(r).reshape(shape), cfg)
+
+
+def axpy(alpha, x, y) -> "PositArray":
+    """alpha * x + y with one rounding (BLAS axpy); one stream pass on the KV260."""
+    return fma(x, alpha, y)
 
 
 def from_bits(bits, config: PositConfig = P32) -> "PositArray":
@@ -113,7 +152,7 @@ def zeros(shape, config: PositConfig = P32) -> "PositArray":
 
 _LATER = {
     "prod": "no exact posit product reduction planned", "cumsum": "not planned (one quire per prefix)",
-    "matmul": "stage 7", "sqrt": "stage 5", "exp": "stage 7",
+    "matmul": "stage 7", "exp": "stage 7",
     "log": "stage 7", "sin": "stage 7", "cos": "stage 7", "tanh": "stage 7",
 }
 
@@ -173,6 +212,27 @@ class PositArray:
 
     def to_float(self) -> np.ndarray:
         return vecops.to_float(self.config, self.bits)
+
+    def to_float32(self) -> np.ndarray:
+        """float32, round to nearest even (P2F in the PL for posit32 on the KV260); NaR -> nan."""
+        be = get_backend(self.config)
+        if self.config.n == 32 and self.config.es == 2 and self.size and "p2f" in getattr(be, "array_ops", ()):
+            bits = np.asarray(be.array_op("p2f", self.bits.ravel(), scalar=0)).astype(np.uint32)
+            return bits.view(np.float32).reshape(self.shape)
+        return self.to_float().astype(np.float32)
+
+    def astype(self, dtype) -> np.ndarray:
+        dt = np.dtype(dtype)
+        if dt == np.float32:
+            return self.to_float32()
+        if dt == np.float64:
+            return self.to_float()
+        raise TypeError(f"PositArray.astype({dt}): float32 or float64 (bits: .bits)")
+
+    def sqrt(self) -> "PositArray":
+        """Correctly rounded square root; negative -> NaR."""
+        r = get_backend(self.config).array_op("sqrt", self.bits.ravel(), scalar=0)
+        return PositArray(np.asarray(r).reshape(self.shape), self.config)
 
     def __float__(self) -> float:
         if self.size != 1:
@@ -385,7 +445,7 @@ class PositArray:
         np.negative: "neg", np.positive: "pos", np.absolute: "abs", np.square: "square",
         np.less: "lt", np.less_equal: "le", np.greater: "gt", np.greater_equal: "ge",
         np.equal: "eq", np.not_equal: "ne", np.maximum: "maximum", np.minimum: "minimum",
-        np.isnan: "isnar",
+        np.isnan: "isnar", np.sqrt: "sqrt",
     }
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -411,6 +471,8 @@ class PositArray:
             return abs(a)
         if what == "isnar":
             return a.isnar()
+        if what == "sqrt":
+            return a.sqrt()
         if what in ("maximum", "minimum"):
             fn = np.maximum if what == "maximum" else np.minimum
             return a._from_signed(fn(a._signed(), args[1]._signed()))
