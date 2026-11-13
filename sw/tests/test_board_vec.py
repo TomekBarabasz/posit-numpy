@@ -35,14 +35,14 @@ def sw(hw):
     return PositSw(hw.config)
 
 
-def check(hw, sw, name, a, b=None, scalar=None, sample=20_000):
+def check(hw, sw, name, a, b=None, scalar=None):
+    """Every element against PositSw (vecops, pinned to PositRef by the shared digests)."""
     got = hw.array_op(name, a, b, scalar=scalar)
     assert got.shape == np.shape(a)
-    idx = np.arange(a.size) if a.size <= sample else np.random.default_rng(a.size).choice(a.size, sample, replace=False)
-    want = sw.array_op(name, a[idx], None if b is None else b[idx], scalar=scalar)
-    bad = np.nonzero(got[idx] != want)[0]
-    assert bad.size == 0, f"{name}: {bad.size} mismatches, first at {idx[bad[0]]}: " \
-                          f"0x{int(got[idx][bad[0]]):x} vs 0x{int(want[bad[0]]):x}"
+    want = sw.array_op(name, a, b, scalar=scalar)
+    bad = np.nonzero(got != want)[0]
+    assert bad.size == 0, f"{name}: {bad.size} mismatches, first at {bad[0]}: " \
+                          f"0x{int(got[bad[0]]):x} vs 0x{int(want[bad[0]]):x}"
 
 
 def test_id_and_config(hw):
@@ -75,17 +75,30 @@ def test_two_calls_and_counters(hw):
     assert (s["nar"], s["sat"], s["inexact"], s["elements"]) == (1, 1, 1, 3)
 
 
+def test_positarray_on_hw(hw):
+    import positnp as pn
+    x = pn.array(np.linspace(-3, 3, 100_001), hw.config)
+    want = x * x - x / 3 + 1
+    with pn.using(hw):
+        got = x * x - x / 3 + 1
+    assert got.equal_bits(want)
+
+
 def test_throughput(hw, sw):
     size = 1 << 22
     rows = []
+    phases = {}
     for name in ("add", "div"):
         rows.append((f"hw {name}", hw.time_array(name, size)))
-    a = np.random.default_rng(0).integers(0, 1 << hw.config.n, 20_000)
+        phases[name] = hw.last_timing
+    a = np.random.default_rng(0).integers(0, 1 << hw.config.n, size)
     t0 = time.perf_counter()
     sw.array_op("add", a, a)
-    rows.append(("sw add (ref.py)", a.size / (time.perf_counter() - t0)))
+    rows.append(("sw add (vecops)", a.size / (time.perf_counter() - t0)))
     f = np.random.default_rng(0).random(size, dtype=np.float32)
     t0 = time.perf_counter()
     _ = f + f
     rows.append(("numpy float32 add", size / (time.perf_counter() - t0)))
     print("\n" + "\n".join(f"{k:>20}: {v / 1e6:9.3f} M elem/s" for k, v in rows))
+    for name, t in phases.items():
+        print(f"hw {name}, {size} elements: " + ", ".join(f"{k} {v * 1e3:.1f} ms" for k, v in t.items()))

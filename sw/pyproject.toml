@@ -11,6 +11,7 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 test = ["pytest", "hypothesis"]
+notebook = ["jupyter", "matplotlib"]
 
 [tool.setuptools.packages.find]
 include = ["positnp*"]

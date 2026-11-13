@@ -51,13 +51,15 @@ def test_chunking_and_cache_protocol():
     b = np.arange(5 * k + 7)[::-1]
     assert np.array_equal(hw.array_op("add", a, b), PositSw(hw.config).array_op("add", a, b))
     assert len(hw.dma.mmio.transfers) == 6
-    # every round: device sync over in+out before DMA, cpu sync over out after
+    # every round: device sync over the input and over the result before DMA, cpu sync over the result after
     syncs = hw.buf.syncs
-    assert [s[0] for s in syncs] == ["device", "cpu"] * 6
-    for (src, in_len, dst, out_len), (dev, cpu) in zip(hw.dma.mmio.transfers, zip(syncs[::2], syncs[1::2])):
+    assert [s[0] for s in syncs] == ["device", "device", "cpu"] * 6
+    rounds = zip(syncs[::3], syncs[1::3], syncs[2::3])
+    for (src, in_len, dst, out_len), (dev_in, dev_out, cpu) in zip(hw.dma.mmio.transfers, rounds):
         assert src == 0 and dst % 4096 == 0 and dst >= in_len
-        assert dev[1] == 0 and dev[2] >= dst + out_len
+        assert dev_in[1:] == (0, in_len) and dev_out[1:] == (dst, out_len)
         assert cpu[1:] == (dst, out_len)
+    assert set(hw.last_timing) == {"pack", "sync_device", "dma", "sync_cpu", "copy_out", "total"}
 
 
 def test_counters_and_elements():

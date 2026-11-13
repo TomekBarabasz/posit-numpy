@@ -31,7 +31,7 @@ pl_clk0 100 MHz, pl_resetn0 -> proc_sys_reset -> aresetn
 
 3. Na płytce: skopiować `sw/` (np. `scp -r sw ubuntu@kria:`), potem z `sw/`:
    ```
-   sudo apt install device-tree-compiler python3-pytest python3-numpy   # raz
+   sudo apt install device-tree-compiler python3-pytest python3-numpy python3-hypothesis   # raz
    scripts/install_overlay.sh posit32_alu      # dtc -> .dtbo, /lib/firmware/xilinx/posit32_alu/, xmutil loadapp
    sudo python3 -m pytest -v tests/test_board.py
    ```
