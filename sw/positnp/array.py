@@ -1,121 +1,404 @@
-"""PositArray, first version (plan, stage 2): raw posit bits + format + backend.
+"""PositArray: posit arrays with the NumPy look and feel (plan, stage 3).
 
-    import positnp as pn
-    x = pn.PositArray.from_float([1.0, 2.5, -3.0], pn.PositConfig(32))
-    y = x * x + x                      # each operator is one array_op on the backend
-    y.to_float()                       # numpy float64
-    pn.set_backend(PositVecHw.open())  # the KV260; default: PositSw (ref.py)
+    import numpy as np, positnp as pn
+    x = pn.array(np.linspace(-2, 2, 5))          # posit<32,2> by default; pn.array(..., pn.P16)
+    y = x * x - x / 3 + 1                        # every arithmetic operator is one array_op on the backend
+    np.sort(y), np.max(y), np.argmax(y), -y, abs(y), y < 0
+    y.to_float()                                 # float64; NaR -> nan
+    with pn.using(PositVecHw.open()):            # the KV260 for this block (default: PositSw, vecops)
+        z = x * x
+    pn.stats()                                   # NaR / saturation / inexact counts of the backend
 
-Conversions float <-> posit are exact (round to nearest, ties to even, through ref.encode),
-element by element and slow; the vectorised ones come in stage 3, as do the NumPy protocols.
+Design (plan, stage 3 options):
+- an own class, not an ndarray subclass: integer arithmetic on posit bits is wrong, so nothing
+  falls through to NumPy silently; unsupported NumPy functions raise TypeError;
+- level 0 (neg, abs, comparisons, sort, min, max, argmin, argmax) works on the bits as signed
+  integers, because posits order like two's complement integers;
+- NaR follows the posit standard: equal to itself and below every real number (so it sorts first,
+  is the minimum and never the maximum), unlike NumPy's NaN;
+- arithmetic runs at once (no lazy graph); arrays of any shape go to the backend flattened,
+  broadcasting is done here; array (+) scalar uses the scalar mode of the backend.
 """
 
 from __future__ import annotations
 
-import math
-from typing import Optional, Union
+import contextlib
+from typing import Any, Dict, Optional
 
 import numpy as np
 
-from . import ref
-from .backend_sw import DTYPE, PositSw
+from . import vecops
+from .backend_sw import PositSw, bits_dtype
 from .ref import PositConfig
 
+P8 = PositConfig(8)
+P16 = PositConfig(16)
+P32 = PositConfig(32)
+
+# ---- backends ---------------------------------------------------------------------------------
+
 _backend = None
+_sw: Dict[PositConfig, PositSw] = {}
 
 
 def set_backend(backend) -> None:
-    """Backend for new operations: an object with config, ops and array_op (PositSw, PositVecHw)."""
+    """Backend for arrays of its format: PositVecHw (the KV260) or None (PositSw)."""
     global _backend
     _backend = backend
 
 
+@contextlib.contextmanager
+def using(backend):
+    """with pn.using(hw): ... - the backend for the block, the previous one restored after."""
+    prev = _backend
+    set_backend(backend)
+    try:
+        yield backend
+    finally:
+        set_backend(prev)
+
+
 def get_backend(config: PositConfig):
-    """The current backend if it computes `config`, otherwise a PositSw for it."""
+    """The active backend if it computes `config`, otherwise the PositSw for `config`."""
     if _backend is not None and _backend.config == config:
         return _backend
-    return PositSw(config)
+    if config not in _sw:
+        _sw[config] = PositSw(config)
+    return _sw[config]
 
 
-def float_to_bits(c: PositConfig, x: float) -> int:
-    """One float -> posit bits, exact rounding; nan and inf -> NaR."""
-    if math.isnan(x) or math.isinf(x):
-        return c.nar
-    if x == 0.0:
-        return 0
-    num, den = float(x).as_integer_ratio()   # den is a power of two
-    return ref.encode(c, (num, -(den.bit_length() - 1)))
+def _stats_backend(config: Optional[PositConfig]):
+    if config is None:
+        return _backend if _backend is not None else get_backend(P32)
+    return get_backend(config)
+
+
+def stats(config: Optional[PositConfig] = None) -> Dict[str, int]:
+    """Counters since the last clear: nar, sat (clamped to maxpos/minpos), inexact, elements."""
+    return _stats_backend(config).stats()
+
+
+def clear_stats(config: Optional[PositConfig] = None) -> None:
+    _stats_backend(config).clear_stats()
+
+
+# ---- construction -------------------------------------------------------------------------------
+
+def array(x, config: Optional[PositConfig] = None) -> "PositArray":
+    """Posit array from numbers (rounded to nearest, ties to even; nan, inf -> NaR) or a PositArray."""
+    if isinstance(x, PositArray):
+        if config is None or config == x.config:
+            return x.copy()
+        return array(x.to_float(), config)
+    c = config or P32
+    return PositArray(vecops.from_float(c, np.asarray(x, dtype=np.float64)).bits, c)
+
+
+def from_bits(bits, config: PositConfig = P32) -> "PositArray":
+    """Posit array from raw posit bits (any integer array)."""
+    return PositArray(bits, config)
+
+
+def nar(shape=(), config: PositConfig = P32) -> "PositArray":
+    return PositArray(np.full(shape, config.nar), config)
+
+
+def zeros(shape, config: PositConfig = P32) -> "PositArray":
+    return PositArray(np.zeros(shape, np.int64), config)
+
+
+# ---- the class ----------------------------------------------------------------------------------
+
+_LATER = {
+    "sum": "stage 4 (quire)", "mean": "stage 4 (quire)", "dot": "stage 4 (quire)", "inner": "stage 4 (quire)",
+    "prod": "stage 4", "cumsum": "stage 4", "matmul": "stage 7", "sqrt": "stage 5", "exp": "stage 7",
+    "log": "stage 7", "sin": "stage 7", "cos": "stage 7", "tanh": "stage 7",
+}
 
 
 class PositArray:
-    def __init__(self, bits, config: PositConfig = PositConfig(32), backend=None):
-        dtype = DTYPE.get(config.n, np.uint64)
-        self.bits = (np.asarray(bits).astype(np.int64) & config.mask).astype(dtype)
+    __array_priority__ = 1000
+    __hash__ = None
+
+    def __init__(self, bits, config: PositConfig = P32):
         self.config = config
-        self.backend = backend
+        # astype copies, so the result is C-contiguous and keeps its shape (0-d too, unlike ascontiguousarray)
+        self.bits = (np.asarray(bits).astype(np.int64) & config.mask).astype(bits_dtype(config))
 
-    # ---- construction and conversion ----------------------------------------------------
-
-    @classmethod
-    def from_float(cls, values, config: PositConfig = PositConfig(32), backend=None) -> "PositArray":
-        x = np.asarray(values, dtype=np.float64)
-        bits = np.fromiter((float_to_bits(config, v) for v in x.ravel().tolist()), dtype=np.int64, count=x.size)
-        return cls(bits.reshape(x.shape), config, backend)
+    # ---- conversion and container ----------------------------------------------------------
 
     def to_float(self) -> np.ndarray:
-        flat = [ref.to_float(self.config, int(v)) for v in self.bits.ravel().tolist()]
-        return np.array(flat, dtype=np.float64).reshape(self.bits.shape)
+        return vecops.to_float(self.config, self.bits)
 
-    # ---- operations -----------------------------------------------------------------------
-
-    def _backend(self):
-        return self.backend if self.backend is not None else get_backend(self.config)
-
-    def _binary(self, name: str, other: Union["PositArray", float, int]) -> "PositArray":
-        be = self._backend()
-        if isinstance(other, PositArray):
-            if other.config != self.config:
-                raise TypeError(f"{self.config} {name} {other.config}: formats differ")
-            if other.bits.shape != self.bits.shape:
-                raise ValueError(f"shapes {self.bits.shape} and {other.bits.shape} (broadcasting comes in stage 3)")
-            r = be.array_op(name, self.bits, other.bits)
-        else:
-            r = be.array_op(name, self.bits, scalar=float_to_bits(self.config, float(other)))
-        return PositArray(r, self.config, self.backend)
-
-    def add(self, other):
-        return self._binary("add", other)
-
-    def sub(self, other):
-        return self._binary("sub", other)
-
-    def mul(self, other):
-        return self._binary("mul", other)
-
-    def div(self, other):
-        return self._binary("div", other)
-
-    __add__ = add
-    __sub__ = sub
-    __mul__ = mul
-    __truediv__ = div
-
-    # ---- container --------------------------------------------------------------------------
+    def __float__(self) -> float:
+        if self.size != 1:
+            raise TypeError("only one-element posit arrays convert to float")
+        return float(self.to_float().reshape(()))
 
     @property
     def shape(self):
         return self.bits.shape
 
+    @property
+    def ndim(self) -> int:
+        return self.bits.ndim
+
+    @property
+    def size(self) -> int:
+        return self.bits.size
+
     def __len__(self) -> int:
+        if self.ndim == 0:
+            raise TypeError("len() of a 0-d posit array")
         return len(self.bits)
 
-    def __getitem__(self, idx) -> "PositArray":
-        return PositArray(np.atleast_1d(self.bits[idx]), self.config, self.backend)
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
 
-    def __eq__(self, other) -> bool:
+    def __getitem__(self, idx) -> "PositArray":
+        return PositArray(self.bits[idx], self.config)
+
+    def __setitem__(self, idx, value) -> None:
+        self.bits[idx] = self._coerce(value).bits
+
+    def copy(self) -> "PositArray":
+        return PositArray(self.bits.copy(), self.config)
+
+    def reshape(self, *shape) -> "PositArray":
+        return PositArray(self.bits.reshape(*shape), self.config)
+
+    def ravel(self) -> "PositArray":
+        return PositArray(self.bits.ravel(), self.config)
+
+    flatten = ravel
+
+    @property
+    def T(self) -> "PositArray":
+        return PositArray(self.bits.T, self.config)
+
+    def equal_bits(self, other: "PositArray") -> bool:
+        """Same format, shape and bits (Python truth value; == is element-wise, as in NumPy)."""
         return isinstance(other, PositArray) and other.config == self.config and np.array_equal(other.bits, self.bits)
 
     def __repr__(self) -> str:
-        vals = self.to_float() if self.bits.size <= 8 else self[:8].to_float()
-        more = "" if self.bits.size <= 8 else f", ... ({self.bits.size} elements)"
-        return f"PositArray({np.array2string(vals.ravel(), separator=', ')}{more}, {self.config})"
+        f = self.to_float()
+        body = np.array2string(f, separator=", ", threshold=12, edgeitems=4,
+                               formatter={"float_kind": lambda v: "NaR" if np.isnan(v) else f"{v:.8g}"})
+        return f"PositArray({body}, {self.config})"
+
+    # ---- operands ---------------------------------------------------------------------------
+
+    def _coerce(self, other) -> "PositArray":
+        if isinstance(other, PositArray):
+            if other.config != self.config:
+                raise TypeError(f"{self.config} and {other.config}: convert with pn.array(x, config) first")
+            return other
+        if isinstance(other, np.ndarray) and other.dtype == bool:
+            raise TypeError("boolean arrays are not posits")
+        return array(other, self.config)
+
+    def _binary(self, name: str, other) -> "PositArray":
+        o = self._coerce(other)
+        be = get_backend(self.config)
+        if o.size == 1 and o.shape in ((), (1,)) and self.size >= 1:
+            r = be.array_op(name, self.bits.ravel(), scalar=int(o.bits.ravel()[0]))
+            shape = np.broadcast_shapes(self.shape, o.shape)
+            return PositArray(r.reshape(shape), self.config)
+        a, b = np.broadcast_arrays(self.bits, o.bits)
+        r = be.array_op(name, np.ascontiguousarray(a).ravel(), np.ascontiguousarray(b).ravel())
+        return PositArray(r.reshape(a.shape), self.config)
+
+    def _rbinary(self, name: str, other) -> "PositArray":
+        return self._coerce(other)._binary(name, self)
+
+    # ---- arithmetic: the backend ------------------------------------------------------------
+
+    def __add__(self, other):
+        return self._binary("add", other)
+
+    def __sub__(self, other):
+        return self._binary("sub", other)
+
+    def __mul__(self, other):
+        return self._binary("mul", other)
+
+    def __truediv__(self, other):
+        return self._binary("div", other)
+
+    def __radd__(self, other):
+        return self._rbinary("add", other)
+
+    def __rsub__(self, other):
+        return self._rbinary("sub", other)
+
+    def __rmul__(self, other):
+        return self._rbinary("mul", other)
+
+    def __rtruediv__(self, other):
+        return self._rbinary("div", other)
+
+    add, sub, mul, div = __add__, __sub__, __mul__, __truediv__
+
+    # ---- level 0: on the bits, exact ---------------------------------------------------------
+
+    def _signed(self) -> np.ndarray:
+        return vecops.to_signed(self.config, self.bits)
+
+    def __neg__(self):
+        return PositArray(vecops.neg(self.config, self.bits), self.config)
+
+    def __pos__(self):
+        return self.copy()
+
+    def __abs__(self):
+        return PositArray(vecops.absolute(self.config, self.bits), self.config)
+
+    def _cmp(self, other, op) -> np.ndarray:
+        o = self._coerce(other)
+        return op(self._signed(), o._signed())
+
+    def __lt__(self, other):
+        return self._cmp(other, np.less)
+
+    def __le__(self, other):
+        return self._cmp(other, np.less_equal)
+
+    def __gt__(self, other):
+        return self._cmp(other, np.greater)
+
+    def __ge__(self, other):
+        return self._cmp(other, np.greater_equal)
+
+    def __eq__(self, other):
+        return self._cmp(other, np.equal)
+
+    def __ne__(self, other):
+        return self._cmp(other, np.not_equal)
+
+    def isnar(self) -> np.ndarray:
+        return self.bits == self.config.nar
+
+    def _from_signed(self, s) -> "PositArray":
+        return PositArray(np.asarray(s) & self.config.mask, self.config)
+
+    def sort(self, axis=-1) -> None:
+        """In place, NaR first."""
+        self.bits[...] = self._from_signed(np.sort(self._signed(), axis=axis)).bits
+
+    def max(self, axis=None):
+        return self._from_signed(np.max(self._signed(), axis=axis))
+
+    def min(self, axis=None):
+        return self._from_signed(np.min(self._signed(), axis=axis))
+
+    def argmax(self, axis=None):
+        return np.argmax(self._signed(), axis=axis)
+
+    def argmin(self, axis=None):
+        return np.argmin(self._signed(), axis=axis)
+
+    # ---- NumPy protocols ----------------------------------------------------------------------
+
+    _UFUNCS = {
+        np.add: "add", np.subtract: "sub", np.multiply: "mul", np.true_divide: "div",
+        np.negative: "neg", np.positive: "pos", np.absolute: "abs", np.square: "square",
+        np.less: "lt", np.less_equal: "le", np.greater: "gt", np.greater_equal: "ge",
+        np.equal: "eq", np.not_equal: "ne", np.maximum: "maximum", np.minimum: "minimum",
+        np.isnan: "isnar",
+    }
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if method != "__call__" or kwargs.get("out") is not None or set(kwargs) - {"out"}:
+            return NotImplemented
+        what = self._UFUNCS.get(ufunc)
+        if what is None:
+            if ufunc.__name__ in _LATER:
+                raise TypeError(f"np.{ufunc.__name__} on posit arrays: {_LATER[ufunc.__name__]}")
+            return NotImplemented
+        first = next(x for x in inputs if isinstance(x, PositArray))
+        args = [first._coerce(x) for x in inputs]
+        a = args[0]
+        if what in ("add", "sub", "mul", "div"):
+            return a._binary(what, args[1])
+        if what == "square":
+            return a._binary("mul", a)
+        if what == "neg":
+            return -a
+        if what == "pos":
+            return a.copy()
+        if what == "abs":
+            return abs(a)
+        if what == "isnar":
+            return a.isnar()
+        if what in ("maximum", "minimum"):
+            fn = np.maximum if what == "maximum" else np.minimum
+            return a._from_signed(fn(a._signed(), args[1]._signed()))
+        return {"lt": a.__lt__, "le": a.__le__, "gt": a.__gt__, "ge": a.__ge__,
+                "eq": a.__eq__, "ne": a.__ne__}[what](args[1])
+
+    def __array_function__(self, func, types, args, kwargs):
+        impl = _FUNCTIONS.get(func)
+        if impl is None:
+            if func.__name__ in _LATER:
+                raise TypeError(f"np.{func.__name__} on posit arrays: {_LATER[func.__name__]}")
+            return NotImplemented
+        if not all(issubclass(t, (PositArray, np.ndarray)) for t in types):
+            return NotImplemented
+        return impl(*args, **kwargs)
+
+
+def _config_of(seq) -> PositConfig:
+    configs = {x.config for x in seq if isinstance(x, PositArray)}
+    if len(configs) != 1:
+        raise TypeError(f"mixed posit formats: {sorted(map(str, configs))}")
+    return configs.pop()
+
+
+def _sort(a, axis=-1, **kw):
+    r = a.copy()
+    r.sort(axis=axis)
+    return r
+
+
+def _concatenate(arrays, axis=0, **kw):
+    c = _config_of(arrays)
+    return PositArray(np.concatenate([array(x, c).bits if not isinstance(x, PositArray) else x.bits for x in arrays],
+                                     axis=axis), c)
+
+
+def _stack(arrays, axis=0, **kw):
+    c = _config_of(arrays)
+    return PositArray(np.stack([x.bits for x in arrays], axis=axis), c)
+
+
+def _where(cond, x, y):
+    c = _config_of([x, y])
+    xb = x.bits if isinstance(x, PositArray) else array(x, c).bits
+    yb = y.bits if isinstance(y, PositArray) else array(y, c).bits
+    return PositArray(np.where(np.asarray(cond), xb, yb), c)
+
+
+_FUNCTIONS: Dict[Any, Any] = {
+    np.sort: _sort,
+    np.argsort: lambda a, axis=-1, **kw: np.argsort(a._signed(), axis=axis, kind=kw.get("kind")),
+    np.max: lambda a, axis=None, **kw: a.max(axis),
+    np.min: lambda a, axis=None, **kw: a.min(axis),
+    np.argmax: lambda a, axis=None, **kw: a.argmax(axis),
+    np.argmin: lambda a, axis=None, **kw: a.argmin(axis),
+    np.concatenate: _concatenate,
+    np.stack: _stack,
+    np.where: _where,
+    np.reshape: lambda a, shape, **kw: a.reshape(shape),
+    np.ravel: lambda a, **kw: a.ravel(),
+    np.shape: lambda a: a.shape,
+    np.ndim: lambda a: a.ndim,
+    np.size: lambda a, axis=None: a.size if axis is None else a.shape[axis],
+    np.copy: lambda a, **kw: a.copy(),
+    np.transpose: lambda a, axes=None: PositArray(np.transpose(a.bits, axes), a.config),
+    np.array_equal: lambda a, b, **kw: isinstance(a, PositArray) and a.equal_bits(b),
+    np.isnan: lambda a: a.isnar(),
+}
+for _alias in ("amax", "amin"):
+    if hasattr(np, _alias) and getattr(np, _alias) not in _FUNCTIONS:
+        _FUNCTIONS[getattr(np, _alias)] = _FUNCTIONS[np.max if _alias == "amax" else np.min]
