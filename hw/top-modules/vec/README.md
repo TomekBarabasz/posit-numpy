@@ -158,8 +158,26 @@ Trzy tablice (`fma(x, y, z)`) wymagają trzeciego strumienia, czyli własnego ma
 do tego czasu `PositVecHw` liczy je w `PositSw` i dolicza do `stats()["fallback"]`. Tak samo każda
 operacja, której wgrany bitstream nie ma (maska w CONFIG) — kod Pythona działa bez zmian na starszych bitstreamach.
 
+Na płytce (2026-11-13, `posit32_vec` 4.0, `test_stage5_throughput`): przepustowość jednego wywołania
+na 4 194 304 elementach (z pakowaniem, synchronizacją cache i kopiami):
+
+| | M elementów / s | silnik (100 MHz) | |
+| --- | ---: | ---: | --- |
+| sqrt | 8,9 | 10 | ogranicza rekurencja (10 taktów / element), PS dokłada ok. 11% |
+| FMA | 20,2 | 33 | 3 takty / element; pakowanie `{b, a}` jak w add |
+| AXPY | 20,3 | 33 | to samo co FMA: `x` i `y` w jednym słowie strumienia |
+| F2P | 43,4 | 100 | jednoargumentowe: pakowanie tylko połowy `a`, mniej pracy PS niż add (25,4) |
+| P2F | 44,2 | 100 | |
+| NumPy float32 `np.sqrt` | 224 | | |
+
+- sqrt jest ograniczony silnikiem; szybszy wymagałby `k = 8` (6 taktów) albo rozwiniętego potoku — kosztem LUT.
+- FMA / AXPY: 3 takty / element w ścieżce iteracyjnej; potokowe FMA dałoby 1 / takt, ale wtedy ograniczy PS
+  (jak dla add, ok. 25 M/s) — to zysk dopiero razem z masterem AXI4 z etapu 6.
+- Konwersje są ograniczone przez PS (silnik: 100 M/s); dają dokładne RNE float32 ↔ posit32 bez przejścia
+  przez float64 i odciążają procesor przy danych, które i tak idą do PL.
+
 **Bitstream z etapu 4 nie ma tych operacji** — trzeba go zbudować od nowa (te same kroki niżej).
-Warto też powtórzyć OOC `vec_p32` (`-only "vec_*/*" -impl`): sqrt i FMA dokładają logikę na ścieżce iteracyjnej.
+OOC z pełną konfiguracją etapu 5: `top-modules/ooc` (`-only "vec_*/*" -impl`, do powtórzenia po poprawce `OocUnits`).
 
 ## Weryfikacja
 

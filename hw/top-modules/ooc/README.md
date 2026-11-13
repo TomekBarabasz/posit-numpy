@@ -10,7 +10,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `full/` | `PositPipeline.full`: rejestry po dekoderze, operacji i enkoderze |
 | `div/` | dzielniki sekwencyjne: `Iterative(1)`, `Iterative(4)`, `Pipelined(4)` |
 | `alu_p16/`, `alu_p32/` | `PositAluAxiLite` z etapu 1 (k = 4, potok full), ta sama konfiguracja co `top-modules/alu` |
-| `vec_p16/`, `vec_p32/` | `PositVecAxi` z etapu 2 (rejestry + AXI4-Stream), ta sama konfiguracja co `top-modules/vec` |
+| `vec_p16/`, `vec_p32/` | `PositVecAxi` (rejestry, AXI4-Stream, quire, sqrt / FMA / konwersje), ta sama konfiguracja co `top-modules/vec` |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 
@@ -92,6 +92,23 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
   (~570 b) i odczyt (wybór segmentu, LZC 64 b) mieszczą się w jednym takcie.
 - Koszt quire posit32 względem `alu_p32`: ok. +3 600 LUT, +2 300 FF (dwa rejestry 512 b: akumulator i odczyt,
   plus potok) i +4 DSP (mnożarka 28 × 28 b w quire, osobna od ALU). Cały silnik to ok. 4,3% LUT układu.
+
+### Etap 5, przebieg kontrolny: `PositVecAxi` 4.0 bez nowych operacji (2026-11-13)
+
+Do tego przebiegu `OocUnits` generował `vec_p*` jeszcze bez `sqrt / fma / convert`, więc tabela pokazuje
+silnik z etapu 4 po przebudowie ALU (wspólna ścieżka iteracyjna, wynik surowy dla P2F), a nie koszt etapu 5.
+Teraz `vec_p*` mają tę samą konfigurację co bitstream — **do powtórzenia** `-impl -only "vec_*/*"`.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p16` | synth | 2 792 | 1 657 | 106 | 2 | 0 | 2,907 | 141,0 |
+| `vec_p16` | impl | 2 759 | 1 657 | 106 | 2 | 0 | 2,783 | 138,6 |
+| `vec_p32` | synth | 5 062 | 3 036 | 226 | 8 | 0 | 1,859 | 122,8 |
+| `vec_p32` | impl | 5 009 | 3 036 | 226 | 8 | 0 | 1,146 | 112,9 |
+
+- Zasoby jak w etapie 4 (±2%), czyli przebudowa ALU nic nie kosztuje, gdy nowe operacje są wyłączone.
+- `vec_p32` po routingu 113 MHz (było 122) przy lepszej syntezie (123 vs 120 MHz): to rozrzut place & route
+  na tej samej logice, nie nowa ścieżka. Zapas przy 100 MHz nadal 1,1 ns.
 
 ### Jednostki posit-core (2026-11-13)
 
