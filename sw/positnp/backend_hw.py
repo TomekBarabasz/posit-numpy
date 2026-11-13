@@ -276,17 +276,25 @@ class PositVecHw(PositAluHw):
         return max(1, min(usable // (self.in_bytes + self.out_bytes), DMA_MAX_LENGTH // self.in_bytes))
 
     def _bits(self, x) -> np.ndarray:
+        """Raw bits as the n-bit unsigned dtype; no copy when they already are (PositArray.bits)."""
         x = np.asarray(x)
         if x.size == 0:
             return np.empty(0, self.out_dtype)
         if not np.issubdtype(x.dtype, np.integer):
             raise TypeError(f"raw posit bits expected (an integer array), got {x.dtype}")
-        return (x.astype(np.int64) & self.config.mask).astype(self.out_dtype).ravel()
+        # n is the dtype width (8/16/32), so the C cast is exactly "& mask"
+        return x.astype(self.out_dtype, copy=False).ravel()
 
     def array_op(self, name: str, a, b=None, scalar: Optional[int] = None) -> np.ndarray:
-        """Element-wise `name` on raw posit bits: a (+) b, or a (+) scalar. Returns raw bits, shape of a."""
+        """Element-wise `name` on raw posit bits: a (+) b, or a (+) scalar. Returns raw bits, shape of a.
+
+        Time per phase of the last call, in seconds: self.last_timing
+        (pack, sync_device, dma, sync_cpu, copy_out, total).
+        """
         if name not in self.ops:
             raise PositAluError(f"{name} is not built into this bitstream (ops: {self.ops})")
+        t_start = time.perf_counter()
+        timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
         shape = np.shape(a)
         av = self._bits(a)
         if scalar is None:
@@ -296,7 +304,7 @@ class PositVecHw(PositAluHw):
             if bv.size != av.size:
                 raise ValueError(f"a has {av.size} elements, b {bv.size}")
         else:
-            bv = np.zeros(av.size, self.out_dtype)
+            bv = None
         out = np.empty(av.size, self.out_dtype)
         if av.size == 0:
             return out.reshape(shape)
@@ -306,16 +314,27 @@ class PositVecHw(PositAluHw):
         if scalar is not None:
             self.write(regs.OPERAND_B, int(scalar) & self.config.mask)
 
-        n = self.config.n
         step = self.chunk_elements()
         for i in range(0, av.size, step):
             k = min(step, av.size - i)
             in_len = k * self.in_bytes
             out_off = -(-in_len // self.ALIGN) * self.ALIGN
             out_len = k * self.out_bytes
-            words = self.buf.view(self.in_dtype, 0, k)
-            words[:] = av[i:i + k].astype(self.in_dtype) | (bv[i:i + k].astype(self.in_dtype) << self.in_dtype(n))
-            self.buf.sync_for_device(0, out_off + out_len)
+
+            # {b, a} in a little-endian 2n-bit word = the pair (a, b) of n-bit words: two strided copies
+            t = time.perf_counter()
+            pairs = self.buf.view(self.out_dtype, 0, 2 * k).reshape(k, 2)
+            pairs[:, 0] = av[i:i + k]
+            if bv is not None:
+                pairs[:, 1] = bv[i:i + k]          # scalar mode: the b half is ignored by the engine
+            timing["pack"] += time.perf_counter() - t
+
+            t = time.perf_counter()
+            self.buf.sync_for_device(0, in_len, 1)             # clean: the DMA reads the input
+            self.buf.sync_for_device(out_off, out_len, 2)      # invalidate: no dirty line over the result
+            timing["sync_device"] += time.perf_counter() - t
+
+            t = time.perf_counter()
             self.dma.start_s2mm(self.buf.phys_addr + out_off, out_len)
             self.dma.start_mm2s(self.buf.phys_addr, in_len)
             try:
@@ -326,8 +345,17 @@ class PositVecHw(PositAluHw):
                                f"CNT_ELEMENTS {self.read(regs.CNT_ELEMENTS)}") from None
             if got != out_len:
                 raise DmaError(f"S2MM wrote {got} B, expected {out_len} B ({k} elements)")
-            self.buf.sync_for_cpu(out_off, out_len)
+            timing["dma"] += time.perf_counter() - t
+
+            t = time.perf_counter()
+            self.buf.sync_for_cpu(out_off, out_len, 2)
+            timing["sync_cpu"] += time.perf_counter() - t
+
+            t = time.perf_counter()
             out[i:i + k] = self.buf.view(self.out_dtype, out_off, k)
+            timing["copy_out"] += time.perf_counter() - t
+        timing["total"] = time.perf_counter() - t_start
+        self.last_timing = timing
         return out.reshape(shape)
 
     def stats(self) -> Dict[str, int]:
@@ -338,8 +366,8 @@ class PositVecHw(PositAluHw):
     def time_array(self, name: str = "add", size: int = 1 << 20) -> float:
         """Elements per second for one array_op on `size` random elements (DMA, packing and copies included)."""
         rnd = np.random.default_rng(0)
-        a = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64)
-        b = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64)
+        a = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
+        b = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
         t0 = time.perf_counter()
         self.array_op(name, a, b)
         return size / (time.perf_counter() - t0)
