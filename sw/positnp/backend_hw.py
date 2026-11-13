@@ -24,11 +24,18 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Protocol, Tuple
 
+import numpy as np
+
 from . import ref, regs
+from .dma import MAX_LENGTH as DMA_MAX_LENGTH, AxiDma, DmaError
 from .ref import Flags, PositConfig
+from .udmabuf import UDmaBuf
 
 OVERLAY_DIR = Path(__file__).with_name("overlays")
 IP_NAME = "posit_alu"  # block design instance = UIO node name in the .dtsi (hw/top-modules/alu/vivado/build.tcl)
+VEC_NAME = "posit_vec"  # stage 2 (hw/top-modules/vec/vivado/build.tcl)
+DMA_NAME = "posit_dma"
+BUF_NAME = "udmabuf-posit"
 UIO_CLASS = Path("/sys/class/uio")
 
 
@@ -226,6 +233,116 @@ class PositAluHw:
 
     def __repr__(self) -> str:
         return f"PositAluHw({self.config}, ops={self.ops}, version={self.version >> 8}.{self.version & 0xFF})"
+
+
+class PositVecHw(PositAluHw):
+    """Stage 2: whole arrays through AXI DMA and AXI4-Stream; single ops as in stage 1.
+
+        vec = PositVecHw.open()                     # /dev/uio (posit_vec, posit_dma), /dev/udmabuf-posit
+        r = vec.array_op("mul", a_bits, b_bits)     # numpy arrays of raw posit bits -> raw bits
+        r = vec.array_op("add", a_bits, scalar=b)   # array (+) scalar
+
+    Per chunk: pack {b, a} into the buffer, cache sync, arm S2MM, start MM2S, wait for
+    both, check the received byte count, cache sync, copy the result out.
+    """
+
+    IN_DTYPE = {8: np.uint16, 16: np.uint32, 32: np.uint64}    # s_axis word: {b, a}
+    OUT_DTYPE = {8: np.uint8, 16: np.uint16, 32: np.uint32}    # m_axis word: result
+    ALIGN = 4096
+
+    def __init__(self, mmio: Mmio, dma_mmio: Mmio, buf, timeout_polls: int = 100_000):
+        super().__init__(mmio, timeout_polls)
+        cfg = self.read(regs.CONFIG)
+        if not cfg >> regs.CONFIG_HAS_STREAM & 1 or self.version < regs.VERSION_VEC:
+            raise PositAluError(f"engine without the stream path (CONFIG 0x{cfg:08x}, version 0x{self.version:04x})")
+        n = self.config.n
+        if n not in self.IN_DTYPE:
+            raise PositAluError(f"posit<{n}>: the stream path needs n = 8, 16 or 32")
+        self.dma = AxiDma(dma_mmio)
+        self.buf = buf
+        self.in_dtype = self.IN_DTYPE[n]
+        self.out_dtype = self.OUT_DTYPE[n]
+        self.in_bytes = 2 * n // 8
+        self.out_bytes = n // 8
+        self.dma.reset()
+
+    @classmethod
+    def open(cls, name: str = VEC_NAME, dma: str = DMA_NAME, buf: str = BUF_NAME) -> "PositVecHw":
+        return cls(UioMmio(name), UioMmio(dma), UDmaBuf(buf))
+
+    def chunk_elements(self) -> int:
+        """Elements per DMA round: input and output regions in one buffer, input within one transfer."""
+        usable = self.buf.size - self.ALIGN
+        return max(1, min(usable // (self.in_bytes + self.out_bytes), DMA_MAX_LENGTH // self.in_bytes))
+
+    def _bits(self, x) -> np.ndarray:
+        x = np.asarray(x)
+        if x.size == 0:
+            return np.empty(0, self.out_dtype)
+        if not np.issubdtype(x.dtype, np.integer):
+            raise TypeError(f"raw posit bits expected (an integer array), got {x.dtype}")
+        return (x.astype(np.int64) & self.config.mask).astype(self.out_dtype).ravel()
+
+    def array_op(self, name: str, a, b=None, scalar: Optional[int] = None) -> np.ndarray:
+        """Element-wise `name` on raw posit bits: a (+) b, or a (+) scalar. Returns raw bits, shape of a."""
+        if name not in self.ops:
+            raise PositAluError(f"{name} is not built into this bitstream (ops: {self.ops})")
+        shape = np.shape(a)
+        av = self._bits(a)
+        if scalar is None:
+            if b is None:
+                raise ValueError("array_op needs b or scalar")
+            bv = self._bits(b)
+            if bv.size != av.size:
+                raise ValueError(f"a has {av.size} elements, b {bv.size}")
+        else:
+            bv = np.zeros(av.size, self.out_dtype)
+        out = np.empty(av.size, self.out_dtype)
+        if av.size == 0:
+            return out.reshape(shape)
+
+        self.write(regs.OP, regs.OPS[name])
+        self.write(regs.STREAM_CFG, 0 if scalar is None else 1 << regs.STREAM_CFG_SCALAR_B)
+        if scalar is not None:
+            self.write(regs.OPERAND_B, int(scalar) & self.config.mask)
+
+        n = self.config.n
+        step = self.chunk_elements()
+        for i in range(0, av.size, step):
+            k = min(step, av.size - i)
+            in_len = k * self.in_bytes
+            out_off = -(-in_len // self.ALIGN) * self.ALIGN
+            out_len = k * self.out_bytes
+            words = self.buf.view(self.in_dtype, 0, k)
+            words[:] = av[i:i + k].astype(self.in_dtype) | (bv[i:i + k].astype(self.in_dtype) << self.in_dtype(n))
+            self.buf.sync_for_device(0, out_off + out_len)
+            self.dma.start_s2mm(self.buf.phys_addr + out_off, out_len)
+            self.dma.start_mm2s(self.buf.phys_addr, in_len)
+            try:
+                self.dma.wait_mm2s()
+                got = self.dma.wait_s2mm()
+            except DmaError as e:
+                raise DmaError(f"{e}; engine STATUS 0x{self.read(regs.STATUS):08x}, "
+                               f"CNT_ELEMENTS {self.read(regs.CNT_ELEMENTS)}") from None
+            if got != out_len:
+                raise DmaError(f"S2MM wrote {got} B, expected {out_len} B ({k} elements)")
+            self.buf.sync_for_cpu(out_off, out_len)
+            out[i:i + k] = self.buf.view(self.out_dtype, out_off, k)
+        return out.reshape(shape)
+
+    def stats(self) -> Dict[str, int]:
+        s = super().stats()
+        s["elements"] = self.read(regs.CNT_ELEMENTS)
+        return s
+
+    def time_array(self, name: str = "add", size: int = 1 << 20) -> float:
+        """Elements per second for one array_op on `size` random elements (DMA, packing and copies included)."""
+        rnd = np.random.default_rng(0)
+        a = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64)
+        b = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64)
+        t0 = time.perf_counter()
+        self.array_op(name, a, b)
+        return size / (time.perf_counter() - t0)
 
 
 class FakeAluMmio:

@@ -2,7 +2,7 @@
 #  Etap 1: aplikacja PL dla xmutil (dfx-mgr) z ALU posit za AXI4-Lite na KV260.
 #  Bez PYNQ: na plytce Ubuntu + xmutil, rejestry przez /dev/uioN.
 #
-#    RTL -> IP (package_ip.tcl) -> block design -> bitstream
+#    RTL -> IP (../../common/vivado/package_ip.tcl) -> block design -> bitstream
 #        -> bootgen: .bit.bin, + .dtsi (region FPGA, zegar PL0, wezel UIO), shell.json
 #
 #  Block design:
@@ -38,7 +38,7 @@
 
 set ::posit_build 1
 set script_dir [file normalize [file dirname [info script]]]
-source [file join $script_dir package_ip.tcl]
+source [file join $script_dir .. .. common vivado package_ip.tcl]
 
 array set opt [list \
     n      32 \

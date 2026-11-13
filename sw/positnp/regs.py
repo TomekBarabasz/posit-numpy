@@ -1,7 +1,9 @@
-"""Register map of the posit ALU behind AXI4-Lite (stage 1).
+"""Register maps of the posit engine.
 
-Mirror of posit.kv260.PositAluRegs in hw/posit-kv260; PositAluRegsTestplan
-fails when the two differ, so change both together.
+Stage 1 (PositAluAxiLite, version 1.0): mirror of posit.kv260.PositAluRegs.
+Stage 2 (PositVecAxi, version 2.0): the same map plus the stream additions below,
+mirror of posit.kv260.PositVecRegs. PositAluAxiLiteTestplan / PositVecAxiTestplan
+fail when Scala and this file differ, so change both together.
 """
 
 ID_VERSION = 0x00   # RO  [31:16] ID = 0x5053 ("PS"), [15:8] major, [7:0] minor
@@ -33,6 +35,16 @@ OP_ADD = 0
 OP_SUB = 1
 OP_MUL = 2
 OP_DIV = 3
+
+# ---- stage 2: arrays through AXI4-Stream (PositVecAxi, version 2.0) ----------------------
+STREAM_CFG = 0x24     # RW  bit 0 scalar_b: array (+) scalar, b = OPERAND_B
+CNT_ELEMENTS = 0x50   # RO  stream results since the last clear
+
+STREAM_CFG_SCALAR_B = 0
+STATUS_STREAM_ACTIVE = 3  # element(s) inside the ALU
+CONFIG_HAS_STREAM = 12    # CONFIG bit: the engine has the stream ports
+
+VERSION_VEC = 0x0200
 
 # Flag bits as in STATUS[10:8] >> STATUS_FLAGS_SHIFT and in ref.Flags.bits.
 FLAG_NAR = 1

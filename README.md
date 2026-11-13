@@ -14,7 +14,9 @@ hw/                     sbt, SpinalHDL 1.15.0 (z lib/sbt/HwBuild.scala)
 sw/                     bindingi Pythona (positnp): ref.py, regs.py, backend_hw.py
 ```
 
-Stan: etap 1 (ALU za AXI4-Lite, wywołanie z Pythona) — `hw/top-modules/alu/README.md`.
+Stan:
+- etap 1 (ALU za AXI4-Lite, wywołanie z Pythona): sprawdzony na płytce — `hw/top-modules/alu/README.md`;
+- etap 2 (tablice przez AXI4-Stream i AXI DMA, `PositArray` v0): w symulacji i na atrapach — `hw/top-modules/vec/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)
@@ -83,6 +85,15 @@ sbt "top-alu/runMain posit.top.alu.AluKv260"     # z hw/
 vivado -mode batch -nojournal -log build.log -source build.tcl    # z hw/top-modules/alu/vivado
 scripts/install_overlay.sh posit32_alu           # na KV260, z sw/
 sudo python3 -m pytest -v tests/test_board.py    # na KV260, z sw/
+```
+
+## etap 2 na płytce
+```
+sbt "top-vec/runMain posit.top.vec.VecKv260"     # z hw/
+vivado -mode batch -nojournal -log build.log -source build.tcl    # z hw/top-modules/vec/vivado
+scripts/build_udmabuf.sh                         # na KV260, z sw/, raz na jądro
+scripts/install_overlay.sh posit32_vec           # na KV260, z sw/
+sudo python3 -m pytest -v -s tests/test_board_vec.py
 ```
 
 ## synteza OOC (etap 0)
