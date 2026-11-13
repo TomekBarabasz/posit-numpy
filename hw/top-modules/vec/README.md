@@ -158,8 +158,10 @@ Trzy tablice (`fma(x, y, z)`) wymagają trzeciego strumienia, czyli własnego ma
 do tego czasu `PositVecHw` liczy je w `PositSw` i dolicza do `stats()["fallback"]`. Tak samo każda
 operacja, której wgrany bitstream nie ma (maska w CONFIG) — kod Pythona działa bez zmian na starszych bitstreamach.
 
-Na płytce (2026-11-13, `posit32_vec` 4.0, `test_stage5_throughput`): przepustowość jednego wywołania
-na 4 194 304 elementach (z pakowaniem, synchronizacją cache i kopiami):
+Na płytce (2026-11-13, `posit32_vec` 4.0): `test_board_vec.py` przechodzi w całości — sqrt na 1 000 001 elementach,
+FMA / AXPY w trzech trybach, F2P / P2F z NaN, inf i subnormalami, bit w bit z `PositSw`, `PositArray` na sprzęcie
+bez przejść na `PositSw`. Przepustowość jednego wywołania na 4 194 304 elementach (z pakowaniem,
+synchronizacją cache i kopiami):
 
 | | M elementów / s | silnik (100 MHz) | |
 | --- | ---: | ---: | --- |
