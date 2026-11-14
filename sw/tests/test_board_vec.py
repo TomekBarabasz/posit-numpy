@@ -241,3 +241,26 @@ def test_engines_side_by_side():
     finally:
         for hw in engines.values():
             hw.close()
+
+
+# ---- pn.board on the loaded application (no reload) ---------------------------------------------------
+
+def test_board_open_and_describe():
+    import positnp as pn
+    try:
+        name = pn.board.active()
+    except pn.board.BoardError as e:
+        pytest.skip(f"xmutil not usable here: {e}")
+    app = next((a for a in pn.board.apps() if a.name == name), None)
+    try:
+        hw = pn.board.open()
+        assert len(hw) == len(ENGINES)
+        if app is not None and app.engines:
+            assert sorted(hw) == sorted(e["n"] for e in app.engines if e.get("n")) or None in [e.get("n") for e in app.engines]
+        print("\n" + pn.board.describe())
+        for n, h in hw.items():
+            assert pn.get_backend(h.config) is h
+            x = pn.array([1.0, 2.0, 3.0], h.config)
+            assert (x * x).to_float().tolist() == [1.0, 4.0, 9.0]
+    finally:
+        pn.board.close()

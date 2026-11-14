@@ -99,6 +99,8 @@ scripts/build_udmabuf.sh                         # na KV260, z sw/, raz na jądr
 scripts/install_overlay.sh posit32_16_8_vec      # na KV260, z sw/
 sudo python3 -m pytest -v -s tests/test_board_vec.py
 ```
+Z Pythona (`pn.board`): `pn.board.apps()`, `pn.board.load("posit32_16_8_vec")` (każdy silnik staje się
+backendem swojego formatu), `pn.board.describe()`, `pn.board.unload()`; opis w `sw/README.md`.
 
 ## synteza OOC (etap 0)
 z `hw/top-modules/ooc/vivado`, opis opcji i metody: `hw/top-modules/ooc/README.md`
