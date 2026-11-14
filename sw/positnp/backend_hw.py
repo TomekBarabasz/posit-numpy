@@ -615,8 +615,8 @@ class PositVecHw(PositAluHw):
                 self.buf.view(self.out_dtype, off, k)[:] = x[i:i + k]      # contiguous copies, no packing
             timing["pack"] += time.perf_counter() - t
             t = time.perf_counter()
-            for off in base(j):
-                self.buf.sync_for_device(off, nbytes(k), 1)
+            r = base(j)                           # regions of one half are adjacent: one sync for all
+            self.buf.sync_for_device(r[0], r[-1] - r[0] + nbytes(k), 1)
             timing["sync_device"] += time.perf_counter() - t
 
         def start(j):

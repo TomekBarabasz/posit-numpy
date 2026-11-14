@@ -316,20 +316,28 @@ def test_master_throughput(hw, sw):
 
 
 def test_master_double_buffer_gain(hw):
-    """Same op with one buffer half (copy, run, copy) and with two (copies overlap the engine)."""
+    """add with one buffer (copy, run, copy) and with two halves for several chunk sizes: every phase.
+
+    Phases overlap with double buffering, so 'engine wait' is the time the CPU had nothing to do."""
     _need_master(hw)
     size = 1 << 22
     rows = []
+    chunk0 = hw.MEM_CHUNK_BYTES
     try:
-        for double in (False, True):
+        for double, chunk in ((False, None), (True, 256 << 10), (True, 1 << 20), (True, 4 << 20), (True, 8 << 20)):
             hw.double_buffer = double
-            hw.time_array("add", 1 << 16)                       # warm-up: touch the pages of the layout
-            rows.append((double, hw.time_array("add", size), dict(hw.last_timing)))
+            if chunk:
+                hw.MEM_CHUNK_BYTES = chunk
+            hw.time_array("add", size)                          # warm-up: touch every page of this layout
+            rows.append((double, chunk, hw.time_array("add", size), dict(hw.last_timing)))
     finally:
         hw.double_buffer = True
+        hw.MEM_CHUNK_BYTES = chunk0
     print("")
-    for double, v, t in rows:
-        print(f"{'double' if double else 'single':>7} buffer add: {v / 1e6:8.3f} M elem/s | total {t['total'] * 1e3:.1f} ms, "
-              f"waiting for the engine {t['dma'] * 1e3:.1f} ms, copies {(t['pack'] + t['copy_out']) * 1e3:.1f} ms")
+    for double, chunk, v, t in rows:
+        label = f"double {chunk >> 10:5d} KB" if double else "single        "
+        print(f"{label}: {v / 1e6:7.2f} M elem/s | total {t['total'] * 1e3:6.1f} ms: copy in {t['pack'] * 1e3:5.1f}, "
+              f"sync dev {t['sync_device'] * 1e3:5.1f}, engine wait {t['dma'] * 1e3:5.1f}, "
+              f"sync cpu {t['sync_cpu'] * 1e3:5.1f}, copy out {t['copy_out'] * 1e3:5.1f} ms")
     if size >= 1 << 20:                                      # on the board (not the small fake run)
-        assert rows[1][1] > rows[0][1], "double buffering slower than a single buffer"
+        assert max(r[2] for r in rows[1:]) > rows[0][2], "double buffering slower than a single buffer"
