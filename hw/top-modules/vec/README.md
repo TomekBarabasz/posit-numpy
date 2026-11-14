@@ -126,7 +126,8 @@ dekoder -> prepare -+                                                           
 - Ustawienie przy generowaniu: silnik `n:es:k:u`, np. `VecKv260 32:2:4:4 16:2:4:2`.
   Odczyt: rejestr ENGINE_CFG (0x5C): [7:0] k, [15:8] tory; w Pythonie `PositVecHw.engine_cfg()`.
 - Na płytce przy 4 torach div powinien dojść do granicy procesora (ok. 20–25 M/s zamiast 8,4) — do zmierzenia.
-- Koszt: OOC `vec_p32_u4` (`top-modules/ooc`).
+- Koszt (OOC, posit32): 4 tory = 10 469 LUT, 4 926 FF, 8 DSP, 113 MHz po routingu, wobec 6 550 LUT przy jednym
+  torze — ok. 1 300 LUT na każdy dodatkowy tor, bez nowych DSP i bez zmiany Fmax (`hw/top-modules/ooc/README.md`).
 
 ## Krok po kroku
 
