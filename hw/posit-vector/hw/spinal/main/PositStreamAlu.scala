@@ -12,7 +12,8 @@ import posit._
 //
 //  - tablica (+) tablica: a i b z elementu strumienia; tablica (+) skalar
 //    (io.scalarB): b z io.b dla kazdego elementu,
-//  - FMA (etap 5): a * b + io.addend; AXPY: a * io.b + b ze strumienia
+//  - FMA (etap 5): a * b + io.addend; AXPY: a * io.b + b ze strumienia;
+//    FMA3 (etap 6, cfg.fma3): a * b + c3, c3 z elementu strumienia (trzecia tablica)
 //    (y = alfa * x + y: x w polowie a, y w polowie b, alfa w OPERAND_B),
 //  - `last` przechodzi z wejscia na wyjscie przy tym samym elemencie
 //    (S2MM w AXI DMA konczy transfer na tlast),
@@ -23,14 +24,15 @@ import posit._
 //  - FIFO znacznikow pilnuje tez liczby elementow w ALU (inFlight);
 //    glebokosc z zapasem ponad liczbe rejestrow potoku.
 // =====================================================================
-case class PositPair(c : PositConfig) extends Bundle {
+case class PositPair(c : PositConfig, withC : Boolean = false) extends Bundle {
   val a, b = Bits(c.n bits)
+  val c3   = withC generate Bits(c.n bits)       // FMA3 (etap 6): trzecia tablica, a * b + c3
 }
 
 class PositStreamAlu(val cfg : PositAluConfig, tagDepth : Int = 0) extends Component {
   val c = cfg.c
   val io = new Bundle {
-    val input   = slave(Stream(Fragment(PositPair(c))))
+    val input   = slave(Stream(Fragment(PositPair(c, cfg.fma3))))
     val output  = master(Stream(Fragment(PositAluRsp(c))))
     val op      = in UInt(PositAluOp.width bits)   // operacja dla strumienia
     val scalarB = in Bool()                         // tablica (+) skalar: b = io.b
@@ -67,6 +69,7 @@ class PositStreamAlu(val cfg : PositAluConfig, tagDepth : Int = 0) extends Compo
     t.cmd.a          := x.fragment.a
     t.cmd.b          := Mux(io.scalarB || axpy, io.b, x.fragment.b)
     t.cmd.addend     := Mux(axpy, x.fragment.b, io.addend)
+    if (cfg.fma3) when(io.op === PositAluOp.FMA3) { t.cmd.addend := x.fragment.c3 }
     t.tag.fromStream := True
     t.tag.last       := x.last
     t

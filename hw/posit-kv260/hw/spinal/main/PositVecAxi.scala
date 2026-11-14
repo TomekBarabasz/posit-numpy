@@ -3,6 +3,7 @@ package posit.kv260
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.amba4.axilite._
+import spinal.lib.bus.amba4.axi.{Axi4, Axi4SpecRenamer}
 import posit._
 import posit.vector._
 
@@ -66,11 +67,38 @@ object PositVecRegs {
   // 4.1: parametry silnika do odczytu (tory wielotaktowe, slowUnits)
   val ENGINE_CFG = 0x5C  // RO  [7:0] k: bity dzielnika i sqrt na takt, [15:8] tory div / sqrt / FMA (slowUnits)
 
-  val VERSION = 0x0401           // 4.1
+  // etap 6: wlasny master AXI4 (PositMemMover) zamiast AXI4-Stream + AXI DMA
+  val MEM_LEN    = 0x60  // RW  elementy polecenia
+  val MEM_SRC_A  = 0x64  // RW  adres fizyczny a (wyrownany do slowa danych, 16 B)
+  val MEM_SRC_B  = 0x68  // RW  adres b
+  val MEM_SRC_C  = 0x6C  // RW  adres c (FMA3)
+  val MEM_DST    = 0x70  // RW  adres wyniku (moze byc rowny SRC_A: dzialanie w miejscu)
+  val MEM_LO     = 0x74  // RW  dozwolone adresy: [MEM_LO, MEM_HI); po resecie pusty zakres
+  val MEM_HI     = 0x78  // RW
+  val MEM_CFG    = 0x7C  // RW  bit 0 read_b, 1 read_c, 2 write, 3 irq_en
+  val MEM_STATUS = 0xC0  // RO  bit 0 busy, 1 done, 2 err_range, 3 err_align, 4 err_resp
+  val MEM_CYCLES = 0xC4  // RO  takty ostatniego polecenia
+  val MEM_CFG_READ_B = 0
+  val MEM_CFG_READ_C = 1
+  val MEM_CFG_WRITE  = 2
+  val MEM_CFG_IRQ_EN = 3
+  val MEM_ST_BUSY    = 0
+  val MEM_ST_DONE    = 1
+  val MEM_ST_ERR_RANGE = 2
+  val MEM_ST_ERR_ALIGN = 3
+  val MEM_ST_ERR_RESP  = 4
+  val CTRL_MEM_START = 5   // CTRL: polecenie z MEM_*
+  val CTRL_MEM_ACK   = 6   // CTRL: kasuje MEM_STATUS.done (i przerwanie)
+  val CONFIG_HAS_MASTER = 14
+  val OP_FMA3 = PositAluOp.FMA3
+  val MEM_BEAT_BYTES = 16
+
+  val VERSION = 0x0500           // 5.0
 
   def idVersion : Long = (ID.toLong << 16) | VERSION
-  def config(cfg : PositAluConfig) : Long =
-    PositAluRegs.config(cfg) | (1L << CONFIG_HAS_STREAM) | (1L << CONFIG_HAS_QUIRE) | (REDUCE_MASK.toLong << 16)
+  def config(cfg : PositAluConfig, master : Boolean = false) : Long =
+    PositAluRegs.config(cfg) | (1L << CONFIG_HAS_STREAM) | (1L << CONFIG_HAS_QUIRE) | (REDUCE_MASK.toLong << 16) |
+    (if (master) 1L << CONFIG_HAS_MASTER else 0L)
   def engineCfg(cfg : PositAluConfig) : Long = (cfg.slowUnits.toLong << 8) | cfg.divBitsPerCycle
   def quireCfg(cfg : PositAluConfig) : Long = (cfg.c.quireFrac.toLong << 16) | PositQuireConfig(cfg.c).width
 
@@ -84,32 +112,49 @@ object PositVecRegs {
     "STATUS_QUIRE_BUSY" -> STATUS_QUIRE_BUSY, "STATUS_QUIRE_NAR" -> STATUS_QUIRE_NAR,
     "CONFIG_HAS_QUIRE" -> CONFIG_HAS_QUIRE,
     "OPERAND_C" -> OPERAND_C, "OP_SQRT" -> OP_SQRT, "OP_FMA" -> OP_FMA, "OP_AXPY" -> OP_AXPY,
-    "OP_F2P" -> OP_F2P, "OP_P2F" -> OP_P2F, "ENGINE_CFG" -> ENGINE_CFG)
+    "OP_F2P" -> OP_F2P, "OP_P2F" -> OP_P2F, "ENGINE_CFG" -> ENGINE_CFG,
+    "MEM_LEN" -> MEM_LEN, "MEM_SRC_A" -> MEM_SRC_A, "MEM_SRC_B" -> MEM_SRC_B, "MEM_SRC_C" -> MEM_SRC_C,
+    "MEM_DST" -> MEM_DST, "MEM_LO" -> MEM_LO, "MEM_HI" -> MEM_HI, "MEM_CFG" -> MEM_CFG,
+    "MEM_STATUS" -> MEM_STATUS, "MEM_CYCLES" -> MEM_CYCLES,
+    "MEM_CFG_READ_B" -> MEM_CFG_READ_B, "MEM_CFG_READ_C" -> MEM_CFG_READ_C, "MEM_CFG_WRITE" -> MEM_CFG_WRITE,
+    "MEM_CFG_IRQ_EN" -> MEM_CFG_IRQ_EN, "MEM_ST_BUSY" -> MEM_ST_BUSY, "MEM_ST_DONE" -> MEM_ST_DONE,
+    "MEM_ST_ERR_RANGE" -> MEM_ST_ERR_RANGE, "MEM_ST_ERR_ALIGN" -> MEM_ST_ERR_ALIGN, "MEM_ST_ERR_RESP" -> MEM_ST_ERR_RESP,
+    "CTRL_MEM_START" -> CTRL_MEM_START, "CTRL_MEM_ACK" -> CTRL_MEM_ACK, "CONFIG_HAS_MASTER" -> CONFIG_HAS_MASTER,
+    "OP_FMA3" -> OP_FMA3, "MEM_BEAT_BYTES" -> MEM_BEAT_BYTES)
 }
 
-class PositVecAxi(val cfg : PositAluConfig) extends Component {
+/** withMaster = false: dane przez AXI4-Stream (s_axis {b, a}, m_axis wynik) z AXI DMA (etapy 2-5);
+  * withMaster = true (etap 6): wlasny master AXI4 m_axi (PositMemMover) czyta a, b, c i zapisuje wynik
+  * pod adresami z rejestrow MEM_*, wyjscie przerwania irq. */
+class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
+                  val memCfg : Option[MemMoverConfig] = None) extends Component {
   import PositAluRegs.{VERSION => _, idVersion => _, config => _, all => _, _}
   import PositVecRegs._
   val c = cfg.c
-  require(c.n <= 32 && c.n % 8 == 0, "AXI DMA: tdata w pelnych bajtach, a i b w jednym slowie 64 b")
+  require(c.n <= 32 && c.n % 8 == 0, "tdata / slowa pamieci w pelnych bajtach")
+  require(!cfg.fma3 || withMaster, "FMA3 (trzecia tablica) tylko z masterem AXI4")
+  val mc = memCfg.getOrElse(MemMoverConfig(c.n))
 
   val io = new Bundle {
     val s_axi  = slave(AxiLite4(PositAluAxiLite.busConfig))
-    val s_axis = new Bundle {
+    val s_axis = !withMaster generate new Bundle {
       val tdata  = in  Bits(2 * c.n bits)
       val tlast  = in  Bool()
       val tvalid = in  Bool()
       val tready = out Bool()
     }
-    val m_axis = new Bundle {
+    val m_axis = !withMaster generate new Bundle {
       val tdata  = out Bits(c.n bits)
       val tlast  = out Bool()
       val tvalid = out Bool()
       val tready = in  Bool()
     }
+    val m_axi = withMaster generate master(Axi4(mc.axi))
+    val irq   = withMaster generate out(Bool())
   }
   noIoPrefix()
   AxiLite4SpecRenamer(io.s_axi)
+  if (withMaster) Axi4SpecRenamer(io.m_axi)
   ClockDomain.current.renamePulledWires(clock = "aclk", reset = "aresetn")
 
   val bus = AxiLite4SlaveFactory(io.s_axi)
@@ -137,11 +182,11 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   val bReg      = Reg(Bits(c.n bits)) init 0
   val streamCfg = Reg(Bits(1 bits)) init 0
   val cReg      = Reg(Bits(c.n bits)) init 0
-  bus.driveAndRead(opReg, OP)
-  bus.driveAndRead(aReg, OPERAND_A)
-  bus.driveAndRead(bReg, OPERAND_B)
-  bus.driveAndRead(streamCfg, STREAM_CFG)
-  bus.driveAndRead(cReg, OPERAND_C)
+  bus.readAndWrite(opReg, OP)
+  bus.readAndWrite(aReg, OPERAND_A)
+  bus.readAndWrite(bReg, OPERAND_B)
+  bus.readAndWrite(streamCfg, STREAM_CFG)
+  bus.readAndWrite(cReg, OPERAND_C)
 
   // ---- silnik: miekki reset przerywa dzialanie i oproznia potok -----------------------
   val core = new ResetArea(softReset, cumulative = true) {
@@ -156,27 +201,127 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
   engine.io.b       := bReg
   engine.io.addend  := cReg
 
-  // AXI4-Stream wejscie: {b, a}; OP sum/dot/sumsq -> quire, reszta -> ALU
+  // ---- dane: elementy {a, b(, c), last}; OP sum/dot/sumsq -> quire, reszta -> ALU ----------
   val reduce = opReg === OP_SUM || opReg === OP_DOT || opReg === OP_SUMSQ
-  val inA    = io.s_axis.tdata(c.n - 1 downto 0)
-  val inB    = io.s_axis.tdata(2 * c.n - 1 downto c.n)
-  engine.io.input.valid         := io.s_axis.tvalid && !reduce
+  val inValid = Bool()
+  val inA, inB = Bits(c.n bits)
+  val inC     = Bits(c.n bits)
+  val inLast  = Bool()
+  val inReady = Bool()
+  engine.io.input.valid         := inValid && !reduce
   engine.io.input.fragment.a    := inA
   engine.io.input.fragment.b    := inB
-  engine.io.input.last          := io.s_axis.tlast
-  quire.io.input.valid          := io.s_axis.tvalid && reduce
+  if (cfg.fma3) engine.io.input.fragment.c3 := inC
+  engine.io.input.last          := inLast
+  quire.io.input.valid          := inValid && reduce
   quire.io.input.a              := inA
   quire.io.input.b              := Mux(opReg === OP_SUMSQ, inA, inB)
   quire.io.input.dot            := opReg =/= OP_SUM
   quire.io.clear                := quireClear
   quire.io.round                := quireRound
-  io.s_axis.tready              := Mux(reduce, quire.io.input.ready, engine.io.input.ready)
+  inReady                       := Mux(reduce, quire.io.input.ready, engine.io.input.ready)
 
-  // AXI4-Stream wyjscie: wynik
-  io.m_axis.tvalid              := engine.io.output.valid
-  io.m_axis.tdata               := engine.io.output.fragment.bits
-  io.m_axis.tlast               := engine.io.output.last
-  engine.io.output.ready        := io.m_axis.tready
+  val stream = !withMaster generate new Area {
+    // AXI4-Stream wejscie {b, a}, wyjscie: wynik (AXI DMA)
+    inValid := io.s_axis.tvalid
+    inA     := io.s_axis.tdata(c.n - 1 downto 0)
+    inB     := io.s_axis.tdata(2 * c.n - 1 downto c.n)
+    inC     := 0
+    inLast  := io.s_axis.tlast
+    io.s_axis.tready       := inReady
+    io.m_axis.tvalid       := engine.io.output.valid
+    io.m_axis.tdata        := engine.io.output.fragment.bits
+    io.m_axis.tlast        := engine.io.output.last
+    engine.io.output.ready := io.m_axis.tready
+  }
+
+  // ---- etap 6: master AXI4 -------------------------------------------------------------------
+  val memStart, memAck = Bool()
+  memStart := False
+  memAck   := False
+  bus.onWrite(CTRL) {
+    memStart := ctrlData(CTRL_MEM_START)
+    memAck   := ctrlData(CTRL_MEM_ACK)
+  }
+  val mem = withMaster generate new Area {
+    val len   = Reg(UInt(32 bits)) init 0
+    val src   = Vec.fill(3)(Reg(UInt(32 bits)) init 0)
+    val dst   = Reg(UInt(32 bits)) init 0
+    val lo    = Reg(UInt(32 bits)) init 0
+    val hi    = Reg(UInt(32 bits)) init 0
+    val mcfg  = Reg(Bits(4 bits)) init 0
+    bus.readAndWrite(len, MEM_LEN)
+    for (i <- 0 until 3) bus.readAndWrite(src(i), MEM_SRC_A + 4 * i)
+    bus.readAndWrite(dst, MEM_DST)
+    bus.readAndWrite(lo, MEM_LO)
+    bus.readAndWrite(hi, MEM_HI)
+    bus.readAndWrite(mcfg, MEM_CFG)
+
+    val mover = new PositMemMover(mc)
+    io.m_axi <> mover.io.axi
+
+    val busy, done, errRange, errAlign, errResp = RegInit(False)
+    val cycles = Reg(UInt(32 bits)) init 0
+    when(busy) { cycles := cycles + 1 }
+
+    // zakres: [addr, addr + slowa * 16) w [lo, hi), bez przekroczenia 2^32
+    val bytes = (mc.beats(len).resize(33) << log2Up(mc.beatBytes)).resize(33)
+    def inRange(a : UInt) : Bool = {
+      val end = a.resize(33) + bytes
+      a >= lo && end <= hi.resize(33)
+    }
+    def aligned(a : UInt) : Bool = a(log2Up(mc.beatBytes) - 1 downto 0) === 0
+    val use = Vec(True, mcfg(MEM_CFG_READ_B), mcfg(MEM_CFG_READ_C))
+    val wr  = mcfg(MEM_CFG_WRITE)
+    val badRange = (0 until 3).map(i => use(i) && !inRange(src(i))).reduce(_ || _) || (wr && !inRange(dst))
+    val badAlign = (0 until 3).map(i => use(i) && !aligned(src(i))).reduce(_ || _) || (wr && !aligned(dst))
+
+    mover.io.cmd.valid         := False
+    mover.io.cmd.payload.len   := len
+    mover.io.cmd.payload.src   := src
+    mover.io.cmd.payload.read  := use.asBits
+    mover.io.cmd.payload.dst   := dst
+    mover.io.cmd.payload.write := wr
+    when(memStart && !busy) {
+      done     := False
+      errRange := badRange
+      errAlign := badAlign
+      errResp  := False
+      cycles   := 0
+      when(badRange || badAlign || len === 0) {
+        done := True                                   // bez zadnej transakcji
+      } otherwise {
+        mover.io.cmd.valid := True
+        busy := True
+      }
+    }
+    when(mover.io.respError) { errResp := True }
+    when(mover.io.done) { busy := False; done := True }
+    when(memAck) { done := False }
+    io.irq := done && mcfg(MEM_CFG_IRQ_EN)
+
+    // elementy z mastera -> silnik / quire; wyniki silnika -> zapis
+    val sa = mover.io.src(0)
+    val sb = mover.io.src(1)
+    val sc = mover.io.src(2)
+    val needB = use(1)
+    val needC = use(2)
+    inValid := sa.valid && (!needB || sb.valid) && (!needC || sc.valid)
+    inA     := sa.fragment
+    inB     := Mux(needB, sb.fragment, B(0, c.n bits))
+    inC     := Mux(needC, sc.fragment, B(0, c.n bits))
+    inLast  := sa.last
+    val take = inValid && inReady
+    sa.ready := take
+    sb.ready := take && needB
+    sc.ready := take && needC
+    mover.io.res.valid   := engine.io.output.valid
+    mover.io.res.payload := engine.io.output.fragment.bits
+    engine.io.output.ready := mover.io.res.ready || !wr      // bez zapisu (np. pomylka w MEM_CFG): wyniki odrzucane
+
+    bus.read(errResp ## errAlign ## errRange ## done ## busy, MEM_STATUS)
+    bus.read(cycles, MEM_CYCLES)
+  }
 
   // ---- sciezka rejestrowa (etap 1) ----------------------------------------------------
   val busy     = RegInit(False)
@@ -195,7 +340,7 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
 
   // ---- liczniki -----------------------------------------------------------------------
   val cntNar, cntSat, cntInexact, cycles, cntElements = Reg(UInt(32 bits)) init 0
-  when(busy || engine.io.inFlight || quire.io.busy) { cycles := cycles + 1 }
+  when(busy || engine.io.inFlight || quire.io.busy || (if (withMaster) mem.busy else False)) { cycles := cycles + 1 }
 
   // Trzy zrodla wynikow (rejestry, strumien, quire) moga trafic na ten sam takt:
   // liczniki dodaja sume przyrostow, nie nadpisuja sie nawzajem.
@@ -251,7 +396,7 @@ class PositVecAxi(val cfg : PositAluConfig) extends Component {
 
   // ---- odczyty ----------------------------------------------------------------------
   bus.read(B(idVersion, 32 bits), ID_VERSION)
-  bus.read(B(config(cfg), 32 bits), CONFIG)
+  bus.read(B(config(cfg, withMaster), 32 bits), CONFIG)
   bus.read(flags ## B(0, 2 bits) ## quire.io.nar ## quire.io.busy ## engine.io.inFlight ## error ## done ## busy, STATUS)
   bus.read(result, RESULT)
   bus.read(cntNar, CNT_NAR)

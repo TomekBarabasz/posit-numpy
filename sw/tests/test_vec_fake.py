@@ -183,3 +183,48 @@ def test_engine_cfg():
     mem = FakeUDmaBuf(1 << 16)
     vec = FakeVecMmio(PositConfig(32), k=4, units=4)
     assert PositVecHw(vec, FakeDma(mem, vec), mem).engine_cfg() == {"k": 4, "units": 4}
+
+
+# ---- stage 6: engine with its own AXI4 master (MEM_* commands, no DMA) ---------------------------------
+
+def make_master(n=32, buf_size=1 << 16):
+    mem = FakeUDmaBuf(buf_size)
+    vec = FakeVecMmio(PositConfig(n), ops=("add", "sub", "mul", "div"), mem=mem)
+    return PositVecHw(vec, None, mem), vec, mem
+
+
+@pytest.mark.parametrize("n", [8, 16, 32])
+def test_master_ops_match_sw(n):
+    hw, vec, mem = make_master(n)
+    assert hw.master and hw.dma is None
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(n)
+    size = 20_001                                   # several commands (small buffer)
+    a, b, c = (rnd.integers(0, 1 << n, size) for _ in range(3))
+    for name in ("add", "mul", "div", "sqrt"):
+        kw = {} if name == "sqrt" else dict(b=b)
+        assert np.array_equal(hw.array_op(name, a, **kw), sw.array_op(name, a, **kw)), name
+    k = int(rnd.integers(0, 1 << n))
+    for kw in (dict(b=b, c=k), dict(scalar=k, c=c), dict(b=b, c=c)):        # FMA, AXPY, FMA3
+        assert np.array_equal(hw.array_op("fma", a, **kw), sw.array_op("fma", a, **kw)), sorted(kw)
+    assert np.array_equal(hw.array_op("add", a, scalar=k), sw.array_op("add", a, scalar=k))
+    assert hw.stats()["fallback"] == 0                                       # FMA3 in hardware
+    assert len(vec.mem_log) >= 8 and all(cmd[1][0] % 4096 == 0 for cmd in vec.mem_log)
+    assert vec.regs[regs.MEM_LO] == mem.phys_addr and vec.regs[regs.MEM_HI] == mem.phys_addr + mem.size
+
+
+def test_master_reduce_matches_sw():
+    hw, vec, mem = make_master(32)
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(5)
+    a, b = (rnd.integers(0, 1 << 32, 30_000) for _ in range(2))
+    for mode in ("sum", "dot", "sumsq"):
+        assert hw.reduce(mode, a, b) == sw.reduce(mode, a, b), mode
+    assert all(cmd[3] >> regs.MEM_CFG_WRITE & 1 == 0 for cmd in vec.mem_log)
+
+
+def test_master_rejected_command_raises():
+    hw, vec, mem = make_master(32)
+    vec.regs[regs.MEM_HI] = vec.regs[regs.MEM_LO] + 64      # window smaller than the buffer
+    with pytest.raises(PositAluError, match="outside the buffer"):
+        hw.array_op("add", np.arange(1000), np.arange(1000))

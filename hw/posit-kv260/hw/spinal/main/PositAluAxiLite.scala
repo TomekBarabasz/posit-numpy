@@ -94,9 +94,9 @@ class PositAluAxiLite(val cfg : PositAluConfig) extends Component {
   val opReg = Reg(UInt(PositAluOp.width bits)) init 0
   val aReg  = Reg(Bits(c.n bits)) init 0
   val bReg  = Reg(Bits(c.n bits)) init 0
-  bus.driveAndRead(opReg, OP)
-  bus.driveAndRead(aReg, OPERAND_A)
-  bus.driveAndRead(bReg, OPERAND_B)
+  bus.readAndWrite(opReg, OP)
+  bus.readAndWrite(aReg, OPERAND_A)
+  bus.readAndWrite(bReg, OPERAND_B)
 
   // ---- ALU: miekki reset przerywa dzielenie w toku ----------------------------------
   val core = new ResetArea(softReset, cumulative = true) {

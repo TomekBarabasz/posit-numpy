@@ -21,7 +21,7 @@ pn.array(np.float32(...)), x.to_float32()     # float32 <-> posit32 (F2P / P2F w
 import positnp as pn
 pn.board.apps()                         # zainstalowane aplikacje (/lib/firmware/xilinx), z listą silników z .json
 pn.board.active()                       # wgrana aplikacja (xmutil listapps) albo None
-hw = pn.board.load("posit32_16_8_vec")  # unloadapp + loadapp, czeka na /dev/uio*, otwiera silniki: {32: .., 16: .., 8: ..}
+hw = pn.board.load("posit32_16_8_mem")  # unloadapp + loadapp, czeka na /dev/uio*, otwiera silniki: {32: .., 16: .., 8: ..}
 print(pn.board.describe())              # silniki: operacje, quire, tory div/sqrt/FMA, k, bufor, wersja
 x16 = pn.array(data, pn.P16)            # każdy format liczy swój silnik, formaty bez silnika: PositSw
 pn.board.engine(32).time_array("div")   # konkretny silnik
@@ -29,6 +29,8 @@ pn.board.open()                         # podłączenie do już wgranej aplikacj
 pn.board.unload()                       # zamyka silniki (backendy wracają do PositSw), xmutil unloadapp
 ```
 
+- Silniki z etapu 6 (`*_mem`, własny master AXI4) czytają i zapisują bufor sami: bez AXI DMA i bez pakowania
+  `{b, a}`; `pn.fma(x, y, z)` na trzech tablicach liczy sprzęt (FMA3). Starsze aplikacje (`*_vec`, AXI DMA) działają dalej.
 - Jedna aplikacja naraz (płaski shell KV260); kilka formatów naraz = jeden bitstream z kilkoma silnikami
   (`build.tcl -engines "32 16 8"`). `load` tej samej, już wgranej aplikacji tylko otwiera silniki (`force=True` przeładowuje).
 - Backendy: `pn.set_backend(hw)` ustawia backend formatu `hw.config` (inne formaty bez zmian), `pn.set_backend([...])`

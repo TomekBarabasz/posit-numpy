@@ -36,7 +36,7 @@ object PositVecAxiPlan {
 
     Testpoint("vec_id_config", Stage.V1,
       "ID_VERSION i CONFIG etapu 2",
-      checking = Seq("ID_VERSION == 0x50530401", "CONFIG: n, es, maska operacji (z sum/dot/sumsq), bity HAS_STREAM i HAS_QUIRE")),
+      checking = Seq("ID_VERSION == PositVecRegs.idVersion (5.0)", "CONFIG: n, es, maska operacji (z sum/dot/sumsq), bity HAS_STREAM i HAS_QUIRE")),
 
     Testpoint("vec_arrays", Stage.V1,
       "Tablice przez AXI4-Stream jak z AXI DMA",
@@ -166,7 +166,7 @@ class PositVecAxiTestplan extends TestplanSuite {
 
   testpoint("vec_id_config") {
     run(vec16, "vec_id_config") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530401L, f"ID_VERSION = 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == PositVecRegs.idVersion, f"ID_VERSION = 0x${e.rd(ID_VERSION)}%x")
       val w = e.rd(CONFIG)
       assert((w & 0xff) == 16 && ((w >> 8) & 0xf) == 2 && (w >> 16) == 0x7f && ((w >> CONFIG_HAS_STREAM) & 1) == 1 &&
              ((w >> PositVecRegs.CONFIG_HAS_QUIRE) & 1) == 1, f"CONFIG = 0x$w%x")

@@ -7,8 +7,8 @@ set dir [file join [expr {[info exists env(TMPDIR)] ? $env(TMPDIR) : "/tmp"}] ov
 file mkdir $dir
 set fails 0
 
-foreach ns {{32} {32 16 8}} {
-    set name [posit_overlay::app_name $ns]
+foreach {ns io} {{32} dma {32 16 8} dma {32} master {32 16 8} master} {
+    set name [posit_overlay::app_name $ns [expr {$io eq "master" ? "master" : "dma"}]]
     set engines {}
     set addr 0xa0000000
     foreach n $ns {
@@ -16,6 +16,7 @@ foreach ns {{32} {32 16 8}} {
         dict set e vec_base [expr {$addr}];           dict set e vec_size 4096
         dict set e dma_base [expr {$addr + 0x10000}]; dict set e dma_size 65536
         dict set e buf_size [expr {64 << 20}]
+        if {$io eq "master"} { dict unset e dma; dict set e irq [expr {89 + [llength $engines]}] }
         lappend engines $e
         set addr [expr {$addr + 0x20000}]
     }
@@ -27,7 +28,7 @@ foreach ns {{32} {32 16 8}} {
     if {[catch { exec dtc -@ -q -O dtb -o [file join $dir $name.dtbo] $dtsi } msg]} {
         puts "FAIL dtc $name: $msg"; incr fails
     } else { puts "ok   dtc  $name" }
-    set py "import json,sys; d=json.load(open(sys.argv\[1\])); print(d\['overlay'\], \[e\['ip'\] for e in d\['engines'\]\], \[e\['udmabuf'\] for e in d\['engines'\]\])"
+    set py "import json,sys; d=json.load(open(sys.argv\[1\])); print(d\['overlay'\], \[(e\['ip'\], e\['io'\], e.get('dma') or e.get('irq')) for e in d\['engines'\]\])"
     if {[catch { exec python3 -c $py $json } msg]} {
         puts "FAIL json $name: $msg"; incr fails
     } else { puts "ok   json $msg" }

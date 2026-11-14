@@ -106,7 +106,7 @@ def test_throughput(hw, sw):
     rows.append(("numpy float32 add", size / (time.perf_counter() - t0)))
     print("\n" + "\n".join(f"{k:>20}: {v / 1e6:9.3f} M elem/s" for k, v in rows))
     for name, t in phases.items():
-        print(f"hw {name}, {size} elements: " + ", ".join(f"{k} {v * 1e3:.1f} ms" for k, v in t.items()))
+        print(f"hw {name}, {size} elements: " + ", ".join(f"{k} {v * 1e3:.1f} ms" for k, v in t.items() if k != "engine_cycles"))
 
 
 # ---- stage 4: quire ---------------------------------------------------------------------------------
@@ -180,8 +180,8 @@ def test_fma_and_axpy_match_sw(hw, sw, size):
         got, want = hw.array_op("fma", a, **kw), sw.array_op("fma", a, **kw)
         assert np.array_equal(got, want), f"fma {sorted(kw)}: {np.count_nonzero(got != want)} mismatches"
     assert hw.stats()["fallback"] == 0
-    hw.array_op("fma", a, b, c=y)                                    # three arrays: software, counted
-    assert hw.stats()["fallback"] == size
+    hw.array_op("fma", a, b, c=y)                  # three arrays: FMA3 (stage 6) or software, counted
+    assert hw.stats()["fallback"] == (0 if hw.fma3 else size)
 
 
 def test_float32_conversions_match_sw(hw, sw):
@@ -264,3 +264,52 @@ def test_board_open_and_describe():
             assert (x * x).to_float().tolist() == [1.0, 4.0, 9.0]
     finally:
         pn.board.close()
+
+
+# ---- stage 6: engines with their own AXI4 master -------------------------------------------------------
+
+def _need_master(hw):
+    if not hw.master:
+        pytest.skip("engine without its own AXI4 master (stage 6, build.tcl -io master)")
+
+
+@pytest.mark.parametrize("size", (1, 3, 1000, 1_000_001))
+def test_master_fma3_and_inplace(hw, sw, size):
+    _need_master(hw)
+    rnd = np.random.default_rng(size + 31)
+    a, b, c = (rnd.integers(0, 1 << hw.config.n, size) for _ in range(3))
+    hw.clear_stats()
+    got = hw.array_op("fma", a, b, c=c)                              # OP_FMA3: three read streams
+    assert np.array_equal(got, sw.array_op("fma", a, b, c=c))
+    assert hw.stats()["fallback"] == 0
+    assert np.array_equal(hw.array_op("add", a, b), sw.array_op("add", a, b))   # result over a (in place)
+
+
+def test_master_rejects_outside_buffer(hw):
+    _need_master(hw)
+    lo, hi = hw.read(regs.MEM_LO), hw.read(regs.MEM_HI)
+    try:
+        hw.write(regs.MEM_HI, lo + 64)                                # window of 64 B
+        with pytest.raises(Exception, match="outside the buffer"):
+            hw.array_op("add", np.arange(1000), np.arange(1000))
+    finally:
+        hw.write(regs.MEM_HI, hi)
+    assert hw.array_op("add", np.arange(10), np.arange(10)).size == 10
+
+
+def test_master_throughput(hw, sw):
+    _need_master(hw)
+    size = 1 << 22
+    rows = []
+    for name in ("add", "div", "sqrt", "fma", "fma3", "axpy"):
+        rows.append((f"hw {name}", hw.time_array(name, size), dict(hw.last_timing)))
+    f = np.random.default_rng(0).random(size, dtype=np.float32)
+    t0 = time.perf_counter()
+    _ = f + f
+    np_add = size / (time.perf_counter() - t0)
+    print("")
+    for k, v, t in rows:
+        print(f"{k:>12}: {v / 1e6:8.3f} M elem/s | " +
+              ", ".join(f"{p} {t[p] * 1e3:.1f} ms" for p in ("pack", "sync_device", "dma", "sync_cpu", "copy_out")) +
+              f" | engine {t.get('engine_cycles', 0) / size:.2f} cycles/elem")
+    print(f"{'numpy f32 add':>12}: {np_add / 1e6:8.3f} M elem/s")

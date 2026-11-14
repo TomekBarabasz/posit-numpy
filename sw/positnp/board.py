@@ -179,6 +179,11 @@ class Board:
     def open(self, activate: bool = True) -> Dict[int, backend_hw.PositVecHw]:
         """Open the engines of the application that is already loaded (no reload): {n: PositVecHw}."""
         self.close()
+        if self._loaded is None:
+            try:
+                self._loaded = self.active()          # for describe(); xmutil may be unavailable
+            except BoardError:
+                pass
         found = backend_hw.vec_engines()
         if not found:
             raise BoardError("no posit_vec engine in the loaded application (pn.board.active(), pn.board.apps())")

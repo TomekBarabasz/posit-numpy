@@ -24,7 +24,7 @@ object PositVecStage5Plan {
   val plan : Seq[Testpoint] = Seq(
     Testpoint("vec5_config", Stage.V1,
       "Wersja 4.0, maska operacji, OPERAND_C",
-      checking = Seq("ID_VERSION == 0x50530401", "CONFIG.opMask: bity 7..11 (posit32)", "OPERAND_C: odczyt == zapis",
+      checking = Seq("ID_VERSION == PositVecRegs.idVersion (5.0)", "CONFIG.opMask: bity 7..11 (posit32)", "OPERAND_C: odczyt == zapis",
                      "ENGINE_CFG: k i slowUnits z konfiguracji")),
 
     Testpoint("vec5_sqrt", Stage.V1,
@@ -101,7 +101,7 @@ class PositVecStage5Testplan extends TestplanSuite {
 
   testpoint("vec5_config") {
     run("vec5_config") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530401L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == PositVecRegs.idVersion, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
       assert(((e.rd(CONFIG) >> 16) & 0x0f80) == 0x0f80, f"CONFIG 0x${e.rd(CONFIG)}%x")
       assert(e.rd(PositVecRegs.ENGINE_CFG) == PositVecRegs.engineCfg(cfg), f"ENGINE_CFG 0x${e.rd(PositVecRegs.ENGINE_CFG)}%x")
       e.wr(OPERAND_C, 0x12345678L)

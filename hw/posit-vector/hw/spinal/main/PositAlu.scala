@@ -42,6 +42,7 @@ object PositAluOp {
   val AXPY = 9    // w ALU = FMA; PositStreamAlu: b z rejestru, c ze strumienia
   val F2P  = 10   // a: bity float32 -> posit
   val P2F  = 11   // posit -> bity float32
+  val FMA3 = 12   // w ALU = FMA; PositStreamAlu: c ze strumienia (etap 6, trzecia tablica)
   def code(op : PositOp) : Int = codes(op)
   def mask(ops : Seq[PositOp]) : Int = ops.map(op => 1 << code(op)).fold(0)(_ | _)
 }
@@ -54,17 +55,20 @@ case class PositAluConfig(c               : PositConfig,
                           fma             : Boolean       = false,
                           convert         : Boolean       = false,
                           slowUnits       : Int           = 1,
+                          fma3            : Boolean       = false,
                           fastDepth       : Int           = 4) {
   require(ops.nonEmpty && ops.distinct.size == ops.size, s"ops: niepuste, bez powtorzen: $ops")
   require(divBitsPerCycle >= 1)
   require(slowUnits >= 1 && slowUnits <= 16, s"slowUnits = $slowUnits: 1..16")
   require(fastDepth >= 2, s"fastDepth = $fastDepth: >= 2")
+  require(!fma3 || fma, "fma3 wymaga fma")
   require(!convert || (c.n == 32 && c.es == 2), s"$c: konwersje float32 sa dla posit<32,2>")
   def has(op : PositOp) : Boolean = ops.contains(op)
   def opMask : Int = PositAluOp.mask(ops) |
     (if (sqrt) 1 << PositAluOp.SQRT else 0) |
     (if (fma) (1 << PositAluOp.FMA) | (1 << PositAluOp.AXPY) else 0) |
-    (if (convert) (1 << PositAluOp.F2P) | (1 << PositAluOp.P2F) else 0)
+    (if (convert) (1 << PositAluOp.F2P) | (1 << PositAluOp.P2F) else 0) |
+    (if (fma3) 1 << PositAluOp.FMA3 else 0)
   def divSteps : Int = PositDivision.stepsFor(c, divBitsPerCycle)
   /** Takty na dzielenie przy ciaglym strumieniu (ready = 1, bez przerw w valid):
     * zaladowanie stanu, divSteps / k iteracji, takt wystawienia wyniku. */
@@ -236,7 +240,8 @@ class PositAlu(val cfg : PositAluConfig) extends Component {
         iterative(divInit, (s : PositDivState) => PositDivision.steps(s, k), cfg.divSteps / k, PositDivision.finish)(go, rel)),
       cfg.sqrt generate SlowKind(isCode(d.op, PositAluOp.SQRT), (go : Bool, rel : Bool) =>
         iterative(sqrtInit, (s : PositSqrtState) => PositSqrt.steps(s, k), cfg.sqrtSteps / k, PositSqrt.finish)(go, rel)),
-      cfg.fma generate SlowKind(isCode(d.op, PositAluOp.FMA) || isCode(d.op, PositAluOp.AXPY), (go : Bool, rel : Bool) =>
+      cfg.fma generate SlowKind(isCode(d.op, PositAluOp.FMA) || isCode(d.op, PositAluOp.AXPY) ||
+                                (if (cfg.fma3) isCode(d.op, PositAluOp.FMA3) else False), (go : Bool, rel : Bool) =>
         iterative(fmaInit, PositFma.align, 1, PositFma.finish)(go, rel))     // prepare | align | add + normalizacja
     ).filter(_ != null)
 
