@@ -26,7 +26,8 @@ class FakeVecMmio(FakeAluMmio):
     """PositVecAxi registers: stage 1 map plus STREAM_CFG, CNT_ELEMENTS, version 2.0."""
 
     def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1,
-                 stage5: bool = True, k: int = 4, units: int = 1, mem: Optional[FakeUDmaBuf] = None):
+                 stage5: bool = True, k: int = 4, units: int = 1, mem: Optional[FakeUDmaBuf] = None,
+                 lazy_mem: bool = False):
         super().__init__(config, ops, busy_reads)
         self.engine_cfg = units << 8 | k
         # stage 6: with `mem` the engine has its own AXI4 master and works on that buffer (MEM_* registers)
@@ -35,6 +36,11 @@ class FakeVecMmio(FakeAluMmio):
                   regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG, regs.MEM_STATUS):
             self.regs[r] = 0
         self.mem_log = []
+        # lazy_mem: the command runs only at the first MEM_STATUS read after the start - the latest
+        # moment real hardware could read its input - so a driver that touches a half of the buffer
+        # still in use (or starts a command before the previous one finished) gets wrong results
+        self.lazy_mem = lazy_mem
+        self.mem_pending = False
         self.stage5 = ("sqrt", "fma", "axpy") + (("f2p", "p2f") if config.n == 32 else ()) if stage5 else ()
         self.regs[regs.STREAM_CFG] = 0
         self.regs[regs.OPERAND_C] = 0
@@ -60,6 +66,9 @@ class FakeVecMmio(FakeAluMmio):
             return self.counters["elements"]
         if offset == regs.ENGINE_CFG:
             return self.engine_cfg
+        if offset == regs.MEM_STATUS and self.mem_pending:
+            self.mem_pending = False
+            self.process_mem()
         if offset in (regs.MEM_LEN, regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C, regs.MEM_DST,
                       regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG, regs.MEM_STATUS):
             return self.regs[offset]
@@ -87,7 +96,14 @@ class FakeVecMmio(FakeAluMmio):
             self.regs[offset] = value & 0xFFFFFFFF
             return
         if offset == regs.CTRL and value >> regs.CTRL_MEM_START & 1 and self.mem is not None:
-            self.process_mem()
+            if self.mem_pending:
+                raise AssertionError("MEM start while the previous command is still running")
+            if self.lazy_mem:
+                self.mem_pending = True
+                self.regs[regs.MEM_STATUS] = 1 << regs.MEM_ST_BUSY
+                self.mem_regs_at_start = dict(self.regs)
+            else:
+                self.process_mem()
             return
         if offset == regs.CTRL and value >> regs.CTRL_CLEAR_COUNTERS & 1:
             self.counters["elements"] = 0

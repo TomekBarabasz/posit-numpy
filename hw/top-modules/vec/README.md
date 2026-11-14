@@ -150,6 +150,13 @@ ok. 57% czasu; reszta to kopie do i z bufora po stronie procesora.
   albo ukryć, nakładając kopię kolejnej porcji na pracę silnika (podwójny bufor) — wtedy add zbliży się
   do granicy silnika, 100 M / s; NumPy float32 add: 250 M / s (było 10 ×, jest 4 × szybszy).
 
+**Podwójny bufor** (`PositVecHw.double_buffer = True`, domyślnie): bufor dzielony na dwie połowy, porcje po
+`MEM_CHUNK_BYTES` = 1 MB na tablicę. Kolejność: kopia porcji 0, start; potem dla każdej porcji j: kopia porcji
+j + 1 do drugiej połowy (silnik liczy j), czekanie na j, start j + 1, odbiór wyniku j (silnik liczy j + 1).
+Silnik i procesor nigdy nie pracują na tej samej połowie: połowa jest nadpisywana dopiero po zakończeniu jej
+polecenia i odbiorze wyniku. Test na atrapie wykonującej polecenie dopiero przy czekaniu (najpóźniejszy
+możliwy odczyt danych) wykrywa każde naruszenie. `test_master_double_buffer_gain` mierzy zysk na płytce.
+
 Stara ścieżka (AXI4-Stream + AXI DMA) zostaje: `VecKv260 --dma ...` i `build.tcl -io dma` (aplikacje `*_vec`);
 `PositVecHw` rozpoznaje tryb po CONFIG.has_master, a `pn.board` obsługuje obie.
 

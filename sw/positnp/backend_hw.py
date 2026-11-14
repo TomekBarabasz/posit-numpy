@@ -546,13 +546,24 @@ class PositVecHw(PositAluHw):
 
     # ---- stage 6: commands with addresses (own AXI4 master) ------------------------------------------
 
-    def _regions(self, k_bytes_per: int, regions: int) -> int:
-        """Elements per command when the buffer holds `regions` arrays of `k_bytes_per` bytes per element."""
-        per = (self.buf.size // regions) // self.ALIGN * self.ALIGN
-        return max(1, min(per // k_bytes_per, 0xFFFFFFFF))
+    # Podwojny bufor (stage 6): the buffer is split in two halves; while the engine works on one half
+    # the CPU copies the next chunk into the other and takes the previous result out. Chunks of
+    # MEM_CHUNK_BYTES per array keep many commands in flight even for medium arrays.
+    MEM_CHUNK_BYTES = 1 << 20
+    double_buffer = True
 
-    def _mem_cmd(self, length: int, src: List[int], dst: Optional[int], read_b: bool, read_c: bool) -> int:
-        """One MEM command: addresses, start, wait for MEM_STATUS.done; returns the cycles it took."""
+    def _layout(self, arrays: int):
+        """(elements per chunk, [offsets of the `arrays` regions in half 0], offset of half 1)."""
+        halves = 2 if self.double_buffer else 1
+        per = (self.buf.size // halves // arrays) // self.ALIGN * self.ALIGN
+        if self.double_buffer:
+            per = min(per, self.MEM_CHUNK_BYTES)
+        step = max(1, min(per // self.out_bytes, 0xFFFFFFFF))
+        region = -(-step * self.out_bytes // self.ALIGN) * self.ALIGN
+        return step, [r * region for r in range(arrays)], region * arrays
+
+    def _mem_start(self, length: int, src: List[int], dst: Optional[int], read_b: bool, read_c: bool) -> None:
+        """Start one MEM command (addresses relative to the buffer); _mem_wait() collects it."""
         self.write(regs.MEM_LEN, length)
         for reg, off in zip((regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C), src):
             self.write(reg, self.buf.phys_addr + off)
@@ -561,19 +572,86 @@ class PositVecHw(PositAluHw):
         self.write(regs.MEM_CFG, read_b << regs.MEM_CFG_READ_B | read_c << regs.MEM_CFG_READ_C |
                    (dst is not None) << regs.MEM_CFG_WRITE)
         self.write(regs.CTRL, 1 << regs.CTRL_MEM_START)
+        self._mem_len = length
+
+    def _mem_wait(self) -> int:
+        """Wait for MEM_STATUS.done of the started command; raises on its errors; returns its cycles."""
         t0 = time.perf_counter()
         while True:
             st = self.read(regs.MEM_STATUS)
             if st >> regs.MEM_ST_DONE & 1:
                 break
             if time.perf_counter() - t0 > 10.0:
-                raise PositAluError(f"MEM command did not finish (MEM_STATUS 0x{st:x}, {length} elements)")
+                raise PositAluError(f"MEM command did not finish (MEM_STATUS 0x{st:x}, {self._mem_len} elements)")
         errs = [n for n, b in (("address outside the buffer", regs.MEM_ST_ERR_RANGE),
                                ("address not aligned to 16 B", regs.MEM_ST_ERR_ALIGN),
                                ("AXI error response", regs.MEM_ST_ERR_RESP)) if st >> b & 1]
         if errs:
             raise PositAluError(f"MEM command rejected: {', '.join(errs)} (MEM_STATUS 0x{st:x})")
         return self.read(regs.MEM_CYCLES)
+
+    def _mem_cmd(self, length: int, src: List[int], dst: Optional[int], read_b: bool, read_c: bool) -> int:
+        """One MEM command, start to done."""
+        self._mem_start(length, src, dst, read_b, read_c)
+        return self._mem_wait()
+
+    def _mem_pipeline(self, ins: List[np.ndarray], out: Optional[np.ndarray], read_b: bool, read_c: bool,
+                      timing: Dict[str, float]) -> int:
+        """Chunks through the two halves of the buffer: fill k+1 while the engine runs k, then drain k.
+
+        Engine and CPU never touch the same half at the same time: a half is refilled only after its
+        command finished and its result was copied out. Returns the engine cycles of all commands.
+        """
+        size = ins[0].size
+        step, offs, half = self._layout(len(ins))
+        chunks = [(i, min(step, size - i)) for i in range(0, size, step)]
+        base = lambda j: [o + (j % 2) * half if self.double_buffer else o for o in offs]   # noqa: E731
+        nbytes = lambda k: k * self.out_bytes                                               # noqa: E731
+
+        def fill(j):
+            i, k = chunks[j]
+            t = time.perf_counter()
+            for x, off in zip(ins, base(j)):
+                self.buf.view(self.out_dtype, off, k)[:] = x[i:i + k]      # contiguous copies, no packing
+            timing["pack"] += time.perf_counter() - t
+            t = time.perf_counter()
+            for off in base(j):
+                self.buf.sync_for_device(off, nbytes(k), 1)
+            timing["sync_device"] += time.perf_counter() - t
+
+        def start(j):
+            r = base(j)
+            self._mem_start(chunks[j][1], r + [0] * (3 - len(r)), r[0] if out is not None else None, read_b, read_c)
+
+        def drain(j):
+            if out is None:
+                return
+            i, k = chunks[j]
+            t = time.perf_counter()
+            self.buf.sync_for_cpu(base(j)[0], nbytes(k), 2)
+            timing["sync_cpu"] += time.perf_counter() - t
+            t = time.perf_counter()
+            out[i:i + k] = self.buf.view(self.out_dtype, base(j)[0], k)    # result over a (in place)
+            timing["copy_out"] += time.perf_counter() - t
+
+        cycles = 0
+        fill(0)
+        start(0)
+        for j in range(len(chunks)):
+            nxt = j + 1 < len(chunks)
+            if nxt and self.double_buffer:
+                fill(j + 1)                       # other half, while the engine runs chunk j
+            t = time.perf_counter()
+            cycles += self._mem_wait()
+            timing["dma"] += time.perf_counter() - t
+            if nxt:
+                if not self.double_buffer:
+                    drain(j)
+                    fill(j + 1)
+                start(j + 1)                      # engine on chunk j+1 ...
+            if self.double_buffer or not nxt:
+                drain(j)                          # ... while the CPU takes chunk j out
+        return cycles
 
     def _mem(self, code: int, a, b=None, scalar: Optional[int] = None, c_reg: Optional[int] = None,
              c_arr=None) -> np.ndarray:
@@ -600,30 +678,7 @@ class PositVecHw(PositAluHw):
             self.write(regs.OPERAND_B, int(scalar) & self.config.mask)
         if c_reg is not None:
             self.write(regs.OPERAND_C, int(c_reg) & self.config.mask)
-
-        step = self._regions(self.out_bytes, len(ins))
-        region = -(-step * self.out_bytes // self.ALIGN) * self.ALIGN
-        offs = [r * region for r in range(len(ins))]
-        cycles = 0
-        for i in range(0, size, step):
-            k = min(step, size - i)
-            t = time.perf_counter()
-            for x, off in zip(ins, offs):
-                self.buf.view(self.out_dtype, off, k)[:] = x[i:i + k]      # contiguous copies, no packing
-            timing["pack"] += time.perf_counter() - t
-            t = time.perf_counter()
-            for off in offs:
-                self.buf.sync_for_device(off, k * self.out_bytes, 1)
-            timing["sync_device"] += time.perf_counter() - t
-            t = time.perf_counter()
-            cycles += self._mem_cmd(k, offs + [0] * (3 - len(offs)), offs[0], b is not None, c_arr is not None)
-            timing["dma"] += time.perf_counter() - t
-            t = time.perf_counter()
-            self.buf.sync_for_cpu(offs[0], k * self.out_bytes, 2)
-            timing["sync_cpu"] += time.perf_counter() - t
-            t = time.perf_counter()
-            out[i:i + k] = self.buf.view(self.out_dtype, offs[0], k)      # result over a (in place)
-            timing["copy_out"] += time.perf_counter() - t
+        cycles = self._mem_pipeline(ins, out, b is not None, c_arr is not None, timing)
         timing["total"] = time.perf_counter() - t_start
         timing["engine_cycles"] = cycles
         self.last_timing = timing
@@ -659,16 +714,9 @@ class PositVecHw(PositAluHw):
         self.write(regs.OP, regs.REDUCE[mode])
         self.write(regs.CTRL, 1 << regs.CTRL_QUIRE_CLEAR)
         before = self.read(regs.CNT_ELEMENTS)
-        if self.master:
-            ins = [av] + ([bv] if bv is not None else [])
-            step = self._regions(self.out_bytes, len(ins))
-            region = -(-step * self.out_bytes // self.ALIGN) * self.ALIGN
-            for i in range(0, av.size, step):
-                k = min(step, av.size - i)
-                for r, x in enumerate(ins):
-                    self.buf.view(self.out_dtype, r * region, k)[:] = x[i:i + k]
-                    self.buf.sync_for_device(r * region, k * self.out_bytes, 1)
-                self._mem_cmd(k, [0, region if bv is not None else 0, 0], None, bv is not None, False)
+        if self.master and av.size:
+            timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
+            self._mem_pipeline([av] + ([bv] if bv is not None else []), None, bv is not None, False, timing)
         step = max(1, min(self.buf.size // self.in_bytes, DMA_MAX_LENGTH // self.in_bytes))
         for i in (range(0, av.size, step) if not self.master else ()):
             k = min(step, av.size - i)

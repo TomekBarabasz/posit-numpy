@@ -313,3 +313,22 @@ def test_master_throughput(hw, sw):
               ", ".join(f"{p} {t[p] * 1e3:.1f} ms" for p in ("pack", "sync_device", "dma", "sync_cpu", "copy_out")) +
               f" | engine {t.get('engine_cycles', 0) / size:.2f} cycles/elem")
     print(f"{'numpy f32 add':>12}: {np_add / 1e6:8.3f} M elem/s")
+
+
+def test_master_double_buffer_gain(hw):
+    """Same op with one buffer half (copy, run, copy) and with two (copies overlap the engine)."""
+    _need_master(hw)
+    size = 1 << 22
+    rows = []
+    try:
+        for double in (False, True):
+            hw.double_buffer = double
+            hw.time_array("add", 1 << 16)                       # warm-up: touch the pages of the layout
+            rows.append((double, hw.time_array("add", size), dict(hw.last_timing)))
+    finally:
+        hw.double_buffer = True
+    print("")
+    for double, v, t in rows:
+        print(f"{'double' if double else 'single':>7} buffer add: {v / 1e6:8.3f} M elem/s | total {t['total'] * 1e3:.1f} ms, "
+              f"waiting for the engine {t['dma'] * 1e3:.1f} ms, copies {(t['pack'] + t['copy_out']) * 1e3:.1f} ms")
+    assert rows[1][1] > 0.9 * rows[0][1], "double buffering clearly slower than a single buffer"
