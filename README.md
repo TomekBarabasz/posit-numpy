@@ -22,8 +22,8 @@ Stan:
 - etap 5 (sqrt, FMA / AXPY, konwersje float32 w PL; `np.sqrt`, `pn.fma`, `pn.axpy`): sprawdzony na płytce — `hw/top-modules/vec/README.md`;
 - kilka silników w jednym bitstreamie (posit8/16/32), tory div / sqrt / FMA, `pn.board`: sprawdzone na płytce
   (`posit32_16_8_vec`) — `hw/top-modules/vec/README.md`, `sw/README.md`;
-- etap 6 (własny master AXI4 zamiast AXI DMA, FMA3 na trzech tablicach, przerwanie): w symulacji z modelem
-  pamięci AXI4 i na atrapach — `hw/top-modules/vec/README.md`.
+- etap 6 (własny master AXI4 zamiast AXI DMA, FMA3 na trzech tablicach, przerwanie): sprawdzony na płytce
+  (`posit32_16_8_mem`, add posit32 59,5 M/s wobec 25,4 z AXI DMA) — `hw/top-modules/vec/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

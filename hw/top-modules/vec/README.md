@@ -125,6 +125,31 @@ przeplot ID, sprawdzanie protokołu): wszystkie operacje bit w bit dla posit32 /
 bufory przecinające 4 KB, w miejscu, skalar, redukcje, odrzucanie, SLVERR, przerwanie;
 **add posit32: 4096 elementów w 4142 taktach (0,99 / takt)** — dwa strumienie odczytu i zapis równolegle.
 
+**Na płytce (2026-11-14, `posit32_16_8_mem`: posit32 z 4 torami, posit16, posit8)**: `test_board_vec.py` przechodzi
+w całości. Jedno `array_op` na 4 194 304 elementach, M elementów / s (w nawiasie: AXI DMA z etapu 5):
+
+| | posit32 | posit16 | posit8 |
+| --- | ---: | ---: | ---: |
+| add | **59,5** (25,4) | 72,0 (39,3) | 80,0 (51,4) |
+| div | 31,3 (22,7) | 15,6 (14,3) | 23,6 (21,3) |
+| sqrt | 33,7 (26,7) | 16,0 | 24,0 |
+| FMA / AXPY | 58,3 / 59,1 (34,3) | 29,5 | 30,7 |
+| FMA3 (trzy tablice) | 37,0 (wcześniej program) | 25,1 | 28,3 |
+| F2P / P2F | 68,6 / 68,3 (44,6) | | |
+| quire dot | 66,8 (41,1) | 78,6 (55,5) | 83,6 (62,7) |
+
+Rozbicie add posit32: kopie wejść 14,6 ms (było 82,9 ms pakowania `{b, a}`), synchronizacja 6,2 ms,
+**silnik 42,0 ms = dokładnie 1 element / takt**, kopia wyniku 7,3 ms (było 31,5 ms). Silnik pracuje teraz
+ok. 57% czasu; reszta to kopie do i z bufora po stronie procesora.
+
+- div / sqrt posit32 (4 tory): 104,9 ms = 2,5 taktu / element — ogranicza silnik, nie procesor;
+  posit16 / posit8 z jednym torem: 6 i 4 takty, FMA 3 takty — tu kolejne tory dadzą 2–4 ×.
+- FMA3: kopia trzeciej tablicy (pack 47,6 ms) — pierwszy dotyk stron trzeciego regionu bufora;
+  pierwsze wywołanie `array_op` w procesie ma ten sam koszt (test_throughput: add 36,7 M/s, pack 50,9 ms).
+- Dalej: obie kopie da się usunąć, trzymając bity `PositArray` od razu w buforze u-dma-buf (bez kopii),
+  albo ukryć, nakładając kopię kolejnej porcji na pracę silnika (podwójny bufor) — wtedy add zbliży się
+  do granicy silnika, 100 M / s; NumPy float32 add: 250 M / s (było 10 ×, jest 4 × szybszy).
+
 Stara ścieżka (AXI4-Stream + AXI DMA) zostaje: `VecKv260 --dma ...` i `build.tcl -io dma` (aplikacje `*_vec`);
 `PositVecHw` rozpoznaje tryb po CONFIG.has_master, a `pn.board` obsługuje obie.
 
