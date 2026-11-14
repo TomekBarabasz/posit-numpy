@@ -191,6 +191,40 @@ Po drodze naprawione: rejestry sterujące są teraz zerowane resetem (`readAndWr
 które w SpinalHDL dokłada niezerowany rejestr pośredni — po resecie OPERAND_B, STREAM_CFG itd. były
 przypadkowe, co na FPGA maskowało zerowanie przy konfiguracji).
 
+## Szerszy silnik: L elementów na takt (tory elementowe, `lanes`)
+
+W trybie z masterem silnik może liczyć L elementów na takt: master czyta i zapisuje grupy po L elementów
+(L · n bitów, jedna grupa na takt), a obok siebie pracuje L kopii `PositStreamAlu`.
+
+```
+m_axi R --> a, b, c: grupy po L --> kolejka toru 0 --> PositStreamAlu 0 --+
+                                --> kolejka toru 1 --> PositStreamAlu 1 --+--> grupa wynikow --> m_axi W
+                                ...                                       |    (ostatnia: WSTRB)
+                                --> kolejka toru L-1 -> PositStreamAlu L-1-+
+            redukcje: grupa -> elementy po kolei -> quire (1 element / takt)
+```
+
+- grupa idzie do torów, gdy wszystkie kolejki torów mają miejsce; wyniki łączy StreamJoin, każdy tor zachowuje
+  kolejność, więc grupy wychodzą w kolejności; ostatnia grupa może być niepełna (len mod L), zapis maskuje ją WSTRB,
+  liczniki (CNT_ELEMENTS, flagi) nie liczą torów za końcem tablicy;
+- każdy tor ma własne tory wielotaktowe (`slowUnits`), więc div / sqrt / FMA też przyspieszają L razy;
+- tor 0 obsługuje też pojedyncze działania z rejestrów; quire zostaje przy 1 elemencie na takt;
+- sensowne L: szyna HP 128 b czyta 16 B na takt, a działanie dwuargumentowe potrzebuje 2 · L · n / 8 B →
+  posit32 ×2, posit16 ×4, posit8 ×8 (FMA3 z trzema tablicami będzie wtedy ograniczone pamięcią);
+- ustawienie: silnik `n:es:k:u:L`, np. `VecKv260 32:2:4:4:2 16:2:4:2:4 8:2:4:1:8`; ENGINE_CFG[23:16] = L,
+  w Pythonie `engine_cfg()["lanes"]`, w `pn.board.describe()` „elements/clock”; sterownik bez zmian.
+
+Symulacja (`PositVecMemTestplan.mem_lanes`, model pamięci z losowymi opóźnieniami): wszystkie operacje
+bit w bit dla długości 1 … 2L + 1 i losowych, redukcje, WSTRB, CNT_ELEMENTS; add 4096 elementów:
+
+| | posit32, L = 2 | posit16, L = 4 | posit8, L = 8 |
+| --- | ---: | ---: | ---: |
+| takty | 2 124 | 1 083 | 588 |
+| elementy / takt | 1,93 | 3,78 | 6,97 |
+
+Na płytce dojdzie ograniczenie po stronie procesora (kopie ok. 28 ms na 4 M elementów posit32 przy silniku 21 ms) —
+do zmierzenia; OOC: `top-modules/ooc` wariant `vec_p32_mem_L2`.
+
 ## Kilka silników w jednym bitstreamie
 
 Przy budowie wybierasz, które formaty mają być w PL — od jednego do trzech (posit8, posit16, posit32).
@@ -275,6 +309,7 @@ dekoder -> prepare -+                                                           
    sbt "top-vec/runMain posit.top.vec.VecKv260"            # posit<32,2>, master AXI4 (etap 6)
    sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"    # trzy silniki; silnik = n[:es[:k[:u]]], np. 16:2:1
    sbt "top-vec/runMain posit.top.vec.VecKv260 --dma 32"   # stara ścieżka AXI4-Stream + AXI DMA
+   sbt "top-vec/runMain posit.top.vec.VecKv260 32:2:4:4:2 16:2:4:2:4 8:2:4:1:8"   # szerszy silnik (L = 2 / 4 / 8)
    sbt "top-vec/runMain posit.top.vec.VecKv260 32:2:4:4"   # posit32 z 4 torami div / sqrt / FMA
    ```
 2. Bitstream i aplikacja (z `hw/top-modules/vec/vivado`):

@@ -65,7 +65,8 @@ object PositVecRegs {
   val OP_P2F    = PositAluOp.P2F
 
   // 4.1: parametry silnika do odczytu (tory wielotaktowe, slowUnits)
-  val ENGINE_CFG = 0x5C  // RO  [7:0] k: bity dzielnika i sqrt na takt, [15:8] tory div / sqrt / FMA (slowUnits)
+  val ENGINE_CFG = 0x5C  // RO  [7:0] k: bity dzielnika i sqrt na takt, [15:8] tory div / sqrt / FMA (slowUnits),
+                         //     [23:16] tory elementowe (lanes: elementy na takt, etap 6)
 
   // etap 6: wlasny master AXI4 (PositMemMover) zamiast AXI4-Stream + AXI DMA
   val MEM_LEN    = 0x60  // RW  elementy polecenia
@@ -99,7 +100,7 @@ object PositVecRegs {
   def config(cfg : PositAluConfig, master : Boolean = false) : Long =
     PositAluRegs.config(cfg) | (1L << CONFIG_HAS_STREAM) | (1L << CONFIG_HAS_QUIRE) | (REDUCE_MASK.toLong << 16) |
     (if (master) 1L << CONFIG_HAS_MASTER else 0L)
-  def engineCfg(cfg : PositAluConfig) : Long = (cfg.slowUnits.toLong << 8) | cfg.divBitsPerCycle
+  def engineCfg(cfg : PositAluConfig, lanes : Int = 1) : Long = (lanes.toLong << 16) | (cfg.slowUnits.toLong << 8) | cfg.divBitsPerCycle
   def quireCfg(cfg : PositAluConfig) : Long = (cfg.c.quireFrac.toLong << 16) | PositQuireConfig(cfg.c).width
 
   /** Stale dodane w etapie 2 (nazwa -> wartosc) - do porownania z regs.py. */
@@ -134,6 +135,8 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   require(c.n <= 32 && c.n % 8 == 0, "tdata / slowa pamieci w pelnych bajtach")
   require(!cfg.fma3 || withMaster, "FMA3 (trzecia tablica) tylko z masterem AXI4")
   val mc = memCfg.getOrElse(MemMoverConfig(c.n))
+  val L  = if (withMaster) mc.lanes else 1             // elementy na takt: L kopii PositStreamAlu
+  require(mc.n == c.n, s"memCfg.n ${mc.n} != ${c.n}")
 
   val io = new Bundle {
     val s_axi  = slave(AxiLite4(PositAluAxiLite.busConfig))
@@ -190,36 +193,74 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
 
   // ---- silnik: miekki reset przerywa dzialanie i oproznia potok -----------------------
   val core = new ResetArea(softReset, cumulative = true) {
-    val engine = new PositStreamAlu(cfg)
-    val quire  = new PositQuire(PositQuireConfig(c))
+    val engines = Seq.fill(L)(new PositStreamAlu(cfg))
+    val quire   = new PositQuire(PositQuireConfig(c))
   }
-  val engine = core.engine
-  val quire  = core.quire
+  val engines = core.engines
+  val engine  = engines.head                           // tor 0: tez sciezka rejestrowa
+  val quire   = core.quire
+  val anyInFlight = engines.map(_.io.inFlight).reduce(_ || _)
 
-  engine.io.op      := opReg
-  engine.io.scalarB := streamCfg(STREAM_CFG_SCALAR_B)
-  engine.io.b       := bReg
-  engine.io.addend  := cReg
+  for (e <- engines) {
+    e.io.op      := opReg
+    e.io.scalarB := streamCfg(STREAM_CFG_SCALAR_B)
+    e.io.b       := bReg
+    e.io.addend  := cReg
+  }
+  for (e <- engines.tail) {
+    e.io.reg.valid := False
+    e.io.reg.payload.assignDontCare()
+    e.io.regRsp.ready := True
+  }
 
-  // ---- dane: elementy {a, b(, c), last}; OP sum/dot/sumsq -> quire, reszta -> ALU ----------
+  // ---- dane: grupy po L elementow {a, b(, c), last}; OP sum/dot/sumsq -> quire, reszta -> ALU ------
   val reduce = opReg === OP_SUM || opReg === OP_DOT || opReg === OP_SUMSQ
   val inValid = Bool()
-  val inA, inB = Bits(c.n bits)
-  val inC     = Bits(c.n bits)
+  val inA, inB = Bits(L * c.n bits)
+  val inC     = Bits(L * c.n bits)
   val inLast  = Bool()
   val inReady = Bool()
-  engine.io.input.valid         := inValid && !reduce
-  engine.io.input.fragment.a    := inA
-  engine.io.input.fragment.b    := inB
-  if (cfg.fma3) engine.io.input.fragment.c3 := inC
-  engine.io.input.last          := inLast
+  val lastCnt = UInt(log2Up(L + 1) bits)               // elementy w ostatniej grupie (L, gdy pelna)
+  def lane(x : Bits, j : Int) : Bits = x(j * c.n, c.n bits)
+
+  // ALU: przy L > 1 kazdy tor ma wlasna kolejke; grupa idzie dalej, gdy wszystkie maja miejsce
+  // (push.ready z rejestrow kolejki - bez petli kombinacyjnej miedzy torami)
+  val laneIn = engines.zipWithIndex.map { case (e, j) =>
+    val s = Stream(Fragment(PositPair(c, cfg.fma3)))
+    s.fragment.a := lane(inA, j)
+    s.fragment.b := lane(inB, j)
+    if (cfg.fma3) s.fragment.c3 := lane(inC, j)
+    s.last := inLast
+    if (L == 1) { e.io.input << s } else { e.io.input << s.queue(4) }
+    s
+  }
+  val aluReady = laneIn.map(_.ready).reduce(_ && _)
+  for (s <- laneIn) s.valid := inValid && !reduce && (if (L == 1) True else aluReady)   // L = 1: bez kolejki, ready nie wraca do valid
+
+  // quire: 1 element / takt - grupa rozkladana na elementy
+  val qIdx = Reg(UInt(log2Up(L) max 1 bits)) init 0
+  val qSel = if (L == 1) U(0, 1 bits) else qIdx
+  val qA = if (L == 1) inA else inA.subdivideIn(c.n bits)(qSel)
+  val qB = if (L == 1) inB else inB.subdivideIn(c.n bits)(qSel)
+  val qCnt = Mux(inLast, lastCnt, U(L, lastCnt.getWidth bits))
+  val qLastOfGroup = if (L == 1) True else (qIdx.resize(lastCnt.getWidth) + 1 === qCnt)
   quire.io.input.valid          := inValid && reduce
-  quire.io.input.a              := inA
-  quire.io.input.b              := Mux(opReg === OP_SUMSQ, inA, inB)
+  quire.io.input.a              := qA
+  quire.io.input.b              := Mux(opReg === OP_SUMSQ, qA, qB)
   quire.io.input.dot            := opReg =/= OP_SUM
   quire.io.clear                := quireClear
   quire.io.round                := quireRound
-  inReady                       := Mux(reduce, quire.io.input.ready, engine.io.input.ready)
+  if (L > 1) when(quire.io.input.fire) { qIdx := Mux(qLastOfGroup, U(0, qIdx.getWidth bits), qIdx + 1) }
+  inReady                       := Mux(reduce, quire.io.input.ready && qLastOfGroup, aluReady)
+
+  // wyniki torow -> grupa (StreamJoin: wszystkie tory gotowe, kolejnosc w torach zachowana)
+  val outValid = engines.map(_.io.output.valid).reduce(_ && _)
+  val outReady = Bool()
+  val outBits  = Cat(engines.map(_.io.output.fragment.bits))        // Cat: pierwszy = najmlodsze bity (tor 0)
+  val outLast  = engine.io.output.last
+  for (e <- engines) e.io.output.ready := outValid && outReady
+  val outFire  = outValid && outReady
+  val outCnt   = Mux(outLast, lastCnt, U(L, lastCnt.getWidth bits))
 
   val stream = !withMaster generate new Area {
     // AXI4-Stream wejscie {b, a}, wyjscie: wynik (AXI DMA)
@@ -228,11 +269,12 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     inB     := io.s_axis.tdata(2 * c.n - 1 downto c.n)
     inC     := 0
     inLast  := io.s_axis.tlast
+    lastCnt := 1
     io.s_axis.tready       := inReady
-    io.m_axis.tvalid       := engine.io.output.valid
-    io.m_axis.tdata        := engine.io.output.fragment.bits
-    io.m_axis.tlast        := engine.io.output.last
-    engine.io.output.ready := io.m_axis.tready
+    io.m_axis.tvalid       := outValid
+    io.m_axis.tdata        := outBits
+    io.m_axis.tlast        := outLast
+    outReady               := io.m_axis.tready
   }
 
   // ---- etap 6: master AXI4 -------------------------------------------------------------------
@@ -258,6 +300,10 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     bus.readAndWrite(mcfg, MEM_CFG)
 
     val mover = new PositMemMover(mc)
+    lastCnt := (if (L == 1) U(1, lastCnt.getWidth bits) else {
+      val rem = len(log2Up(L) - 1 downto 0)
+      Mux(rem === 0, U(L, lastCnt.getWidth bits), rem.resize(lastCnt.getWidth))
+    })
     io.m_axi <> mover.io.axi
 
     val busy, done, errRange, errAlign, errResp = RegInit(False)
@@ -308,16 +354,16 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     val needC = use(2)
     inValid := sa.valid && (!needB || sb.valid) && (!needC || sc.valid)
     inA     := sa.fragment
-    inB     := Mux(needB, sb.fragment, B(0, c.n bits))
-    inC     := Mux(needC, sc.fragment, B(0, c.n bits))
+    inB     := Mux(needB, sb.fragment, B(0, L * c.n bits))
+    inC     := Mux(needC, sc.fragment, B(0, L * c.n bits))
     inLast  := sa.last
     val take = inValid && inReady
     sa.ready := take
     sb.ready := take && needB
     sc.ready := take && needC
-    mover.io.res.valid   := engine.io.output.valid
-    mover.io.res.payload := engine.io.output.fragment.bits
-    engine.io.output.ready := mover.io.res.ready || !wr      // bez zapisu (np. pomylka w MEM_CFG): wyniki odrzucane
+    mover.io.res.valid   := outValid && wr
+    mover.io.res.payload := outBits
+    outReady             := mover.io.res.ready || !wr      // bez zapisu (np. pomylka w MEM_CFG): wyniki odrzucane
 
     bus.read(errResp ## errAlign ## errRange ## done ## busy, MEM_STATUS)
     bus.read(cycles, MEM_CYCLES)
@@ -340,20 +386,24 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
 
   // ---- liczniki -----------------------------------------------------------------------
   val cntNar, cntSat, cntInexact, cycles, cntElements = Reg(UInt(32 bits)) init 0
-  when(busy || engine.io.inFlight || quire.io.busy || (if (withMaster) mem.busy else False)) { cycles := cycles + 1 }
+  when(busy || anyInFlight || quire.io.busy || (if (withMaster) mem.busy else False)) { cycles := cycles + 1 }
 
   // Trzy zrodla wynikow (rejestry, strumien, quire) moga trafic na ten sam takt:
   // liczniki dodaja sume przyrostow, nie nadpisuja sie nawzajem.
-  val sources = Seq(
-    (engine.io.regRsp.fire,   engine.io.regRsp.flags),
-    (engine.io.output.fire,   engine.io.output.fragment.flags),
-    (quire.io.result.valid,   quire.io.result.flags))
+  // Zrodla wynikow (rejestry, L torow strumienia, quire) moga trafic na ten sam takt:
+  // liczniki dodaja sume przyrostow, nie nadpisuja sie nawzajem. Tory za koncem tablicy
+  // (ostatnia, niepelna grupa) nie licza sie.
+  val sources = Seq((engine.io.regRsp.fire, engine.io.regRsp.flags)) ++
+    engines.zipWithIndex.map { case (e, j) => (outFire && (if (j == 0) True else outCnt > j), e.io.output.fragment.flags) } ++
+    Seq((quire.io.result.valid, quire.io.result.flags))
+  val incW = log2Up(L + 3) + 1
   def inc(pick : PositFlags => Bool) : UInt =
-    sources.map { case (v, f) => (v && pick(f)).asUInt.resize(2) }.reduce(_ + _)
+    sources.map { case (v, f) => (v && pick(f)).asUInt.resize(incW) }.reduce(_ + _)
   cntNar      := cntNar + inc(_.nar)
   cntSat      := cntSat + inc(_.sat)
   cntInexact  := cntInexact + inc(_.inexact)
-  cntElements := cntElements + engine.io.output.fire.asUInt.resize(2) + quire.io.input.fire.asUInt.resize(2)
+  cntElements := cntElements + Mux(outFire, outCnt, U(0, lastCnt.getWidth bits)).resize(incW) +
+                 quire.io.input.fire.asUInt.resize(incW)
 
   when(engine.io.regRsp.fire) {
     result := engine.io.regRsp.bits
@@ -397,7 +447,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   // ---- odczyty ----------------------------------------------------------------------
   bus.read(B(idVersion, 32 bits), ID_VERSION)
   bus.read(B(config(cfg, withMaster), 32 bits), CONFIG)
-  bus.read(flags ## B(0, 2 bits) ## quire.io.nar ## quire.io.busy ## engine.io.inFlight ## error ## done ## busy, STATUS)
+  bus.read(flags ## B(0, 2 bits) ## quire.io.nar ## quire.io.busy ## anyInFlight ## error ## done ## busy, STATUS)
   bus.read(result, RESULT)
   bus.read(cntNar, CNT_NAR)
   bus.read(cntSat, CNT_SAT)
@@ -405,6 +455,6 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   bus.read(cycles, CYCLES)
   bus.read(cntElements, CNT_ELEMENTS)
   bus.read(B(quireCfg(cfg), 32 bits), QUIRE_CFG)
-  bus.read(B(engineCfg(cfg), 32 bits), ENGINE_CFG)
+  bus.read(B(engineCfg(cfg, L), 32 bits), ENGINE_CFG)
   for (k <- 0 until quire.qc.width / 32) bus.read(quire.io.raw(32 * k + 31 downto 32 * k), QUIRE + 4 * k)
 }

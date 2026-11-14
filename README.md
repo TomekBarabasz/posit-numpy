@@ -23,7 +23,9 @@ Stan:
 - kilka silników w jednym bitstreamie (posit8/16/32), tory div / sqrt / FMA, `pn.board`: sprawdzone na płytce
   (`posit32_16_8_vec`) — `hw/top-modules/vec/README.md`, `sw/README.md`;
 - etap 6 (własny master AXI4 zamiast AXI DMA, FMA3 na trzech tablicach, przerwanie): sprawdzony na płytce
-  (`posit32_16_8_mem`, add posit32 59,5 M/s wobec 25,4 z AXI DMA) — `hw/top-modules/vec/README.md`.
+  (`posit32_16_8_mem`, add posit32 59,5 M/s wobec 25,4 z AXI DMA; z podwójnym buforem ok. 92 M/s) —
+  `hw/top-modules/vec/README.md`;
+- szerszy silnik (L elementów na takt: posit32 ×2, posit16 ×4, posit8 ×8): w symulacji — `hw/top-modules/vec/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

@@ -60,6 +60,13 @@ object PositVecMemPlan {
       "Przerwanie po poleceniu",
       checking = Seq("irq = done gdy irq_en; CTRL.mem_ack kasuje", "bez irq_en irq = 0")),
 
+    Testpoint("mem_lanes", Stage.V1,
+      "Szerszy silnik: L elementow na takt (posit32 x 2, posit16 x 4, posit8 x 8)",
+      stimulus = Seq("add, mul, div, sqrt, AXPY, FMA3; dlugosci 1 .. 2L+1 i losowe, niepodzielne przez L", "sum / dot"),
+      checking = Seq("wynik == PositRef bit w bit, bajty za tablica nietkniete (WSTRB ostatniej grupy)",
+                     "CNT_ELEMENTS == len (tory za koncem tablicy sie nie licza)", "ENGINE_CFG[23:16] == L",
+                     "add 4096 elementow w <= 1,1 * len / L + 200 taktach")),
+
     Testpoint("mem_throughput", Stage.V2,
       "add 4096 elementow posit32 bez przerw w pamieci",
       checking = Seq("MEM_CYCLES <= 1,1 * len + 200 (1 element / takt mimo dwoch strumieni odczytu i zapisu)"))
@@ -79,6 +86,9 @@ class PositVecMemTestplan extends TestplanSuite {
   lazy val m32 = SimEnv(Conventions.spinal, "vecmem_32").compile(new PositVecAxi(cfgFor(p32), withMaster = true))
   lazy val m16 = SimEnv(Conventions.spinal, "vecmem_16").compile(new PositVecAxi(cfgFor(p16, 1), withMaster = true))
   lazy val m8  = SimEnv(Conventions.spinal, "vecmem_8").compile(new PositVecAxi(cfgFor(p8, 1), withMaster = true))
+  def laned(c : PositConfig, l : Int) =
+    SimEnv(Conventions.spinal, s"vecmem_${c.n}_L$l").compile(
+      new PositVecAxi(cfgFor(c, 2), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l))))
 
   val BASE = 0x10000000L
   val SIZE = 1L << 20
@@ -145,6 +155,8 @@ class PositVecMemTestplan extends TestplanSuite {
       body(e)
       e.checkProtocol(label)
     }
+
+  def mem(e : Env) : AxiMemModel = e.mem
 
   def assertSeq(label : String, got : Seq[BigInt], want : Seq[BigInt]) : Unit = {
     val bad = got.zip(want).indexWhere { case (g, w) => g != w }
@@ -311,6 +323,54 @@ class PositVecMemTestplan extends TestplanSuite {
       e.wr(CTRL, 1 << CTRL_MEM_ACK)
       e.cd.waitSampling(2)
       assert(!e.d.io.irq.toBoolean && ((e.rd(MEM_STATUS) >> MEM_ST_DONE) & 1) == 0, "CTRL.mem_ack nie skasowal")
+    }
+  }
+
+  for ((c, l) <- Seq((p32, 2), (p16, 4), (p8, 8))) {
+    testpoint("mem_lanes", s"p${c.n}_L$l") {
+      sim(laned(c, l), s"mem_lanes_${c.n}_$l") { e =>
+        assert(((e.rd(PositVecRegs.ENGINE_CFG) >> 16) & 0xff) == l, f"ENGINE_CFG 0x${e.rd(PositVecRegs.ENGINE_CFG)}%x")
+        val lens = (1 to 2 * l + 1) ++ Seq(97, 1 + e.rnd.nextInt(3000))
+        for (len <- lens) {
+          val (a, b, cc, dst) = (e.addr(0, len), e.addr(1, len), e.addr(2, len), e.addr(3, len))
+          val xs = stress(c, len, e.rnd).toSeq
+          val cs = e.rand(len)
+          e.put(a, xs.map(_._1)); e.put(b, xs.map(_._2)); e.put(cc, cs)
+          val guard = Seq.fill(32)(BigInt(0x5a))
+          def go(label : String, op : Int, want : Seq[BigInt], useB : Boolean = true, useC : Boolean = false) : Unit = {
+            mem(e).writeWords(dst + e.bytes.toLong * len, 1, guard)
+            e.wr(CTRL, 1 << CTRL_CLEAR_COUNTERS)
+            val s = e.run(op, len, a, if (useB) Some(b) else None, if (useC) Some(cc) else None, Some(dst))
+            assert((s & 0x1c) == 0, f"$label len=$len: MEM_STATUS 0x$s%x")
+            assertSeq(s"$label L=$l len=$len", e.get(dst, len), want)
+            assert(mem(e).readWords(dst + e.bytes.toLong * len, 1, 32) == guard, s"$label L=$l len=$len: zapis za koncem")
+            assert(e.rd(CNT_ELEMENTS) == len, s"$label L=$l len=$len: CNT_ELEMENTS ${e.rd(CNT_ELEMENTS)}")
+          }
+          for (op <- Seq(PositOp.Add, PositOp.Mul, PositOp.Div))
+            go(op.name, PositAluOp.code(op), xs.map { case (x, y) => PositRef(c, op, x, y) })
+          go("sqrt", OP_SQRT, xs.map(p => PositRef.sqrt(c, p._1)._1), useB = false)
+          val k = BigInt(c.n, e.rnd)
+          e.wr(OPERAND_B, k.toLong)
+          go("axpy", OP_AXPY, xs.map { case (x, y) => PositRef.fma(c, x, k, y)._1 })
+          go("fma3", OP_FMA3, xs.zip(cs).map { case ((x, y), z) => PositRef.fma(c, x, y, z)._1 }, useC = true)
+          for (op <- Seq(OP_SUM, OP_DOT)) {
+            e.wr(CTRL, 1 << CTRL_QUIRE_CLEAR)
+            e.run(op, len, a, if (op == OP_DOT) Some(b) else None)
+            e.wr(CTRL, 1 << CTRL_QUIRE_ROUND)
+            var st = e.rd(STATUS); while ((st & (1 << STATUS_DONE)) == 0) st = e.rd(STATUS)
+            val (q, nar) = QuireRef.accumulate(c, xs.iterator.map { case (x, y) => (x, if (op == OP_DOT) Some(y) else None) })
+            assert(BigInt(e.rd(RESULT)) == QuireRef.round(c, q, nar)._1, s"op=$op L=$l len=$len")
+          }
+        }
+        e.mem.stall = 0.0
+        e.mem.maxDelay = 20
+        val len = 4096
+        e.put(BASE, e.rand(len)); e.put(BASE + 0x10000, e.rand(len))
+        e.run(PositAluOp.code(PositOp.Add), len, BASE, Some(BASE + 0x10000), None, Some(BASE + 0x20000))
+        val cyc = e.rd(MEM_CYCLES)
+        assert(cyc <= 1.1 * len / l + 200, s"$len elementow, L=$l: $cyc taktow")
+        info(f"add posit${c.n}, L=$l: $len elementow w $cyc taktach (${len.toDouble / cyc}%.2f / takt)")
+      }
     }
   }
 
