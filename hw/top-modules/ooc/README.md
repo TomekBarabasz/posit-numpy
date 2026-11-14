@@ -95,6 +95,21 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
 - Koszt quire posit32 względem `alu_p32`: ok. +3 600 LUT, +2 300 FF (dwa rejestry 512 b: akumulator i odczyt,
   plus potok) i +4 DSP (mnożarka 28 × 28 b w quire, osobna od ALU). Cały silnik to ok. 4,3% LUT układu.
 
+### Etap 6: `vec_p32_mem` — master AXI4 zamiast AXI4-Stream (2026-11-14)
+
+`PositVecAxi` 5.0 posit32 (1 tor, FMA3) z `PositMemMover`: m_axi 128 b, 3 FIFO odczytu po 64 słowa, zapis.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p32_mem` | synth | 8 583 | 4 883 | 384 | 8 | 0 | 1,472 | 117,3 |
+| `vec_p32_mem` | impl | 8 405 | 4 883 | 384 | 8 | 0 | 1,191 | 113,5 |
+
+- Master kosztuje ok. +1 850 LUT i +1 300 FF względem `vec_p32` z AXI4-Stream (6 550 LUT), ale zastępuje AXI DMA
+  (który w bitstreamie z etapu 5 sam miał kilka tysięcy LUT), więc cały projekt jest mniejszy.
+- FIFO odczytu (3 × 64 × 128 b) są w LUTRAM (RAMD32 / RAMD64), nie w BRAM — przeniesienie do BRAM oszczędziłoby
+  ok. 1 000 LUT, jeśli kiedyś zabraknie.
+- Ścieżka krytyczna bez zmian: dodawanie ALU (rejestr polecenia → kolejka szybkich wyników), 113,5 MHz; master jej nie wydłuża.
+
 ### Tory wielotaktowe: `vec_p32_u4` (2026-11-14)
 
 `PositVecAxi` posit32 jak `vec_p32`, ale z 4 torami div / sqrt / FMA (`slowUnits = 4`). Vivado 2026.1, 100 MHz, `-impl`.

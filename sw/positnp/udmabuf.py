@@ -39,12 +39,22 @@ class UDmaBuf:
             self._mm = mmap.mmap(fd, self.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
         finally:
             os.close(fd)
+        # sysfs attributes of the sync: opened once, written with pwrite; unchanged values are not
+        # rewritten (each sync was 4 x open / write / close, about 1 ms on the KV260)
+        self._fds = {}
+        self._last = {}
 
     def _get(self, attr: str) -> str:
         return (self.sys / attr).read_text().strip()
 
-    def _set(self, attr: str, value) -> None:
-        (self.sys / attr).write_text(str(value))
+    def _set(self, attr: str, value, cache: bool = True) -> None:
+        if cache and self._last.get(attr) == value:
+            return
+        fd = self._fds.get(attr)
+        if fd is None:
+            fd = self._fds[attr] = os.open(self.sys / attr, os.O_WRONLY)
+        os.pwrite(fd, str(value).encode(), 0)
+        self._last[attr] = value
 
     def _sync(self, which: str, offset: int, size: int, direction: int) -> None:
         if offset < 0 or size <= 0 or offset + size > self.size:
@@ -52,7 +62,7 @@ class UDmaBuf:
         self._set("sync_offset", offset)
         self._set("sync_size", size)
         self._set("sync_direction", direction)  # 0 bidirectional, 1 to device, 2 from device
-        self._set(which, 1)
+        self._set(which, 1, cache=False)
 
     def sync_for_device(self, offset: int, size: int, direction: int = 0) -> None:
         self._sync("sync_for_device", offset, size, direction)
@@ -65,7 +75,20 @@ class UDmaBuf:
         return np.frombuffer(self._mm, dtype=dtype, count=count, offset=offset)
 
     def close(self) -> None:
+        for fd in self._fds.values():
+            os.close(fd)
+        self._fds.clear()
         self._mm.close()
+
+    def time_sync(self, calls: int = 200, size: int = 1 << 16) -> float:
+        """Seconds per sync_for_device + sync_for_cpu pair on `size` bytes (measures the fixed cost)."""
+        import time
+        t0 = time.perf_counter()
+        for i in range(calls):
+            off = (i % 2) * size
+            self.sync_for_device(off, size, 1)
+            self.sync_for_cpu(off, size, 2)
+        return (time.perf_counter() - t0) / calls
 
 
 class FakeUDmaBuf:
