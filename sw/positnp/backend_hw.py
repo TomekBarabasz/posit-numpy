@@ -551,8 +551,9 @@ class PositVecHw(PositAluHw):
     # Chunk size: about MEM_CHUNKS chunks per call (the engine overlaps all but the first fill and the
     # last drain; every chunk costs two cache syncs), at least MEM_CHUNK_MIN bytes per array, at most
     # what a half holds. MEM_CHUNK_BYTES, when set, fixes the size instead (measurements).
-    # Board, add 4 M elements: posit32 best with ~4 chunks, posit16 ~8, posit8 ~16 (cheaper copies).
-    MEM_CHUNKS = 6
+    # Board, add 4 M elements, sync pair 57 us: 16 chunks (posit32 1 MB, posit16 512 KB, posit8 256 KB)
+    # give 92-96 % of the engine limit; fewer chunks leave the first fill / last drain exposed.
+    MEM_CHUNKS = 16
     MEM_CHUNK_MIN = 256 << 10
     MEM_CHUNK_BYTES: Optional[int] = None
     double_buffer = True

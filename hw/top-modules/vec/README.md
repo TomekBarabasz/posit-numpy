@@ -151,13 +151,14 @@ ok. 57% czasu; reszta to kopie do i z bufora po stronie procesora.
   do granicy silnika, 100 M / s; NumPy float32 add: 250 M / s (było 10 ×, jest 4 × szybszy).
 
 **Podwójny bufor** (`PositVecHw.double_buffer = True`, domyślnie): bufor dzielony na dwie połowy, ok.
-`MEM_CHUNKS` = 6 porcji na wywołanie (co najmniej 256 KB na tablicę; `MEM_CHUNK_BYTES` ustala rozmiar ręcznie). Kolejność: kopia porcji 0, start; potem dla każdej porcji j: kopia porcji
+`MEM_CHUNKS` = 16 porcji na wywołanie (co najmniej 256 KB na tablicę; `MEM_CHUNK_BYTES` ustala rozmiar ręcznie). Kolejność: kopia porcji 0, start; potem dla każdej porcji j: kopia porcji
 j + 1 do drugiej połowy (silnik liczy j), czekanie na j, start j + 1, odbiór wyniku j (silnik liczy j + 1).
 Silnik i procesor nigdy nie pracują na tej samej połowie: połowa jest nadpisywana dopiero po zakończeniu jej
 polecenia i odbiorze wyniku. Test na atrapie wykonującej polecenie dopiero przy czekaniu (najpóźniejszy
 możliwy odczyt danych) wykrywa każde naruszenie. `test_master_double_buffer_gain` mierzy zysk na płytce.
 
-Pomiar na płytce (add, 4 194 304 elementy, M el. / s; porcja = bajty na tablicę):
+Pierwszy pomiar na płytce (add, 4 194 304 elementy, M el. / s; porcja = bajty na tablicę), synchronizacja jeszcze
+po 4 × open / write / close:
 
 | | pojedynczy | 256 KB | 1 MB | 4 MB | 8 MB |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -169,6 +170,19 @@ Koszt nie zależał od rozmiaru synchronizowanego zakresu, tylko od liczby wywo�
 `sync_for_device` / `sync_for_cpu` (4 × open / write / close na plikach sysfs u-dma-buf). Stąd: deskryptory sysfs
 otwierane raz i `pwrite`, bez ponownego zapisu niezmienionych atrybutów, oraz liczba porcji zamiast stałego
 rozmiaru (optimum: posit32 ok. 4 porcje, posit16 ok. 8, posit8 ok. 16 — tańsze kopie znoszą więcej porcji).
+
+Po zmianie synchronizacji: **para `sync_for_device` + `sync_for_cpu` 57 µs** (było ok. 2 ms), więc opłaca się więcej porcji:
+
+| | pojedynczy | 6 porcji | 256 KB | 1 MB | 4 MB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| posit32 | 58,5 | 87,5 | 90,2 | **92,0** | 84,0 |
+| posit16 | 72,1 | 92,5 | **94,0** | 93,6 | 83,3 |
+| posit8 | 81,3 | 94,4 | **95,8** | 94,3 | 84,9 |
+
+Domyślnie 16 porcji (posit32 1 MB, posit16 512 KB, posit8 256 KB): **92–96 % granicy silnika** (100 M / s =
+1 element / takt przy 100 MHz). Względem AXI DMA z etapu 5 (add posit32 25,4 M / s) to 3,6 ×; NumPy float32
+add (ok. 250 M / s) jest już tylko 2,7 × szybszy. Dalej ogranicza sam silnik — więcej daje tylko szerszy
+silnik (kilka elementów na takt) albo wyższy zegar.
 
 Stara ścieżka (AXI4-Stream + AXI DMA) zostaje: `VecKv260 --dma ...` i `build.tcl -io dma` (aplikacje `*_vec`);
 `PositVecHw` rozpoznaje tryb po CONFIG.has_master, a `pn.board` obsługuje obie.
