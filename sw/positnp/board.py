@@ -240,7 +240,7 @@ class Board:
             return head + " (no engines open: pn.board.load(name) or pn.board.open())"
         lines = [head]
         for r in rows:
-            lanes = f", {r['units']} lanes div/sqrt/fma, k={r['k']}" if r["units"] else ""
+            lanes = f", {r['units']} lane{'s' if r['units'] != 1 else ''} div/sqrt/fma, k={r['k']}" if r["units"] else ""
             lines.append(f"  {r['config']:<12} {r['engine']}: {', '.join(r['ops'])}"
                          f"{', quire' if r['quire'] else ''}{lanes}, buffer {r['buffer_mb']} MB, v{r['version']}")
         return "\n".join(lines)

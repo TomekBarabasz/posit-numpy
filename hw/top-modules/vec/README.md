@@ -101,6 +101,22 @@ Python może używać kilku naraz, a tablica każdego formatu idzie do swojego s
   to kilkanaście procent LUT układu.
 - Aplikacje zbudowane wcześniej (jeden silnik, węzły `posit_vec` / `posit_dma` / `udmabuf-posit`) dalej działają.
 
+## Kilka silników na płytce (2026-11-14)
+
+`posit32_16_8_vec` (posit32 z 4 torami, posit16, posit8): `test_board_vec.py` przechodzi na każdym silniku,
+także z silnikami używanymi naprzemiennie; `pn.board.load` / `describe` działa z prawdziwym xmutil.
+
+| 4 194 304 elementy, M el. / s | posit32 | posit16 | posit8 |
+| --- | ---: | ---: | ---: |
+| add | 25,5 | 39,3 | 51,4 |
+| div | 22,7 (4 tory) | 14,3 | 21,3 |
+| quire dot | 41,1 | 55,5 | 62,7 |
+
+- add: DMA + silnik zawsze 42 ms (1 element / takt); węższy format to mniej pakowania i kopii po stronie
+  procesora (posit8: 29 + 6 ms wobec 83 + 31 ms dla posit32), stąd 2 × więcej elementów na sekundę.
+- posit16 i posit8 z jednym torem: div ograniczony silnikiem (6 i 4 takty / element) — przy następnym
+  buildzie warto dać im po 2 tory (`16:2:4:2 8:2:4:2`).
+
 ## Tory wielotaktowe (`slowUnits`, wersja 4.1)
 
 Dzielenie, sqrt i FMA liczą jednostki iteracyjne (`divCycles` = 10, `sqrtCycles` = 10, `fmaCycles` = 3 takty
@@ -125,7 +141,19 @@ dekoder -> prepare -+                                                           
 - Przy 1 torze odstępy są takie jak wcześniej (testy `alu_div_latency`, `sqrt_p32` bez zmian).
 - Ustawienie przy generowaniu: silnik `n:es:k:u`, np. `VecKv260 32:2:4:4 16:2:4:2`.
   Odczyt: rejestr ENGINE_CFG (0x5C): [7:0] k, [15:8] tory; w Pythonie `PositVecHw.engine_cfg()`.
-- Na płytce przy 4 torach div powinien dojść do granicy procesora (ok. 20–25 M/s zamiast 8,4) — do zmierzenia.
+- Na płytce (2026-11-14, `posit32_16_8_vec`: posit32 z 4 torami, posit16 i posit8 z jednym):
+
+  | 4 194 304 elementy | M el. / s (było przy 1 torze) | DMA + silnik | silnik |
+  | --- | ---: | ---: | --- |
+  | posit32 div | 22,7 (8,4) | 104,9 ms (419,5) | 2,5 taktu / element, dokładnie 4 × szybciej |
+  | posit32 sqrt | 26,7 (8,9) | | 2,5 taktu / element |
+  | posit32 FMA / AXPY | 34,3 / 34,4 (20,2) | | 1 takt / element |
+  | posit32 add | 25,5 | 42,1 ms | bez zmian (1 / takt; ogranicza procesor) |
+  | posit16 div (1 tor) | 14,3 | 251,7 ms | 6 taktów / element (`divCycles` posit16, k = 4) |
+  | posit8 div (1 tor) | 21,3 | 167,9 ms | 4 takty / element |
+
+  Dla posit32 div przestał być ograniczony silnikiem: 105 ms DMA + silnik wobec ok. 80 ms pracy procesora
+  (pakowanie, kopie), więc dalsze tory dla posit32 dadzą już niewiele przed etapem 6.
 - Koszt (OOC, posit32): 4 tory = 10 469 LUT, 4 926 FF, 8 DSP, 113 MHz po routingu, wobec 6 550 LUT przy jednym
   torze — ok. 1 300 LUT na każdy dodatkowy tor, bez nowych DSP i bez zmiany Fmax (`hw/top-modules/ooc/README.md`).
 
