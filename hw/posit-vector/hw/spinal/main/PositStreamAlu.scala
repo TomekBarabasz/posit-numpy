@@ -27,7 +27,7 @@ case class PositPair(c : PositConfig) extends Bundle {
   val a, b = Bits(c.n bits)
 }
 
-class PositStreamAlu(val cfg : PositAluConfig, tagDepth : Int = 8) extends Component {
+class PositStreamAlu(val cfg : PositAluConfig, tagDepth : Int = 0) extends Component {
   val c = cfg.c
   val io = new Bundle {
     val input   = slave(Stream(Fragment(PositPair(c))))
@@ -79,7 +79,8 @@ class PositStreamAlu(val cfg : PositAluConfig, tagDepth : Int = 8) extends Compo
   val (toAlu, toTags) = StreamFork2(merged, synchronous = true)
   alu.io.cmd << toAlu.translateWith(toAlu.cmd)
 
-  val tags = StreamFifo(Tag(), tagDepth)
+  // znaczniki: tyle, ile elementow miesci ALU, zeby wszystkie tory wielotaktowe mialy prace
+  val tags = StreamFifo(Tag(), if (tagDepth > 0) tagDepth else scala.math.max(8, cfg.maxInFlight))
   tags.io.push << toTags.translateWith(toTags.tag)
   io.inFlight := tags.io.occupancy =/= 0
 

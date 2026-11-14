@@ -12,8 +12,10 @@ import posit._
 //  - jeden dekoder na argument i jeden enkoder (z flagami) na wszystkie
 //    operacje; add i sub dziela sumator (sub = add(a, -b)),
 //  - dzielenie iteracyjne (DivArch.Iterative): k bitow ilorazu na takt,
-//    wiec latencja zalezy od operacji; strumien zostaje w kolejnosci, bo
-//    etap operacji trzyma ready nisko, dopoki iloraz nie jest gotowy,
+//    wiec latencja zalezy od operacji; dzielenie, sqrt i FMA licza tory
+//    wielotaktowe (slowUnits kopii, kolejne elementy na zmiane do kolejnych
+//    torow), a kolejka biletow wydaje wyniki w kolejnosci polecen - szybkie
+//    operacje za wolnymi czekaja w kolejce wynikow, wolne nie blokuja potoku,
 //  - wynik operacji ma wspolna szerokosc ulamka (najszersza z
 //    zbudowanych); wezsze sa dopelniane zerami od dolu, co nie zmienia
 //    wartosci, wiec enkoder zaokragla tak samo jak w PositUnit,
@@ -50,9 +52,13 @@ case class PositAluConfig(c               : PositConfig,
                           pipe            : PositPipeline = PositPipeline(),
                           sqrt            : Boolean       = false,
                           fma             : Boolean       = false,
-                          convert         : Boolean       = false) {
+                          convert         : Boolean       = false,
+                          slowUnits       : Int           = 1,
+                          fastDepth       : Int           = 4) {
   require(ops.nonEmpty && ops.distinct.size == ops.size, s"ops: niepuste, bez powtorzen: $ops")
   require(divBitsPerCycle >= 1)
+  require(slowUnits >= 1 && slowUnits <= 16, s"slowUnits = $slowUnits: 1..16")
+  require(fastDepth >= 2, s"fastDepth = $fastDepth: >= 2")
   require(!convert || (c.n == 32 && c.es == 2), s"$c: konwersje float32 sa dla posit<32,2>")
   def has(op : PositOp) : Boolean = ops.contains(op)
   def opMask : Int = PositAluOp.mask(ops) |
@@ -65,10 +71,19 @@ case class PositAluConfig(c               : PositConfig,
   def divCycles : Int = divSteps / divBitsPerCycle + 2
   def sqrtSteps : Int = PositSqrt.stepsFor(c, divBitsPerCycle)
   def sqrtCycles : Int = sqrtSteps / divBitsPerCycle + 2
-  /** FMA: zaladowanie iloczynu, jeden takt sumy, wystawienie. */
+  /** FMA: zaladowanie iloczynu, jeden takt wyrownania, wystawienie. */
   def fmaCycles : Int = 3
+  /** Czy sa jednostki wielotaktowe (tory, kolejka biletow). */
+  def hasSlow : Boolean = has(PositOp.Div) || sqrt || fma
+  /** Bilety: elementy w etapie operacji (czekajace szybkie wyniki + zajete tory). */
+  def ticketDepth : Int = fastDepth + slowUnits
+  /** Ile elementow moze byc naraz w ALU (rejestry potoku, skid, bilety); dla FIFO znacznikow PositStreamAlu. */
+  def maxInFlight : Int = (if (hasSlow) ticketDepth else 1) + 4
+  /** Przepustowosc przy ciaglym strumieniu jednej operacji wielotaktowej: elementy / takt. */
+  def slowRate(cycles : Int) : Double = scala.math.min(1.0, slowUnits.toDouble / cycles)
   override def toString = s"$c ops=${ops.map(_.name).mkString(",")}" +
-    (if (sqrt) ",sqrt" else "") + (if (fma) ",fma" else "") + (if (convert) ",f2p,p2f" else "") + s" k=$divBitsPerCycle $pipe"
+    (if (sqrt) ",sqrt" else "") + (if (fma) ",fma" else "") + (if (convert) ",f2p,p2f" else "") + s" k=$divBitsPerCycle" +
+    (if (slowUnits > 1) s" units=$slowUnits" else "") + s" $pipe"
 }
 
 case class PositAluCmd(c : PositConfig) extends Bundle {
@@ -183,17 +198,17 @@ class PositAlu(val cfg : PositAluConfig) extends Component {
 
     val out = Stream(OpOut(fracW))
 
-    /** Jednostka wielotaktowa: start przy pierwszym takcie polecenia, `iters` krokow, done do wydania wyniku. */
-    case class Slow(isOp : Bool, done : Bool, result : OpOut)
-    def iterative[T <: Data](isOp : Bool, init : => T, step : T => T, iters : Int, finish : T => PositUnrounded) : Slow = {
+    /** Jednostka wielotaktowa w jednym torze: start laduje stan z `init` (wspolne dla torow - prepare
+      * liczone raz, na elemencie wchodzacym), `iters` krokow, done do odebrania wyniku (release). */
+    case class SlowUnit(done : Bool, result : OpOut)
+    def iterative[T <: Data](init : T, step : T => T, iters : Int, finish : T => PositUnrounded)(start : Bool, release : Bool) : SlowUnit = {
       val area = new Area {
-        val first  = init
-        val state  = Reg(cloneOf(first))
+        val state  = Reg(cloneOf(init))
         val busy   = RegInit(False)
         val done   = RegInit(False)
         val cycles = Counter(iters)
-        when(in.valid && isOp && !busy && !done) {
-          state := first
+        when(start) {
+          state := init
           busy  := True
         }
         when(busy) {
@@ -204,31 +219,69 @@ class PositAlu(val cfg : PositAluConfig) extends Component {
             done := True
           }
         }
-        when(out.fire && isOp) { done := False }
+        when(release) { done := False }
         val result = posit(finish(state))
       }
-      Slow(isOp, area.done, area.result)
+      SlowUnit(area.done, area.result)
     }
+    case class SlowKind(isOp : Bool, build : (Bool, Bool) => SlowUnit)
 
     val k = cfg.divBitsPerCycle
-    val slow = Seq(
-      cfg.has(PositOp.Div) generate iterative(is(d.op, PositOp.Div), PositDivision.prepare(d.a, d.b, cfg.divSteps),
-        (s : PositDivState) => PositDivision.steps(s, k), cfg.divSteps / k, PositDivision.finish),
-      cfg.sqrt generate iterative(isCode(d.op, PositAluOp.SQRT), PositSqrt.prepare(d.a, cfg.sqrtSteps),
-        (s : PositSqrtState) => PositSqrt.steps(s, k), cfg.sqrtSteps / k, PositSqrt.finish),
-      cfg.fma generate iterative(isCode(d.op, PositAluOp.FMA) || isCode(d.op, PositAluOp.AXPY),
-        PositFma.prepare(d.a, d.b, d.d), PositFma.align, 1, PositFma.finish)   // takt: prepare | align | add + normalizacja
+    // prepare raz, na elemencie wchodzacym; tory laduja gotowy stan
+    val divInit  = cfg.has(PositOp.Div) generate PositDivision.prepare(d.a, d.b, cfg.divSteps)
+    val sqrtInit = cfg.sqrt generate PositSqrt.prepare(d.a, cfg.sqrtSteps)
+    val fmaInit  = cfg.fma generate PositFma.prepare(d.a, d.b, d.d)
+    val kinds = Seq(
+      cfg.has(PositOp.Div) generate SlowKind(is(d.op, PositOp.Div), (go : Bool, rel : Bool) =>
+        iterative(divInit, (s : PositDivState) => PositDivision.steps(s, k), cfg.divSteps / k, PositDivision.finish)(go, rel)),
+      cfg.sqrt generate SlowKind(isCode(d.op, PositAluOp.SQRT), (go : Bool, rel : Bool) =>
+        iterative(sqrtInit, (s : PositSqrtState) => PositSqrt.steps(s, k), cfg.sqrtSteps / k, PositSqrt.finish)(go, rel)),
+      cfg.fma generate SlowKind(isCode(d.op, PositAluOp.FMA) || isCode(d.op, PositAluOp.AXPY), (go : Bool, rel : Bool) =>
+        iterative(fmaInit, PositFma.align, 1, PositFma.finish)(go, rel))     // prepare | align | add + normalizacja
     ).filter(_ != null)
 
-    if (slow.nonEmpty) {
-      val isSlow   = slow.map(_.isOp).reduce(_ || _)
-      val slowDone = slow.map(u => u.isOp && u.done).reduce(_ || _)
-      val payload  = OpOut(fracW)
-      payload := fast
-      for (u <- slow) when(u.isOp) { payload := u.result }
-      out.valid   := in.valid && (!isSlow || slowDone)
-      out.payload := payload
-      in.ready    := out.ready && (!isSlow || slowDone)
+    if (kinds.nonEmpty) {
+      val L       = cfg.slowUnits
+      val isSlow  = kinds.map(_.isOp).reduce(_ || _)
+      // bilet: 0 = wynik szybki (w fastQ), j + 1 = tor wielotaktowy j
+      // latency = 0: pusta kolejka przepuszcza element w tym samym takcie (szybkie operacje bez dodatkowej latencji)
+      val tickets = StreamFifo(UInt(log2Up(L + 1) bits), cfg.ticketDepth, latency = 0)
+      val fastQ   = StreamFifo(OpOut(fracW), cfg.fastDepth, latency = 0)
+      val rr      = L > 1 generate Counter(L)                     // nastepny tor (kolejno, wiec tez w kolejnosci zwalniania)
+      def chosen(j : Int) : Bool = if (L == 1) True else rr.value === j
+
+      val lanes = for (j <- 0 until L) yield new Area {
+        val occupied = RegInit(False)
+        val start, release = Bool()
+        val units  = kinds.map(kd => kd.build(start && kd.isOp, release))
+        val done   = units.map(_.done).reduce(_ || _)
+        val result = OpOut(fracW)
+        result := units.head.result
+        for (u <- units.tail) when(u.done) { result := u.result }
+        when(start)   { occupied := True }
+        when(release) { occupied := False }
+      }
+
+      val laneFree = lanes.zipWithIndex.map { case (l, j) => chosen(j) && !l.occupied }.reduce(_ || _)
+      in.ready := tickets.io.push.ready && Mux(isSlow, laneFree, fastQ.io.push.ready)
+      val issue = in.fire
+      val slotOf : UInt = if (L == 1) U(1, log2Up(L + 1) bits) else (rr.value.resize(log2Up(L + 1)) + 1)
+      tickets.io.push.valid   := issue
+      tickets.io.push.payload := Mux(isSlow, slotOf, U(0, log2Up(L + 1) bits))
+      fastQ.io.push.valid     := issue && !isSlow
+      fastQ.io.push.payload   := fast
+      for ((l, j) <- lanes.zipWithIndex) l.start := issue && isSlow && chosen(j)
+      if (L > 1) when(issue && isSlow) { rr.increment() }
+
+      val head     = tickets.io.pop.payload
+      val headSlow = head =/= 0
+      val headDone = lanes.zipWithIndex.map { case (l, j) => head === j + 1 && l.done }.reduce(_ || _)
+      out.valid   := tickets.io.pop.valid && Mux(headSlow, headDone, fastQ.io.pop.valid)
+      out.payload := fastQ.io.pop.payload
+      for ((l, j) <- lanes.zipWithIndex) when(head === j + 1) { out.payload := l.result }
+      tickets.io.pop.ready := out.fire
+      fastQ.io.pop.ready   := out.fire && !headSlow
+      for ((l, j) <- lanes.zipWithIndex) l.release := out.fire && head === j + 1
     } else {
       out.valid   := in.valid
       out.payload := fast

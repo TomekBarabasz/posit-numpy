@@ -80,32 +80,114 @@ z ok. 100 ms zabiera pakowanie `{b, a}` po stronie procesora.
 **Bitstream z etapu 2 nie ma quire** — trzeba go zbudować od nowa (te same kroki niżej); `PositVecHw.reduce`
 sprawdza `CONFIG.has_quire` i bez niego zgłasza błąd.
 
+## Kilka silników w jednym bitstreamie
+
+Przy budowie wybierasz, które formaty mają być w PL — od jednego do trzech (posit8, posit16, posit32).
+Każdy silnik ma własny `PositVecAxi_p<n>`, własne AXI DMA i własny bufor u-dma-buf, więc są niezależne:
+Python może używać kilku naraz, a tablica każdego formatu idzie do swojego silnika.
+
+| silnik | węzeł UIO rejestrów | węzeł UIO DMA | bufor |
+| --- | --- | --- | --- |
+| posit⟨n,2⟩ | `posit_vec_p<n>` | `posit_dma_p<n>` | `/dev/udmabuf-posit-p<n>` |
+
+- Nazwa aplikacji wynika z listy: `posit32_vec` (jeden silnik), `posit32_16_8_vec` (trzy); `-name` ją zmienia.
+- Moduły każdego silnika mają przedrostek `p<n>_` (SpinalHDL `globalPrefix`), więc trzy IP nie zderzają się
+  nazwami w jednym projekcie Vivado.
+- `.json` aplikacji ma listę `engines` (nazwy węzłów, adresy, bufory); `install_overlay.sh` sprawdza urządzenia
+  wszystkich silników, a `positnp.backend_hw.vec_engines()` znajduje je na płytce po nazwach węzłów UIO.
+- Bufory: `-buf_mb` na silnik (domyślnie 64 MB, przy trzech razem 192 MB). Pochodzą z CMA — sprawdź
+  `grep Cma /proc/meminfo`; gdy brakuje, `-buf_mb 32` (porcje DMA będą mniejsze, wynik ten sam).
+- Zasoby (OOC): posit32 ok. 6,5k LUT, posit16 ok. 3,3k, posit8 mniej, plus AXI DMA na silnik — trzy silniki
+  to kilkanaście procent LUT układu.
+- Aplikacje zbudowane wcześniej (jeden silnik, węzły `posit_vec` / `posit_dma` / `udmabuf-posit`) dalej działają.
+
+## Kilka silników na płytce (2026-11-14)
+
+`posit32_16_8_vec` (posit32 z 4 torami, posit16, posit8): `test_board_vec.py` przechodzi na każdym silniku,
+także z silnikami używanymi naprzemiennie; `pn.board.load` / `describe` działa z prawdziwym xmutil.
+
+| 4 194 304 elementy, M el. / s | posit32 | posit16 | posit8 |
+| --- | ---: | ---: | ---: |
+| add | 25,5 | 39,3 | 51,4 |
+| div | 22,7 (4 tory) | 14,3 | 21,3 |
+| quire dot | 41,1 | 55,5 | 62,7 |
+
+- add: DMA + silnik zawsze 42 ms (1 element / takt); węższy format to mniej pakowania i kopii po stronie
+  procesora (posit8: 29 + 6 ms wobec 83 + 31 ms dla posit32), stąd 2 × więcej elementów na sekundę.
+- posit16 i posit8 z jednym torem: div ograniczony silnikiem (6 i 4 takty / element) — przy następnym
+  buildzie warto dać im po 2 tory (`16:2:4:2 8:2:4:2`).
+
+## Tory wielotaktowe (`slowUnits`, wersja 4.1)
+
+Dzielenie, sqrt i FMA liczą jednostki iteracyjne (`divCycles` = 10, `sqrtCycles` = 10, `fmaCycles` = 3 takty
+dla posit32, k = 4). Silnik może mieć ich kilka kopii — **torów**: kolejne elementy idą na zmianę do kolejnych
+torów, a kolejka biletów wydaje wyniki w kolejności poleceń. Add / sub / mul / konwersje dalej 1 element / takt
+w jednym potoku (ich nie ma sensu powielać przed etapem 6 — ogranicza procesor, nie silnik).
+
+```
+                    +--> szybki potok (add, sub, mul, F2P, P2F) --> kolejka wyników (fastDepth) --+
+dekoder -> prepare -+                                                                            +--> bilety -> enkoder
+ (raz na element)   +--> tor 0 | tor 1 | ... | tor L-1  (kroki div / sqrt / FMA + finish)  ------+   (kolejność poleceń)
+```
+
+| | 1 tor | L torów |
+| --- | ---: | ---: |
+| div, sqrt (posit32, k = 4) | 10 taktów / element | 10 / L (np. 2,5 przy L = 4) |
+| FMA, AXPY | 3 takty / element | max(1, 3 / L) |
+
+- Wspólne dla torów: dekodery i `prepare` (np. mnożarka FMA w DSP — tory nie dokładają DSP);
+  powielone: rejestry stanu, kroki rekurencji, wyrównanie FMA i `finish`.
+- Wolne operacje nie blokują już potoku: szybkie wyniki za nimi czekają w kolejce (do `fastDepth` = 4).
+- Przy 1 torze odstępy są takie jak wcześniej (testy `alu_div_latency`, `sqrt_p32` bez zmian).
+- Ustawienie przy generowaniu: silnik `n:es:k:u`, np. `VecKv260 32:2:4:4 16:2:4:2`.
+  Odczyt: rejestr ENGINE_CFG (0x5C): [7:0] k, [15:8] tory; w Pythonie `PositVecHw.engine_cfg()`.
+- Na płytce (2026-11-14, `posit32_16_8_vec`: posit32 z 4 torami, posit16 i posit8 z jednym):
+
+  | 4 194 304 elementy | M el. / s (było przy 1 torze) | DMA + silnik | silnik |
+  | --- | ---: | ---: | --- |
+  | posit32 div | 22,7 (8,4) | 104,9 ms (419,5) | 2,5 taktu / element, dokładnie 4 × szybciej |
+  | posit32 sqrt | 26,7 (8,9) | | 2,5 taktu / element |
+  | posit32 FMA / AXPY | 34,3 / 34,4 (20,2) | | 1 takt / element |
+  | posit32 add | 25,5 | 42,1 ms | bez zmian (1 / takt; ogranicza procesor) |
+  | posit16 div (1 tor) | 14,3 | 251,7 ms | 6 taktów / element (`divCycles` posit16, k = 4) |
+  | posit8 div (1 tor) | 21,3 | 167,9 ms | 4 takty / element |
+
+  Dla posit32 div przestał być ograniczony silnikiem: 105 ms DMA + silnik wobec ok. 80 ms pracy procesora
+  (pakowanie, kopie), więc dalsze tory dla posit32 dadzą już niewiele przed etapem 6.
+- Koszt (OOC, posit32): 4 tory = 10 469 LUT, 4 926 FF, 8 DSP, 113 MHz po routingu, wobec 6 550 LUT przy jednym
+  torze — ok. 1 300 LUT na każdy dodatkowy tor, bez nowych DSP i bez zmiany Fmax (`hw/top-modules/ooc/README.md`).
+
 ## Krok po kroku
 
-1. RTL (z `hw/`):
+1. RTL (z `hw/`) — jeden plik na silnik, `hw/gen/p<n>/PositVecAxi_p<n>.v`:
    ```
-   sbt "top-vec/runMain posit.top.vec.VecKv260"          # posit<32,2> -> hw/gen/p32/PositVecAxi.v
-   sbt "top-vec/runMain posit.top.vec.VecKv260 16"
+   sbt "top-vec/runMain posit.top.vec.VecKv260"            # posit<32,2>
+   sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"    # trzy silniki; silnik = n[:es[:k[:u]]], np. 16:2:1
+   sbt "top-vec/runMain posit.top.vec.VecKv260 32:2:4:4"   # posit32 z 4 torami div / sqrt / FMA
    ```
 2. Bitstream i aplikacja (z `hw/top-modules/vec/vivado`):
    ```
-   vivado -mode batch -nojournal -log build.log -source build.tcl
+   vivado -mode batch -nojournal -log build.log -source build.tcl                               # posit32_vec
+   vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"   # posit32_16_8_vec
    ```
-   Wynik: `sw/positnp/overlays/posit32_vec/` (`.bit.bin`, `.dtsi`, `shell.json`, `.json`).
+   Wynik: `sw/positnp/overlays/<nazwa>/` (`.bit.bin`, `.dtsi`, `shell.json`, `.json`).
+   `tclsh overlay_files_test.tcl` sprawdza generowanie `.dtsi` / `.json` bez Vivado (z `dtc`).
 3. Na płytce, z `sw/`:
    ```
    scripts/build_udmabuf.sh                    # raz na jądro: moduł u-dma-buf (git, nagłówki jądra)
-   scripts/install_overlay.sh posit32_vec      # sprawdza /dev/uio (posit_vec, posit_dma) i /dev/udmabuf-posit
-   sudo python3 -m pytest -v -s tests/test_board_vec.py
+   scripts/install_overlay.sh posit32_16_8_vec # sprawdza /dev/uio i /dev/udmabuf-posit-p<n> każdego silnika
+   sudo python3 -m pytest -v -s tests/test_board_vec.py   # każdy test na każdym silniku + silniki naraz
    ```
    z Pythona:
    ```python
    import numpy as np, positnp as pn
-   from positnp.backend_hw import PositVecHw
-   hw = PositVecHw.open()
+   from positnp.backend_hw import PositVecHw, vec_engines
+   vec_engines()                          # [VecEngine('posit_vec_p32', ...), ... p16, ... p8]
+   hw = PositVecHw.open(32)               # silnik posit32 (przy jednym silniku: open())
+   all_hw = PositVecHw.open_all()         # {32: PositVecHw, 16: ..., 8: ...}; hw.close() przed xmutil unloadapp
    r = hw.array_op("mul", a_bits, b_bits)                  # surowe bity positów (np. uint32)
    pn.set_backend(hw)                                      # PositArray liczy teraz na płytce
-   x = pn.PositArray.from_float(np.linspace(-4, 4, 1000))
+   x = pn.array(np.linspace(-4, 4, 1000))
    (x * x - x / 3).to_float()
    ```
 
@@ -113,8 +195,9 @@ sprawdza `CONFIG.has_quire` i bez niego zgłasza błąd.
 
 | opcja `-tclargs` | domyślnie | |
 | --- | --- | --- |
-| `-n <bity>` | `32` | 8, 16 albo 32 (`tdata` AXI DMA w pełnych bajtach) |
-| `-buf_mb <MB>` | `64` | bufor u-dma-buf w `.dtsi`; połowę z grubsza zajmuje wejście, resztę wynik |
+| `-engines "<n> ..."` | `32` | silniki: 8, 16, 32, każdy co najwyżej raz (`tdata` AXI DMA w pełnych bajtach); `-n <n>` = jeden |
+| `-name <nazwa>` | `posit<n>[_<n>…]_vec` | nazwa aplikacji dla xmutil |
+| `-buf_mb <MB>` | `64` | bufor u-dma-buf na silnik; połowę z grubsza zajmuje wejście, resztę wynik |
 | `-out`, `-deploy`, `-part`, `-jobs`, `-threads`, `-stop ip\|bd` | | jak w `alu` |
 
 AXI DMA (PG021): tryb prosty (bez scatter-gather), adresy 32 b, długość transferu 26 b (do 64 MB − 1),
@@ -125,8 +208,8 @@ szyna pamięci 64 b, `tdata` MM2S 2n b, S2MM n b.
 Jak w etapie 1 (zegar PL0, reset, AFI, węzły UIO), plus:
 
 - **port HP0 FPD** (dane DMA ↔ DDR) na domyślnych 128 b, wpisane też do AFI (`config-afi = <4 0>, <5 0>`);
-- **bufor DMA**: węzeł `compatible = "ikwzm,u-dma-buf"`, `device-name = "udmabuf-posit"` →
-  `/dev/udmabuf-posit`, adres fizyczny w `/sys/class/u-dma-buf/udmabuf-posit/phys_addr`;
+- **bufor DMA** (na silnik): węzeł `compatible = "ikwzm,u-dma-buf"`, `device-name = "udmabuf-posit-p<n>"` →
+  `/dev/udmabuf-posit-p<n>`, adres fizyczny w `/sys/class/u-dma-buf/udmabuf-posit-p<n>/phys_addr`;
   maska DMA 32 b, więc bufor leży poniżej 4 GB, w zasięgu 32-bitowych adresów DMA;
 - **spójność pamięci podręcznej**: HP0 nie jest spójny z cache CPU. `udmabuf.py` mapuje bufor z cache
   i przed każdym transferem robi `sync_for_device` (wejście i wynik), po nim `sync_for_cpu` (wynik).
@@ -148,6 +231,7 @@ i przez rejestry. Każda zaokrągla raz (RNE), bit w bit z `PositRef.sqrt / fma 
 | offset | rejestr | |
 | --- | --- | --- |
 | 0x58 | OPERAND_C | trzeci argument FMA (tablica · tablica + stała) |
+| 0x5C | ENGINE_CFG | (4.1) [7:0] k, [15:8] tory div / sqrt / FMA |
 | 0x04 | CONFIG | maska operacji [31:16] z bitami 7–11 (F2P / P2F tylko dla posit⟨32,2⟩) |
 
 ID_VERSION = `0x5053_0400`. Iloczyn FMA jest dokładny (2F + 2 b), suma wyrównana z bitami ochronnymi
@@ -192,6 +276,7 @@ to znów dodawanie z etapu 1). Szczegóły w `hw/top-modules/ooc/README.md`.
 | quire | `posit-vector/.../PositQuireTestplan` | wszystkie pary posit8 jako wektory dł. 1, losowe posit16/32, znoszenie się, przeniesienia przez cały quire, NaR, kontynuacja, permutacja, 200k × maxpos² — wynik, flagi i surowy quire kontra `QuireRef` |
 | quire w IP | `posit-kv260/.../PositVecQuireTestplan` | sum/dot/sumsq przez AXI4-Lite + AXI4-Stream, kontynuacja, NaR, przeplot z tablicami |
 | etap 5, ALU | `posit-vector/.../PositAluStage5Testplan` | sqrt: wszystkie posit8/16 i losowe posit32, odstęp = `sqrtCycles`; FMA z znoszeniem się; konwersje z przypadkami brzegowymi; przeplot wszystkich operacji; ALU bez etapu 5 |
+| tory | `posit-vector/.../PositAluUnitsTestplan` | div / sqrt / FMA na 2 i 4 torach: średni odstęp = cycles / L; przeplot wszystkich operacji na 3 torach (kolejność, losowe valid / ready); add / mul nadal 1 / takt; `PositStreamAlu` z 4 torami ok. 4 razy szybszy na div |
 | etap 5, IP | `posit-kv260/.../PositVecStage5Testplan` | sqrt, FMA, AXPY (też z `scalar_b`), F2P, P2F na tablicach przez AXI; sqrt i FMA przez rejestry |
 | sterownik | `sw/tests/test_vec_fake.py` | `PositVecHw` na atrapach rejestrów, DMA i bufora: porcjowanie, protokół cache, błędy DMA |
 | płytka | `sw/tests/test_board_vec.py` | długości 1 … 1 000 001, wszystkie operacje kontra `ref.py`, tablica ⊕ skalar, liczniki, przepustowość; etap 5: sqrt, FMA / AXPY, F2P / P2F kontra `PositSw`, `PositArray` na sprzęcie, przepustowość |

@@ -13,21 +13,23 @@ import numpy as np
 import pytest
 
 from positnp import ref, regs
-from positnp.backend_hw import DMA_NAME, VEC_NAME, PositVecHw, find_uio
+from positnp.backend_hw import PositVecHw, vec_engines
 from positnp.backend_sw import PositSw
-from positnp.udmabuf import DEFAULT_NAME, SYS_CLASS
 
-if find_uio(VEC_NAME) is None or find_uio(DMA_NAME) is None or not (SYS_CLASS / DEFAULT_NAME).exists():
-    pytest.skip("stage 2 overlay not loaded (UIO posit_vec / posit_dma, u-dma-buf)", allow_module_level=True)
+ENGINES = vec_engines()
+if not ENGINES:
+    pytest.skip("no posit_vec engine loaded (UIO posit_vec_p<n> / posit_dma_p<n>, u-dma-buf)", allow_module_level=True)
 
 LENGTHS = (1, 2, 3, 1000, 4097, 1_000_001)
 
 
-@pytest.fixture(scope="module")
-def hw():
-    v = PositVecHw.open()
+@pytest.fixture(scope="module", params=ENGINES, ids=lambda e: e.name)
+def hw(request):
+    """Every test runs on every engine of the loaded overlay (posit32_16_8_vec: three times)."""
+    v = PositVecHw.open_engine(request.param)
     v.soft_reset()
-    return v
+    yield v
+    v.close()
 
 
 @pytest.fixture(scope="module")
@@ -46,8 +48,11 @@ def check(hw, sw, name, a, b=None, scalar=None):
 
 
 def test_id_and_config(hw):
-    assert hw.read(regs.ID_VERSION) == regs.ID << 16 | regs.VERSION_VEC
-    print(f"\n{hw}, buffer {hw.buf.size >> 20} MB @ 0x{hw.buf.phys_addr:x}, {hw.chunk_elements()} elements/chunk")
+    idv = hw.read(regs.ID_VERSION)
+    assert idv >> 16 == regs.ID and idv & 0xFFFF >= regs.VERSION_STREAM_MIN, f"ID_VERSION 0x{idv:08x}"
+    if hw.engine.n is not None:
+        assert hw.config.n == hw.engine.n, f"{hw.engine.name} computes {hw.config}"
+    print(f"\n{hw.engine.name}: {hw}, {hw.engine_cfg()}, buffer {hw.buf.size >> 20} MB @ 0x{hw.buf.phys_addr:x}, {hw.chunk_elements()} elements/chunk")
 
 
 @pytest.mark.parametrize("name", ref.OPS)
@@ -216,3 +221,46 @@ def test_stage5_throughput(hw):
     np.sqrt(f)
     rows.append(("numpy float32 sqrt", size / (time.perf_counter() - t0)))
     print("\n" + "\n".join(f"{k:>20}: {v / 1e6:9.3f} M elem/s" for k, v in rows))
+
+
+# ---- several engines in one overlay ---------------------------------------------------------------------
+
+def test_engines_side_by_side():
+    """open_all(): every engine at once, interleaved calls, each bit for bit with PositSw."""
+    if len(ENGINES) < 2:
+        pytest.skip("overlay with one engine")
+    engines = PositVecHw.open_all()
+    try:
+        assert sorted(engines) == sorted(e.n for e in ENGINES if e.n)
+        rnd = np.random.default_rng(21)
+        for _ in range(3):
+            for n, hw in engines.items():
+                a = rnd.integers(0, 1 << n, 100_000)
+                b = rnd.integers(0, 1 << n, 100_000)
+                assert np.array_equal(hw.array_op("mul", a, b), PositSw(hw.config).array_op("mul", a, b)), hw.engine.name
+    finally:
+        for hw in engines.values():
+            hw.close()
+
+
+# ---- pn.board on the loaded application (no reload) ---------------------------------------------------
+
+def test_board_open_and_describe():
+    import positnp as pn
+    try:
+        name = pn.board.active()
+    except pn.board.BoardError as e:
+        pytest.skip(f"xmutil not usable here: {e}")
+    app = next((a for a in pn.board.apps() if a.name == name), None)
+    try:
+        hw = pn.board.open()
+        assert len(hw) == len(ENGINES)
+        if app is not None and app.engines:
+            assert sorted(hw) == sorted(e["n"] for e in app.engines if e.get("n")) or None in [e.get("n") for e in app.engines]
+        print("\n" + pn.board.describe())
+        for n, h in hw.items():
+            assert pn.get_backend(h.config) is h
+            x = pn.array([1.0, 2.0, 3.0], h.config)
+            assert (x * x).to_float().tolist() == [1.0, 4.0, 9.0]
+    finally:
+        pn.board.close()

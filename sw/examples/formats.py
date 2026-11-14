@@ -80,7 +80,7 @@ def main() -> None:
     args = ap.parse_args()
     if args.hw:
         from positnp.backend_hw import PositVecHw
-        pn.set_backend(PositVecHw.open())
+        pn.set_backend(PositVecHw.open(32))
 
     x, exact, rows = experiment_horner()
     print("Horner (x - 1)**7, x in [1.1, 2]: correct digits (median / min) vs exact (x - 1)**7")

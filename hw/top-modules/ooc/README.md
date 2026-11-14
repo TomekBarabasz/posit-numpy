@@ -11,6 +11,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `div/` | dzielniki sekwencyjne: `Iterative(1)`, `Iterative(4)`, `Pipelined(4)` |
 | `alu_p16/`, `alu_p32/` | `PositAluAxiLite` z etapu 1 (k = 4, potok full), ta sama konfiguracja co `top-modules/alu` |
 | `vec_p16/`, `vec_p32/` | `PositVecAxi` (rejestry, AXI4-Stream, quire, sqrt / FMA / konwersje), ta sama konfiguracja co `top-modules/vec` |
+| `vec_p32_u4/` | to samo z 4 torami div / sqrt / FMA (`slowUnits = 4`) — koszt torów względem `vec_p32` |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 
@@ -92,6 +93,21 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
   (~570 b) i odczyt (wybór segmentu, LZC 64 b) mieszczą się w jednym takcie.
 - Koszt quire posit32 względem `alu_p32`: ok. +3 600 LUT, +2 300 FF (dwa rejestry 512 b: akumulator i odczyt,
   plus potok) i +4 DSP (mnożarka 28 × 28 b w quire, osobna od ALU). Cały silnik to ok. 4,3% LUT układu.
+
+### Tory wielotaktowe: `vec_p32_u4` (2026-11-14)
+
+`PositVecAxi` posit32 jak `vec_p32`, ale z 4 torami div / sqrt / FMA (`slowUnits = 4`). Vivado 2026.1, 100 MHz, `-impl`.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p32_u4` | synth | 10 553 | 4 926 | 457 | 8 | 0 | 2,323 | 130,3 |
+| `vec_p32_u4` | impl | 10 469 | 4 926 | 457 | 8 | 0 | 1,151 | 113,0 |
+
+- Względem `vec_p32` z jednym torem (6 550 LUT, ok. 3 550 FF po rozdzieleniu FMA): +3 900 LUT i +1 400 FF,
+  czyli ok. 1 300 LUT i 460 FF na każdy dodatkowy tor (rekurencja div i sqrt, wyrównanie i `finish` FMA, rejestry stanu).
+- DSP bez zmian (8): `prepare`, w tym mnożarka FMA, jest wspólne dla torów.
+- Fmax bez zmian (113 vs 114 MHz): ścieżka krytyczna zostaje w dodawaniu, tory jej nie wydłużają.
+- Cały silnik posit32 z 4 torami to ok. 9% LUT układu; div / sqrt 4 razy szybsze w silniku (2,5 zamiast 10 taktów / element).
 
 ### Etap 5, przebieg kontrolny: `PositVecAxi` 4.0 bez nowych operacji (2026-11-13)
 

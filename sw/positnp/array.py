@@ -5,7 +5,7 @@
     y = x * x - x / 3 + 1                        # every arithmetic operator is one array_op on the backend
     np.sort(y), np.max(y), np.argmax(y), -y, abs(y), y < 0
     y.to_float()                                 # float64; NaR -> nan
-    with pn.using(PositVecHw.open()):            # the KV260 for this block (default: PositSw, vecops)
+    with pn.using(PositVecHw.open(32)):            # the KV260 for this block (default: PositSw, vecops)
         z = x * x
     pn.stats()                                   # NaR / saturation / inexact counts of the backend
 
@@ -39,31 +39,50 @@ P32 = PositConfig(32)
 
 # ---- backends ---------------------------------------------------------------------------------
 
-_backend = None
+_backends: Dict[PositConfig, Any] = {}       # format -> backend (PositVecHw); the rest: PositSw
 _sw: Dict[PositConfig, PositSw] = {}
 
 
 def set_backend(backend) -> None:
-    """Backend for arrays of its format: PositVecHw (the KV260) or None (PositSw)."""
-    global _backend
-    _backend = backend
+    """Backend for arrays of its format.
+
+        pn.set_backend(hw32)               # posit32 arrays on the KV260, the other formats unchanged
+        pn.set_backend([hw32, hw16, hw8])  # several engines at once (pn.board.load does this)
+        pn.set_backend(None)               # everything in software (PositSw)
+    """
+    if backend is None:
+        _backends.clear()
+        return
+    for b in (backend.values() if isinstance(backend, dict) else
+              backend if isinstance(backend, (list, tuple)) else [backend]):
+        _backends[b.config] = b
+
+
+def active_backends() -> Dict[PositConfig, Any]:
+    """Format -> backend for the formats not computed by PositSw."""
+    return dict(_backends)
 
 
 @contextlib.contextmanager
 def using(backend):
-    """with pn.using(hw): ... - the backend for the block, the previous one restored after."""
-    prev = _backend
-    set_backend(backend)
+    """with pn.using(hw): ... - backend(s) for the block (None: all software), the previous set restored after."""
+    prev = dict(_backends)
+    if backend is None:
+        _backends.clear()
+    else:
+        set_backend(backend)
     try:
         yield backend
     finally:
-        set_backend(prev)
+        _backends.clear()
+        _backends.update(prev)
 
 
 def get_backend(config: PositConfig):
-    """The active backend if it computes `config`, otherwise the PositSw for `config`."""
-    if _backend is not None and _backend.config == config:
-        return _backend
+    """The backend registered for `config`, otherwise the PositSw for `config`."""
+    be = _backends.get(config)
+    if be is not None:
+        return be
     if config not in _sw:
         _sw[config] = PositSw(config)
     return _sw[config]
@@ -71,7 +90,9 @@ def get_backend(config: PositConfig):
 
 def _stats_backend(config: Optional[PositConfig]):
     if config is None:
-        return _backend if _backend is not None else get_backend(P32)
+        if len(_backends) == 1:
+            return next(iter(_backends.values()))
+        return get_backend(P32)
     return get_backend(config)
 
 

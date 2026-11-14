@@ -20,9 +20,11 @@ from __future__ import annotations
 import json
 import mmap
 import os
+import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Protocol, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
 
@@ -33,9 +35,10 @@ from .udmabuf import UDmaBuf
 
 OVERLAY_DIR = Path(__file__).with_name("overlays")
 IP_NAME = "posit_alu"  # block design instance = UIO node name in the .dtsi (hw/top-modules/alu/vivado/build.tcl)
-VEC_NAME = "posit_vec"  # stage 2 (hw/top-modules/vec/vivado/build.tcl)
+VEC_NAME = "posit_vec"  # stage 2-5 overlays with one engine; build.tcl -engines: posit_vec_p<n>
 DMA_NAME = "posit_dma"
 BUF_NAME = "udmabuf-posit"
+_VEC_RE = re.compile(r"^posit_vec(?:_p(\d+))?$")
 UIO_CLASS = Path("/sys/class/uio")
 
 
@@ -119,6 +122,53 @@ class DevMemMmio(_MappedWords):
             super().__init__(fd, size, base)
         finally:
             os.close(fd)
+
+
+@dataclass(frozen=True)
+class VecEngine:
+    """One PositVecAxi engine of the loaded overlay: UIO names of its registers and DMA, its u-dma-buf.
+
+    n is the posit width from the node name (posit_vec_p<n>), None for overlays built before
+    build.tcl -engines (one engine named posit_vec); PositVecHw reads the format from CONFIG anyway.
+    """
+    name: str
+    dma: str
+    buf: str
+    n: Optional[int] = None
+
+
+def vec_engines() -> List[VecEngine]:
+    """Engines of the loaded overlay (generic-uio nodes posit_vec_p<n> / posit_vec), widest first."""
+    found = []
+    if UIO_CLASS.exists():
+        for d in UIO_CLASS.iterdir():
+            try:
+                m = _VEC_RE.match((d / "name").read_text().strip())
+            except OSError:
+                continue
+            if m:
+                n = int(m.group(1)) if m.group(1) else None
+                sfx = f"_p{n}" if n else ""
+                found.append(VecEngine(m.group(0), DMA_NAME + sfx, BUF_NAME + (f"-p{n}" if n else ""), n))
+    return sorted(found, key=lambda e: (-(e.n or 0), e.name))
+
+
+def select_engine(engines: List[VecEngine], n: Optional[int] = None) -> VecEngine:
+    """The engine for posit<n> (or the only one when n is None); PositAluError with what is there."""
+    have = ", ".join(e.name for e in engines) or "none"
+    if n is None:
+        if len(engines) == 1:
+            return engines[0]
+        raise PositAluError(f"PositVecHw.open(n): engines loaded: {have}" if engines else
+                            "no posit_vec engine: is the overlay loaded? (sudo xmutil listapps; "
+                            "sw/scripts/install_overlay.sh)")
+    for e in engines:
+        if e.n == n:
+            return e
+    legacy = [e for e in engines if e.n is None]
+    if legacy:
+        return legacy[0]                 # format checked against CONFIG after opening
+    raise PositAluError(f"no posit<{n}> engine in the loaded overlay (engines: {have})")
 
 
 def overlay_info(overlay: str) -> Dict[str, object]:
@@ -236,6 +286,13 @@ class PositAluHw:
         return f"PositAluHw({self.config}, ops={self.ops}, version={self.version >> 8}.{self.version & 0xFF})"
 
 
+class _Closed:
+    """Stands in for the mappings of a closed PositVecHw: any use raises."""
+
+    def __getattr__(self, name):
+        raise PositAluError("PositVecHw is closed")
+
+
 class PositVecHw(PositAluHw):
     """Stage 2: whole arrays through AXI DMA and AXI4-Stream; single ops as in stage 1.
 
@@ -254,13 +311,14 @@ class PositVecHw(PositAluHw):
     def __init__(self, mmio: Mmio, dma_mmio: Mmio, buf, timeout_polls: int = 100_000):
         super().__init__(mmio, timeout_polls)
         cfg = self.read(regs.CONFIG)
-        if not cfg >> regs.CONFIG_HAS_STREAM & 1 or self.version < regs.VERSION_VEC:
+        if not cfg >> regs.CONFIG_HAS_STREAM & 1 or self.version < regs.VERSION_STREAM_MIN:
             raise PositAluError(f"engine without the stream path (CONFIG 0x{cfg:08x}, version 0x{self.version:04x})")
         n = self.config.n
         if n not in self.IN_DTYPE:
             raise PositAluError(f"posit<{n}>: the stream path needs n = 8, 16 or 32")
         self.dma = AxiDma(dma_mmio)
         self.buf = buf
+        self.engine: Optional[VecEngine] = None
         self.in_dtype = self.IN_DTYPE[n]
         self.out_dtype = self.OUT_DTYPE[n]
         self.in_bytes = 2 * n // 8
@@ -272,8 +330,74 @@ class PositVecHw(PositAluHw):
         self.dma.reset()
 
     @classmethod
-    def open(cls, name: str = VEC_NAME, dma: str = DMA_NAME, buf: str = BUF_NAME) -> "PositVecHw":
-        return cls(UioMmio(name), UioMmio(dma), UDmaBuf(buf))
+    def open(cls, n: Optional[int] = None) -> "PositVecHw":
+        """The posit<n> engine of the loaded overlay; n may be omitted when there is one engine.
+
+            PositVecHw.open()      # posit32_vec (one engine)
+            PositVecHw.open(16)    # posit32_16_8_vec: the posit16 engine
+        """
+        e = select_engine(vec_engines(), n)
+        hw = cls.open_engine(e)
+        if n is not None and hw.config.n != n:
+            hw.close()
+            raise PositAluError(f"{e.name} computes {hw.config}, not posit<{n}>")
+        return hw
+
+    @classmethod
+    def open_engine(cls, e: VecEngine) -> "PositVecHw":
+        parts = []
+        try:
+            parts.append(UioMmio(e.name))
+            parts.append(UioMmio(e.dma))
+            parts.append(UDmaBuf(e.buf))
+            hw = cls(*parts)
+        except BaseException:
+            for p in parts:
+                p.close()
+            raise
+        hw.engine = e
+        return hw
+
+    @classmethod
+    def open_all(cls) -> Dict[int, "PositVecHw"]:
+        """Every engine of the loaded overlay, by posit width: {32: PositVecHw, 16: ..., 8: ...}."""
+        out: Dict[int, PositVecHw] = {}
+        try:
+            for e in vec_engines():
+                hw = cls.open_engine(e)
+                out[hw.config.n] = hw
+        except BaseException:
+            for hw in out.values():
+                hw.close()
+            raise
+        return out
+
+    def engine_cfg(self) -> Optional[Dict[str, int]]:
+        """Build parameters of the engine (version >= 4.1): k = divider / sqrt bits per cycle,
+        units = div / sqrt / FMA lanes (VecKv260 n:es:k:units). None for older bitstreams."""
+        if self.version < 0x0401:
+            return None
+        v = self.read(regs.ENGINE_CFG)
+        return {"k": v & 0xFF, "units": v >> 8 & 0xFF}
+
+    def close(self) -> None:
+        """Unmap the registers, the DMA and the buffer (before xmutil unloadapp). Idempotent."""
+        if isinstance(self.mmio, _Closed):
+            return
+        for part in (self.buf, self.dma.mmio, self.mmio):
+            close = getattr(part, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except (ValueError, BufferError):
+                    pass             # already closed
+        self.buf = self.dma = self.mmio = _Closed()
+
+    def __enter__(self) -> "PositVecHw":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def chunk_elements(self) -> int:
         """Elements per DMA round: input and output regions in one buffer, input within one transfer."""

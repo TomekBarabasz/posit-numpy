@@ -19,7 +19,9 @@ Stan:
 - etap 2 (tablice przez AXI4-Stream i AXI DMA): sprawdzony na płytce — `hw/top-modules/vec/README.md`;
 - etap 3 (`PositArray` z protokołami NumPy, `vecops`, konwersje, `stats()`, notatnik): sprawdzony na płytce — `sw/README.md`;
 - etap 4 (quire: dokładne `sum`, `dot`, `mean`, `norm`): sprawdzony na płytce — `hw/top-modules/vec/README.md`;
-- etap 5 (sqrt, FMA / AXPY, konwersje float32 w PL; `np.sqrt`, `pn.fma`, `pn.axpy`): sprawdzony na płytce — `hw/top-modules/vec/README.md`.
+- etap 5 (sqrt, FMA / AXPY, konwersje float32 w PL; `np.sqrt`, `pn.fma`, `pn.axpy`): sprawdzony na płytce — `hw/top-modules/vec/README.md`;
+- kilka silników w jednym bitstreamie (posit8/16/32), tory div / sqrt / FMA, `pn.board`: sprawdzone na płytce
+  (`posit32_16_8_vec`) — `hw/top-modules/vec/README.md`, `sw/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)
@@ -90,14 +92,17 @@ scripts/install_overlay.sh posit32_alu           # na KV260, z sw/
 sudo python3 -m pytest -v tests/test_board.py    # na KV260, z sw/
 ```
 
-## etap 2 na płytce
+## silniki na tablicach na płytce (etap 2+)
+Jeden albo kilka formatów w jednym bitstreamie (`-engines`, szczegóły w `hw/top-modules/vec/README.md`):
 ```
-sbt "top-vec/runMain posit.top.vec.VecKv260"     # z hw/
-vivado -mode batch -nojournal -log build.log -source build.tcl    # z hw/top-modules/vec/vivado
+sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"                                  # z hw/
+vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"   # z hw/top-modules/vec/vivado
 scripts/build_udmabuf.sh                         # na KV260, z sw/, raz na jądro
-scripts/install_overlay.sh posit32_vec           # na KV260, z sw/
+scripts/install_overlay.sh posit32_16_8_vec      # na KV260, z sw/
 sudo python3 -m pytest -v -s tests/test_board_vec.py
 ```
+Z Pythona (`pn.board`): `pn.board.apps()`, `pn.board.load("posit32_16_8_vec")` (każdy silnik staje się
+backendem swojego formatu), `pn.board.describe()`, `pn.board.unload()`; opis w `sw/README.md`.
 
 ## synteza OOC (etap 0)
 z `hw/top-modules/ooc/vivado`, opis opcji i metody: `hw/top-modules/ooc/README.md`
