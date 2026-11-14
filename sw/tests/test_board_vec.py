@@ -331,4 +331,5 @@ def test_master_double_buffer_gain(hw):
     for double, v, t in rows:
         print(f"{'double' if double else 'single':>7} buffer add: {v / 1e6:8.3f} M elem/s | total {t['total'] * 1e3:.1f} ms, "
               f"waiting for the engine {t['dma'] * 1e3:.1f} ms, copies {(t['pack'] + t['copy_out']) * 1e3:.1f} ms")
-    assert rows[1][1] > 0.9 * rows[0][1], "double buffering clearly slower than a single buffer"
+    if size >= 1 << 20:                                      # on the board (not the small fake run)
+        assert rows[1][1] > rows[0][1], "double buffering slower than a single buffer"
