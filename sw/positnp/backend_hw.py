@@ -386,11 +386,12 @@ class PositVecHw(PositAluHw):
 
     def engine_cfg(self) -> Optional[Dict[str, int]]:
         """Build parameters of the engine (version >= 4.1): k = divider / sqrt bits per cycle,
-        units = div / sqrt / FMA lanes (VecKv260 n:es:k:units). None for older bitstreams."""
+        units = div / sqrt / FMA lanes, lanes = elements per clock (VecKv260 n:es:k:units:lanes).
+        None for older bitstreams."""
         if self.version < 0x0401:
             return None
         v = self.read(regs.ENGINE_CFG)
-        return {"k": v & 0xFF, "units": v >> 8 & 0xFF}
+        return {"k": v & 0xFF, "units": v >> 8 & 0xFF, "lanes": (v >> 16 & 0xFF) or 1}
 
     def close(self) -> None:
         """Unmap the registers, the DMA and the buffer (before xmutil unloadapp). Idempotent."""

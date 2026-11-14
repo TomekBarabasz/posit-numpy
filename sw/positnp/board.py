@@ -234,7 +234,7 @@ class Board:
             ec = hw.engine_cfg() or {}
             rows.append({"n": n, "config": str(hw.config), "engine": getattr(hw.engine, "name", None),
                          "ops": list(hw.array_ops), "quire": hw.has_quire(),
-                         "k": ec.get("k"), "units": ec.get("units"),
+                         "k": ec.get("k"), "units": ec.get("units"), "lanes": ec.get("lanes", 1),
                          "buffer_mb": hw.buf.size >> 20, "version": f"{hw.version >> 8}.{hw.version & 0xFF}"})
         return rows
 
@@ -246,6 +246,8 @@ class Board:
         lines = [head]
         for r in rows:
             lanes = f", {r['units']} lane{'s' if r['units'] != 1 else ''} div/sqrt/fma, k={r['k']}" if r["units"] else ""
+            if r.get("lanes", 1) > 1:
+                lanes = f", {r['lanes']} elements/clock" + lanes
             lines.append(f"  {r['config']:<12} {r['engine']}: {', '.join(r['ops'])}"
                          f"{', quire' if r['quire'] else ''}{lanes}, buffer {r['buffer_mb']} MB, v{r['version']}")
         return "\n".join(lines)
