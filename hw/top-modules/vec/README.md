@@ -150,12 +150,25 @@ ok. 57% czasu; reszta to kopie do i z bufora po stronie procesora.
   albo ukryć, nakładając kopię kolejnej porcji na pracę silnika (podwójny bufor) — wtedy add zbliży się
   do granicy silnika, 100 M / s; NumPy float32 add: 250 M / s (było 10 ×, jest 4 × szybszy).
 
-**Podwójny bufor** (`PositVecHw.double_buffer = True`, domyślnie): bufor dzielony na dwie połowy, porcje po
-`MEM_CHUNK_BYTES` = 1 MB na tablicę. Kolejność: kopia porcji 0, start; potem dla każdej porcji j: kopia porcji
+**Podwójny bufor** (`PositVecHw.double_buffer = True`, domyślnie): bufor dzielony na dwie połowy, ok.
+`MEM_CHUNKS` = 6 porcji na wywołanie (co najmniej 256 KB na tablicę; `MEM_CHUNK_BYTES` ustala rozmiar ręcznie). Kolejność: kopia porcji 0, start; potem dla każdej porcji j: kopia porcji
 j + 1 do drugiej połowy (silnik liczy j), czekanie na j, start j + 1, odbiór wyniku j (silnik liczy j + 1).
 Silnik i procesor nigdy nie pracują na tej samej połowie: połowa jest nadpisywana dopiero po zakończeniu jej
 polecenia i odbiorze wyniku. Test na atrapie wykonującej polecenie dopiero przy czekaniu (najpóźniejszy
 możliwy odczyt danych) wykrywa każde naruszenie. `test_master_double_buffer_gain` mierzy zysk na płytce.
+
+Pomiar na płytce (add, 4 194 304 elementy, M el. / s; porcja = bajty na tablicę):
+
+| | pojedynczy | 256 KB | 1 MB | 4 MB | 8 MB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| posit32 | 53,7 | 25,9 | 58,2 | **77,4** | 69,4 |
+| posit16 | 67,7 | 51,2 | **89,2** | 80,0 | 68,9 |
+| posit8 | 77,3 | **91,2** | 88,5 | 80,4 | 79,0 |
+
+Koszt nie zależał od rozmiaru synchronizowanego zakresu, tylko od liczby wywołań: ok. 1 ms na
+`sync_for_device` / `sync_for_cpu` (4 × open / write / close na plikach sysfs u-dma-buf). Stąd: deskryptory sysfs
+otwierane raz i `pwrite`, bez ponownego zapisu niezmienionych atrybutów, oraz liczba porcji zamiast stałego
+rozmiaru (optimum: posit32 ok. 4 porcje, posit16 ok. 8, posit8 ok. 16 — tańsze kopie znoszą więcej porcji).
 
 Stara ścieżka (AXI4-Stream + AXI DMA) zostaje: `VecKv260 --dma ...` i `build.tcl -io dma` (aplikacje `*_vec`);
 `PositVecHw` rozpoznaje tryb po CONFIG.has_master, a `pn.board` obsługuje obie.

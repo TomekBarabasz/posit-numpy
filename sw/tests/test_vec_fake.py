@@ -247,10 +247,35 @@ def test_master_double_buffer(double, chunk):
         starts = {cmd[1][0] for cmd in vec.mem_log}       # SRC_A of every command: half 0 or half 1
         vec.mem_log.clear()
         return len(starts)
-    want = lambda arrays: 2 if double and hw._layout(arrays)[0] < a.size else 1   # noqa: E731
+    want = lambda arrays: 2 if double and hw._layout(arrays, a.size)[0] < a.size else 1   # noqa: E731
     for kw in (dict(b=b), dict(b=b, c=c)):
         name = "fma" if "c" in kw else "add"
         assert np.array_equal(hw.array_op(name, a, **kw), sw.array_op(name, a, **kw)), (name, double, chunk)
         assert halves_used() == want(len(kw) + 1), name
     assert hw.reduce("dot", a, b) == sw.reduce("dot", a, b)
     assert halves_used() == want(2)
+
+
+def test_udmabuf_sync_writes_only_changes(tmp_path):
+    """UDmaBuf._sync: persistent descriptors, unchanged attributes not rewritten, the trigger always."""
+    from positnp.udmabuf import UDmaBuf
+    for a in ("sync_offset", "sync_size", "sync_direction", "sync_for_device", "sync_for_cpu"):
+        (tmp_path / a).write_text("")
+    buf = UDmaBuf.__new__(UDmaBuf)
+    buf.sys, buf.size, buf._fds, buf._last = tmp_path, 1 << 20, {}, {}
+    writes = []
+    import positnp.udmabuf as ub
+    real = ub.os.pwrite
+    ub.os.pwrite = lambda fd, data, off: (writes.append(data), real(fd, data, off))[1]
+    try:
+        buf.sync_for_device(0, 4096, 1)
+        buf.sync_for_device(8192, 4096, 1)
+        buf.sync_for_cpu(8192, 4096, 2)
+    finally:
+        ub.os.pwrite = real
+        for fd in buf._fds.values():
+            ub.os.close(fd)
+    assert writes == [b"0", b"4096", b"1", b"1",     # first sync: everything
+                      b"8192", b"1",                  # same size and direction: offset + trigger
+                      b"2", b"1"]                     # same offset and size: direction + trigger
+    assert (tmp_path / "sync_offset").read_text() == "8192" and (tmp_path / "sync_direction").read_text() == "2"

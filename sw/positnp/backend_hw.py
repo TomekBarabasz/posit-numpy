@@ -546,18 +546,27 @@ class PositVecHw(PositAluHw):
 
     # ---- stage 6: commands with addresses (own AXI4 master) ------------------------------------------
 
-    # Podwojny bufor (stage 6): the buffer is split in two halves; while the engine works on one half
-    # the CPU copies the next chunk into the other and takes the previous result out. Chunks of
-    # MEM_CHUNK_BYTES per array keep many commands in flight even for medium arrays.
-    MEM_CHUNK_BYTES = 1 << 20
+    # Double buffer (stage 6): the buffer is split in two halves; while the engine works on one half
+    # the CPU copies the next chunk into the other and takes the previous result out.
+    # Chunk size: about MEM_CHUNKS chunks per call (the engine overlaps all but the first fill and the
+    # last drain; every chunk costs two cache syncs), at least MEM_CHUNK_MIN bytes per array, at most
+    # what a half holds. MEM_CHUNK_BYTES, when set, fixes the size instead (measurements).
+    # Board, add 4 M elements: posit32 best with ~4 chunks, posit16 ~8, posit8 ~16 (cheaper copies).
+    MEM_CHUNKS = 6
+    MEM_CHUNK_MIN = 256 << 10
+    MEM_CHUNK_BYTES: Optional[int] = None
     double_buffer = True
 
-    def _layout(self, arrays: int):
+    def _layout(self, arrays: int, size: int = 0):
         """(elements per chunk, [offsets of the `arrays` regions in half 0], offset of half 1)."""
         halves = 2 if self.double_buffer else 1
         per = (self.buf.size // halves // arrays) // self.ALIGN * self.ALIGN
         if self.double_buffer:
-            per = min(per, self.MEM_CHUNK_BYTES)
+            if self.MEM_CHUNK_BYTES:
+                want = self.MEM_CHUNK_BYTES
+            else:
+                want = max(self.MEM_CHUNK_MIN, -(-size * self.out_bytes // self.MEM_CHUNKS))
+            per = min(per, -(-want // self.ALIGN) * self.ALIGN)
         step = max(1, min(per // self.out_bytes, 0xFFFFFFFF))
         region = -(-step * self.out_bytes // self.ALIGN) * self.ALIGN
         return step, [r * region for r in range(arrays)], region * arrays
@@ -603,7 +612,7 @@ class PositVecHw(PositAluHw):
         command finished and its result was copied out. Returns the engine cycles of all commands.
         """
         size = ins[0].size
-        step, offs, half = self._layout(len(ins))
+        step, offs, half = self._layout(len(ins), size)
         chunks = [(i, min(step, size - i)) for i in range(0, size, step)]
         base = lambda j: [o + (j % 2) * half if self.double_buffer else o for o in offs]   # noqa: E731
         nbytes = lambda k: k * self.out_bytes                                               # noqa: E731

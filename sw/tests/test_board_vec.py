@@ -324,10 +324,11 @@ def test_master_double_buffer_gain(hw):
     rows = []
     chunk0 = hw.MEM_CHUNK_BYTES
     try:
-        for double, chunk in ((False, None), (True, 256 << 10), (True, 1 << 20), (True, 4 << 20), (True, 8 << 20)):
+        if hasattr(hw.buf, "time_sync"):
+            print(f"\none sync_for_device + sync_for_cpu: {hw.buf.time_sync() * 1e6:.0f} us")
+        for double, chunk in ((False, None), (True, None), (True, 256 << 10), (True, 1 << 20), (True, 4 << 20)):
             hw.double_buffer = double
-            if chunk:
-                hw.MEM_CHUNK_BYTES = chunk
+            hw.MEM_CHUNK_BYTES = chunk                          # None: about MEM_CHUNKS chunks (default)
             hw.time_array("add", size)                          # warm-up: touch every page of this layout
             rows.append((double, chunk, hw.time_array("add", size), dict(hw.last_timing)))
     finally:
@@ -335,7 +336,7 @@ def test_master_double_buffer_gain(hw):
         hw.MEM_CHUNK_BYTES = chunk0
     print("")
     for double, chunk, v, t in rows:
-        label = f"double {chunk >> 10:5d} KB" if double else "single        "
+        label = (f"double {chunk >> 10:5d} KB" if chunk else "double  auto  ") if double else "single        "
         print(f"{label}: {v / 1e6:7.2f} M elem/s | total {t['total'] * 1e3:6.1f} ms: copy in {t['pack'] * 1e3:5.1f}, "
               f"sync dev {t['sync_device'] * 1e3:5.1f}, engine wait {t['dma'] * 1e3:5.1f}, "
               f"sync cpu {t['sync_cpu'] * 1e3:5.1f}, copy out {t['copy_out'] * 1e3:5.1f} ms")
