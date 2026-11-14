@@ -67,10 +67,37 @@ OP_P2F = 11           # posit32 -> float32 bits
 # ---- 4.1: engine parameters (build options, VecKv260 n:es:k:u) ---------------------------------
 ENGINE_CFG = 0x5C     # RO  [7:0] k: divider / sqrt bits per cycle, [15:8] div / sqrt / FMA lanes (slowUnits)
 
-VERSION_VEC = 0x0401
+# ---- stage 6: own AXI4 master (PositVecAxi 5.0): arrays read and written by the engine ---------
+MEM_LEN = 0x60        # RW  elements of the command
+MEM_SRC_A = 0x64      # RW  physical address of a (aligned to the 16-byte data word)
+MEM_SRC_B = 0x68      # RW  address of b
+MEM_SRC_C = 0x6C      # RW  address of c (FMA3)
+MEM_DST = 0x70        # RW  address of the result (may equal MEM_SRC_A: in place)
+MEM_LO = 0x74         # RW  allowed addresses [MEM_LO, MEM_HI); empty after reset
+MEM_HI = 0x78         # RW
+MEM_CFG = 0x7C        # RW  bit 0 read_b, 1 read_c, 2 write, 3 irq_en
+MEM_STATUS = 0xC0     # RO  bit 0 busy, 1 done, 2 err_range, 3 err_align, 4 err_resp
+MEM_CYCLES = 0xC4     # RO  clock cycles of the last command
+MEM_CFG_READ_B = 0
+MEM_CFG_READ_C = 1
+MEM_CFG_WRITE = 2
+MEM_CFG_IRQ_EN = 3
+MEM_ST_BUSY = 0
+MEM_ST_DONE = 1
+MEM_ST_ERR_RANGE = 2
+MEM_ST_ERR_ALIGN = 3
+MEM_ST_ERR_RESP = 4
+CTRL_MEM_START = 5
+CTRL_MEM_ACK = 6
+CONFIG_HAS_MASTER = 14
+OP_FMA3 = 12          # a * b + c, all three arrays from memory
+MEM_BEAT_BYTES = 16
+
+VERSION_VEC = 0x0500
 VERSION_STREAM_MIN = 0x0200   # oldest PositVecAxi with the stream path that PositVecHw drives
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
 STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}
+STAGE6 = {"fma3": OP_FMA3}
 
 # Flag bits as in STATUS[10:8] >> STATUS_FLAGS_SHIFT and in ref.Flags.bits.
 FLAG_NAR = 1

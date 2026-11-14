@@ -80,6 +80,58 @@ z ok. 100 ms zabiera pakowanie `{b, a}` po stronie procesora.
 **Bitstream z etapu 2 nie ma quire** — trzeba go zbudować od nowa (te same kroki niżej); `PositVecHw.reduce`
 sprawdza `CONFIG.has_quire` i bez niego zgłasza błąd.
 
+## Etap 6: własny master AXI4 (wersja 5.0, domyślnie)
+
+Silnik sam czyta argumenty z DDR i zapisuje wynik — bez AXI DMA i bez pakowania `{b, a}` po stronie
+procesora. Python podaje adresy fizyczne (w buforze u-dma-buf) i długość, startuje polecenie i czeka na
+MEM_STATUS.done (albo przerwanie).
+
+```
+PS --HPM0--> smartconnect_ctl --> posit_vec_p<n>/s_axi      (rejestry, polecenia MEM_*)
+DDR <--HP0-- smartconnect_data <-- posit_vec_p<n>/m_axi     (AXI4 128 b: odczyt a, b, c i zapis wyniku)
+             pl_ps_irq0[k]     <-- posit_vec_p<n>/irq        (GIC SPI 89 + k)
+```
+
+`PositMemMover` (posit-kv260):
+- do 3 strumieni odczytu (a, b, c — każdy z własnym ID AXI) i jeden zapisu; serie INCR do 16 słów
+  po 16 B, nigdy przez granicę 4 KB; ostatnie słowo zapisu z WSTRB (bajty za tablicą nietknięte);
+- **kredyty**: seria idzie na AR tylko, gdy FIFO strumienia (64 słowa) ma miejsce na wszystkie zamówione
+  słowa, więc kanał R nigdy nie czeka na silnik — dane a, b, c mogą przychodzić w dowolnym przeplocie
+  bez zakleszczenia;
+- **działanie w miejscu**: MEM_DST = MEM_SRC_A działa (zapis zawsze za odczytem); `PositVecHw` tak robi;
+- **bezpieczeństwo**: polecenie z adresem spoza [MEM_LO, MEM_HI) albo niewyrównanym do 16 B kończy się
+  błędem w MEM_STATUS bez żadnej transakcji; po resecie zakres jest pusty, `PositVecHw` wpisuje w niego
+  swój bufor; odpowiedź SLVERR / DECERR → `err_resp`;
+- FMA3 (OP 12): a · b + c na trzech tablicach w jednym przebiegu (wcześniej w `PositSw`).
+
+| offset | rejestr | |
+| --- | --- | --- |
+| 0x60 | MEM_LEN | elementy polecenia |
+| 0x64 / 0x68 / 0x6C | MEM_SRC_A / B / C | adresy fizyczne (32 b, wyrównane do 16 B) |
+| 0x70 | MEM_DST | adres wyniku |
+| 0x74 / 0x78 | MEM_LO / MEM_HI | dozwolony zakres [LO, HI) |
+| 0x7C | MEM_CFG | bit 0 read_b, 1 read_c, 2 write, 3 irq_en |
+| 0xC0 | MEM_STATUS | bit 0 busy, 1 done, 2 err_range, 3 err_align, 4 err_resp |
+| 0xC4 | MEM_CYCLES | takty ostatniego polecenia |
+| 0x08 | CTRL | bit 5 mem_start, bit 6 mem_ack (kasuje done i przerwanie) |
+| 0x04 | CONFIG | bit 14 has_master; maska z FMA3 (bit 12) |
+
+ID_VERSION = `0x5053_0500`. Sekwencja w `PositVecHw._mem`: kopie a, b, c do osobnych regionów bufora
+(ciągłe, bez przeplotu), `sync_for_device`, MEM_*, `CTRL.mem_start`, MEM_STATUS.done, `sync_for_cpu`, kopia
+wyniku (z regionu a). Redukcje: to samo bez zapisu, potem `quire_round` jak w etapie 4.
+
+Symulacja (`PositVecMemTestplan`, model pamięci `AxiMemModel`: losowe ready / przerwy na każdym kanale,
+przeplot ID, sprawdzanie protokołu): wszystkie operacje bit w bit dla posit32 / 16 / 8, długości 1 … 3000,
+bufory przecinające 4 KB, w miejscu, skalar, redukcje, odrzucanie, SLVERR, przerwanie;
+**add posit32: 4096 elementów w 4142 taktach (0,99 / takt)** — dwa strumienie odczytu i zapis równolegle.
+
+Stara ścieżka (AXI4-Stream + AXI DMA) zostaje: `VecKv260 --dma ...` i `build.tcl -io dma` (aplikacje `*_vec`);
+`PositVecHw` rozpoznaje tryb po CONFIG.has_master, a `pn.board` obsługuje obie.
+
+Po drodze naprawione: rejestry sterujące są teraz zerowane resetem (`readAndWrite` zamiast `driveAndRead`,
+które w SpinalHDL dokłada niezerowany rejestr pośredni — po resecie OPERAND_B, STREAM_CFG itd. były
+przypadkowe, co na FPGA maskowało zerowanie przy konfiguracji).
+
 ## Kilka silników w jednym bitstreamie
 
 Przy budowie wybierasz, które formaty mają być w PL — od jednego do trzech (posit8, posit16, posit32).
@@ -161,14 +213,16 @@ dekoder -> prepare -+                                                           
 
 1. RTL (z `hw/`) — jeden plik na silnik, `hw/gen/p<n>/PositVecAxi_p<n>.v`:
    ```
-   sbt "top-vec/runMain posit.top.vec.VecKv260"            # posit<32,2>
+   sbt "top-vec/runMain posit.top.vec.VecKv260"            # posit<32,2>, master AXI4 (etap 6)
    sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"    # trzy silniki; silnik = n[:es[:k[:u]]], np. 16:2:1
+   sbt "top-vec/runMain posit.top.vec.VecKv260 --dma 32"   # stara ścieżka AXI4-Stream + AXI DMA
    sbt "top-vec/runMain posit.top.vec.VecKv260 32:2:4:4"   # posit32 z 4 torami div / sqrt / FMA
    ```
 2. Bitstream i aplikacja (z `hw/top-modules/vec/vivado`):
    ```
-   vivado -mode batch -nojournal -log build.log -source build.tcl                               # posit32_vec
-   vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"   # posit32_16_8_vec
+   vivado -mode batch -nojournal -log build.log -source build.tcl                               # posit32_mem
+   vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"   # posit32_16_8_mem
+   vivado ... -tclargs -io dma -engines "32 16 8"                                              # posit32_16_8_vec
    ```
    Wynik: `sw/positnp/overlays/<nazwa>/` (`.bit.bin`, `.dtsi`, `shell.json`, `.json`).
    `tclsh overlay_files_test.tcl` sprawdza generowanie `.dtsi` / `.json` bez Vivado (z `dtc`).
@@ -195,8 +249,9 @@ dekoder -> prepare -+                                                           
 
 | opcja `-tclargs` | domyślnie | |
 | --- | --- | --- |
+| `-io master\|dma` | `master` | etap 6: master AXI4 silnika (bez AXI DMA, przerwanie) albo stara ścieżka z AXI DMA |
 | `-engines "<n> ..."` | `32` | silniki: 8, 16, 32, każdy co najwyżej raz (`tdata` AXI DMA w pełnych bajtach); `-n <n>` = jeden |
-| `-name <nazwa>` | `posit<n>[_<n>…]_vec` | nazwa aplikacji dla xmutil |
+| `-name <nazwa>` | `posit<n>[_<n>…]_mem` (`_vec` z `-io dma`) | nazwa aplikacji dla xmutil |
 | `-buf_mb <MB>` | `64` | bufor u-dma-buf na silnik; połowę z grubsza zajmuje wejście, resztę wynik |
 | `-out`, `-deploy`, `-part`, `-jobs`, `-threads`, `-stop ip\|bd` | | jak w `alu` |
 

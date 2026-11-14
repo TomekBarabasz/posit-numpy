@@ -8,6 +8,7 @@
 #  *_port_names w testplanach posit-kv260 pilnuja tych nazw):
 #    s_axi_*   -> s_axi    (AXI4-Lite slave, mapa pamieci 4 KB)
 #    s_axis_*  -> s_axis   (AXI4-Stream slave),  m_axis_* -> m_axis (master)
+#    m_axi_*   -> m_axi    (AXI4 master, etap 6; przestrzen adresowa 4 GB), irq -> przerwanie
 #    aclk      -> zegar,   ASSOCIATED_BUSIF <wszystkie busif>, ASSOCIATED_RESET aresetn
 #    aresetn   -> reset,   POLARITY ACTIVE_LOW
 #  Skrypt ustawia te parametry jawnie i sprawdza, ze interfejsy sa.
@@ -68,6 +69,18 @@ proc posit_ip::package {rtl ip_dir part {top PositAluAxiLite} {busifs {s_axi}}} 
 
     if {[ipx::get_memory_maps -of_objects $core] eq ""} {
         error "IP bez mapy pamieci s_axi - block design nie przydzieli adresu"
+    }
+    # master AXI4 (etap 6, m_axi): przestrzen adresowa 4 GB, inaczej assign_bd_address nie zmapuje DDR
+    set mif [ipx::get_bus_interfaces m_axi -of_objects $core]
+    if {$mif ne ""} {
+        if {[get_property MASTER_ADDRESS_SPACE_REF $mif] eq ""} {
+            set space [ipx::get_address_spaces m_axi -of_objects $core]
+            if {$space eq ""} { set space [ipx::add_address_space m_axi $core] }
+            set_property range 4G  $space
+            set_property width 32  $space
+            set_property MASTER_ADDRESS_SPACE_REF m_axi $mif
+        }
+        puts "posit_ip: m_axi -> przestrzen adresowa [get_property MASTER_ADDRESS_SPACE_REF $mif]"
     }
 
     set_property core_revision [scan [clock format [clock seconds] -format %y%m%d%H] %d] $core

@@ -26,9 +26,15 @@ class FakeVecMmio(FakeAluMmio):
     """PositVecAxi registers: stage 1 map plus STREAM_CFG, CNT_ELEMENTS, version 2.0."""
 
     def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1,
-                 stage5: bool = True, k: int = 4, units: int = 1):
+                 stage5: bool = True, k: int = 4, units: int = 1, mem: Optional[FakeUDmaBuf] = None):
         super().__init__(config, ops, busy_reads)
         self.engine_cfg = units << 8 | k
+        # stage 6: with `mem` the engine has its own AXI4 master and works on that buffer (MEM_* registers)
+        self.mem = mem
+        for r in (regs.MEM_LEN, regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C, regs.MEM_DST,
+                  regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG, regs.MEM_STATUS):
+            self.regs[r] = 0
+        self.mem_log = []
         self.stage5 = ("sqrt", "fma", "axpy") + (("f2p", "p2f") if config.n == 32 else ()) if stage5 else ()
         self.regs[regs.STREAM_CFG] = 0
         self.regs[regs.OPERAND_C] = 0
@@ -44,12 +50,21 @@ class FakeVecMmio(FakeAluMmio):
             self.log.append(("r", offset))
             reduce_mask = sum(1 << v for v in regs.REDUCE.values())
             s5 = sum(1 << regs.STAGE5[n] for n in self.stage5)
-            return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | (reduce_mask | s5) << 16
+            if self.mem is not None and "fma" in self.stage5:
+                s5 |= 1 << regs.OP_FMA3
+            master = (1 << regs.CONFIG_HAS_MASTER) if self.mem is not None else 0
+            return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | master | \
+                (reduce_mask | s5) << 16
         if offset == regs.CNT_ELEMENTS:
             self.log.append(("r", offset))
             return self.counters["elements"]
         if offset == regs.ENGINE_CFG:
             return self.engine_cfg
+        if offset in (regs.MEM_LEN, regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C, regs.MEM_DST,
+                      regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG, regs.MEM_STATUS):
+            return self.regs[offset]
+        if offset == regs.MEM_CYCLES:
+            return self.regs.get(regs.MEM_CYCLES, 0)
         if offset == regs.QUIRE_CFG:
             return self.config.quire_frac << 16 | self.config.quire_width()
         if regs.QUIRE <= offset < regs.QUIRE + self.config.quire_width() // 8:
@@ -66,6 +81,13 @@ class FakeVecMmio(FakeAluMmio):
         if offset == regs.OPERAND_C:
             self.log.append(("w", offset, value))
             self.regs[offset] = value & self.config.mask
+            return
+        if offset in (regs.MEM_LEN, regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C, regs.MEM_DST,
+                      regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG):
+            self.regs[offset] = value & 0xFFFFFFFF
+            return
+        if offset == regs.CTRL and value >> regs.CTRL_MEM_START & 1 and self.mem is not None:
+            self.process_mem()
             return
         if offset == regs.CTRL and value >> regs.CTRL_CLEAR_COUNTERS & 1:
             self.counters["elements"] = 0
@@ -85,6 +107,49 @@ class FakeVecMmio(FakeAluMmio):
             self.regs[offset] = value & 0xF
             return
         super().write(offset, value)
+
+    def process_mem(self) -> None:
+        """MEM command as PositVecAxi 5.0: range / alignment checks, then the op on the buffer."""
+        r = self.regs
+        n, by = self.config.n, self.config.n // 8
+        length, cfg = r[regs.MEM_LEN], r[regs.MEM_CFG]
+        use = [True, bool(cfg >> regs.MEM_CFG_READ_B & 1), bool(cfg >> regs.MEM_CFG_READ_C & 1)]
+        write = bool(cfg >> regs.MEM_CFG_WRITE & 1)
+        srcs = [r[regs.MEM_SRC_A], r[regs.MEM_SRC_B], r[regs.MEM_SRC_C]]
+        nbytes = -(-length * by // 16) * 16
+        addrs = [a for a, u in zip(srcs, use) if u] + ([r[regs.MEM_DST]] if write else [])
+        bad_range = any(a < r[regs.MEM_LO] or a + nbytes > r[regs.MEM_HI] for a in addrs)
+        bad_align = any(a % 16 for a in addrs)
+        self.mem_log.append((length, srcs, r[regs.MEM_DST], cfg))
+        st = 1 << regs.MEM_ST_DONE | bad_range << regs.MEM_ST_ERR_RANGE | bad_align << regs.MEM_ST_ERR_ALIGN
+        if bad_range or bad_align or length == 0:
+            r[regs.MEM_STATUS] = st
+            return
+        dt = {8: np.uint8, 16: np.uint16, 32: np.uint32}[n]
+        view = lambda a: np.frombuffer(self.mem.memory, dt, length, a - self.mem.phys_addr)   # noqa: E731
+        a = view(srcs[0]).astype(np.uint64)
+        b = view(srcs[1]).astype(np.uint64) if use[1] else np.zeros(length, np.uint64)
+        if self.is_reduce():
+            words = a | (b << np.uint64(n))
+            if self.regs[regs.OP] == regs.OP_SUMSQ:
+                words = a | (a << np.uint64(n))
+            self.process_quire(words)
+        elif self.regs[regs.OP] == regs.OP_FMA3:
+            c = view(srcs[2]).tolist()
+            res = []
+            for x, y, z in zip(a.tolist(), b.tolist(), c):
+                v, f = ref.fma(self.config, x, y, z)
+                res.append(v)
+                for kk in ("nar", "sat", "inexact"):
+                    self.counters[kk] += getattr(f, kk)
+            self.counters["elements"] += length
+            view(r[regs.MEM_DST])[:] = np.array(res, dtype=np.uint64).astype(dt)
+        else:
+            res = self.process_stream(a | (b << np.uint64(n)))
+            if write:
+                view(r[regs.MEM_DST])[:] = res.astype(dt)
+        r[regs.MEM_STATUS] = st
+        r[regs.MEM_CYCLES] = length + 20
 
     def is_reduce(self) -> bool:
         return self.regs[regs.OP] in regs.REDUCE.values()

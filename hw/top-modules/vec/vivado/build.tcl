@@ -17,13 +17,16 @@
 #  Silniki sa niezalezne (wlasne DMA i bufory): Python moze uzywac kilku naraz.
 #
 #  Uruchomienie z tego katalogu, po:  sbt "top-vec/runMain posit.top.vec.VecKv260 <n> [<n> ...]"
-#    vivado -mode batch -nojournal -log build.log -source build.tcl                       posit32_vec
+#    vivado -mode batch -nojournal -log build.log -source build.tcl                       posit32_mem
 #    vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"
-#                                                                                         posit32_16_8_vec
+#                                                                                         posit32_16_8_mem
+#    ... -tclargs -io dma -engines "32 16 8"  (RTL z VecKv260 --dma)                       posit32_16_8_vec
 #  Opcje (-tclargs):
 #    -engines "<n> ..."  silniki: 8, 16, 32, kazdy co najwyzej raz (rtl z ../hw/gen/p<n>/)   ("32")
+#    -io master|dma      etap 6: wlasny master AXI4 silnika (m_axi -> HP0, przerwanie -> pl_ps_irq0)
+#                        albo AXI4-Stream + AXI DMA (etapy 2-5; RTL z VecKv260 --dma)       (master)
 #    -n <bity>           to samo co -engines <bity> (jeden silnik)
-#    -name <nazwa>       nazwa aplikacji                                (posit<n>[_<n>...]_vec)
+#    -name <nazwa>       nazwa aplikacji                  (posit<n>[_<n>...]_mem, z -io dma: _vec)
 #    -part <part>                                                       (xck26-sfvc784-2LV-c)
 #    -out <dir>          katalog roboczy                                (./out)
 #    -deploy <dir>       gdzie zapisac katalog aplikacji                (../../../../sw/positnp/overlays)
@@ -43,6 +46,7 @@ source [file join $script_dir overlay_files.tcl]
 
 array set opt [list \
     engines 32 \
+    io      master \
     name    "" \
     part    xck26-sfvc784-2LV-c \
     out     [file join $script_dir out] \
@@ -60,7 +64,7 @@ proc usage {} {
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
-        -n - -engines - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
+        -n - -engines - -io - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([expr {$a eq "-n" ? "engines" : [string range $a 1 end]}]) [lindex $argv $i]
@@ -76,6 +80,9 @@ foreach n $ns {
     if {$n ni {8 16 32}} { error "-engines: 8|16|32 (tdata AXI DMA w pelnych bajtach), nie $n" }
 }
 if {[llength [lsort -unique $ns]] != [llength $ns]} { error "-engines $ns: kazdy format co najwyzej raz" }
+if {$opt(io) ni {master dma}} { error "-io master|dma, nie $opt(io)" }
+set master [expr {$opt(io) eq "master"}]
+if {$master && [llength $ns] > 8} { error "-io master: najwyzej 8 silnikow (pl_ps_irq0 ma 8 linii)" }
 
 # Watki Vivado na jeden proces; przy odmowie (limit wersji) 8.
 proc set_threads {n} {
@@ -87,7 +94,7 @@ proc set_threads {n} {
 }
 set opt(threads) [set_threads $opt(threads)]
 
-set name     [expr {$opt(name) ne "" ? $opt(name) : [posit_overlay::app_name $ns]}]
+set name     [expr {$opt(name) ne "" ? $opt(name) : [posit_overlay::app_name $ns $opt(io)]}]
 set bd_name  posit_vec_bd
 set out      [file normalize $opt(out)]
 set proj_dir [file join $out proj_$name]
@@ -101,7 +108,8 @@ set ip_dirs {}
 foreach n $ns {
     set rtl    [file normalize [file join $script_dir .. hw gen p$n PositVecAxi_p$n.v]]
     set ip_dir [file join $out ip_p$n]
-    dict set vlnv $n [posit_ip::package $rtl $ip_dir $opt(part) PositVecAxi_p$n {s_axi s_axis m_axis}]
+    set busifs [expr {$master ? {s_axi m_axi} : {s_axi s_axis m_axis}}]
+    dict set vlnv $n [posit_ip::package $rtl $ip_dir $opt(part) PositVecAxi_p$n $busifs]
     lappend ip_dirs $ip_dir
 }
 if {$opt(stop) eq "ip"} { puts "build: zatrzymane po IP ($ip_dirs)"; return }
@@ -130,15 +138,17 @@ set_property -dict [list \
     CONFIG.PSU__USE__S_AXI_GP2                 1 \
     CONFIG.PSU__SAXIGP2__DATA_WIDTH            128 \
     CONFIG.PSU__FPGA_PL0_ENABLE                1 \
+    CONFIG.PSU__USE__IRQ0                      $master \
     CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ 100 \
 ] $ps
 
 set k    [llength $ns]
 set rst  [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:proc_sys_reset] rst_pl0]
 set ctl  [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:smartconnect] smartconnect_ctl]
-set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI [expr {2 * $k}]] $ctl
+set per  [expr {$master ? 1 : 2}]                 ;# porty smartconnectow na silnik
+set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI [expr {$per * $k}]] $ctl
 set data [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:smartconnect] smartconnect_data]
-set_property -dict [list CONFIG.NUM_SI [expr {2 * $k}] CONFIG.NUM_MI 1] $data
+set_property -dict [list CONFIG.NUM_SI [expr {$per * $k}] CONFIG.NUM_MI 1] $data
 
 connect_bd_net [get_bd_pins $ps/pl_clk0] \
     [get_bd_pins $ps/maxihpm0_fpd_aclk] [get_bd_pins $ps/saxihp0_fpd_aclk] \
@@ -149,38 +159,59 @@ connect_bd_intf_net [get_bd_intf_pins $ps/M_AXI_HPM0_FPD]  [get_bd_intf_pins $ct
 connect_bd_intf_net [get_bd_intf_pins $data/M00_AXI]       [get_bd_intf_pins $ps/S_AXI_HP0_FPD]
 
 set engines {}
+set irqs {}
 set port 0
 foreach n $ns {
     set e   [posit_overlay::engine $n]
     set vec [create_bd_cell -type ip -vlnv [dict get $vlnv $n] [dict get $e vec]]
-    set dma [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:axi_dma] [dict get $e dma]]
-    set_property -dict [list \
-        CONFIG.c_include_sg              0 \
-        CONFIG.c_sg_length_width         26 \
-        CONFIG.c_addr_width              32 \
-        CONFIG.c_m_axi_mm2s_data_width   64 \
-        CONFIG.c_m_axis_mm2s_tdata_width [expr {2 * $n}] \
-        CONFIG.c_m_axi_s2mm_data_width   64 \
-        CONFIG.c_s_axis_s2mm_tdata_width $n \
-        CONFIG.c_mm2s_burst_size         16 \
-        CONFIG.c_s2mm_burst_size         16 \
-    ] $dma
-    connect_bd_net [get_bd_pins $ps/pl_clk0] [get_bd_pins $vec/aclk] \
-        [get_bd_pins $dma/s_axi_lite_aclk] [get_bd_pins $dma/m_axi_mm2s_aclk] [get_bd_pins $dma/m_axi_s2mm_aclk]
-    connect_bd_net [get_bd_pins $rst/peripheral_aresetn] [get_bd_pins $vec/aresetn] [get_bd_pins $dma/axi_resetn]
-
-    set m0 [format M%02d_AXI [expr {2 * $port}]]
-    set m1 [format M%02d_AXI [expr {2 * $port + 1}]]
-    set s0 [format S%02d_AXI [expr {2 * $port}]]
-    set s1 [format S%02d_AXI [expr {2 * $port + 1}]]
-    connect_bd_intf_net [get_bd_intf_pins $ctl/$m0]          [get_bd_intf_pins $vec/s_axi]
-    connect_bd_intf_net [get_bd_intf_pins $ctl/$m1]          [get_bd_intf_pins $dma/S_AXI_LITE]
-    connect_bd_intf_net [get_bd_intf_pins $dma/M_AXIS_MM2S]  [get_bd_intf_pins $vec/s_axis]
-    connect_bd_intf_net [get_bd_intf_pins $vec/m_axis]       [get_bd_intf_pins $dma/S_AXIS_S2MM]
-    connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_MM2S]   [get_bd_intf_pins $data/$s0]
-    connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_S2MM]   [get_bd_intf_pins $data/$s1]
+    connect_bd_net [get_bd_pins $ps/pl_clk0] [get_bd_pins $vec/aclk]
+    connect_bd_net [get_bd_pins $rst/peripheral_aresetn] [get_bd_pins $vec/aresetn]
+    if {$master} {
+        # etap 6: silnik sam czyta i zapisuje DDR przez HP0; przerwanie do PS
+        dict unset e dma
+        dict set e irq [expr {89 + $port}]          ;# pl_ps_irq0[port] = GIC SPI 89 + port
+        connect_bd_intf_net [get_bd_intf_pins $ctl/[format M%02d_AXI $port]]  [get_bd_intf_pins $vec/s_axi]
+        connect_bd_intf_net [get_bd_intf_pins $vec/m_axi] [get_bd_intf_pins $data/[format S%02d_AXI $port]]
+        lappend irqs [get_bd_pins $vec/irq]
+    } else {
+        set dma [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:axi_dma] [dict get $e dma]]
+        set_property -dict [list \
+            CONFIG.c_include_sg              0 \
+            CONFIG.c_sg_length_width         26 \
+            CONFIG.c_addr_width              32 \
+            CONFIG.c_m_axi_mm2s_data_width   64 \
+            CONFIG.c_m_axis_mm2s_tdata_width [expr {2 * $n}] \
+            CONFIG.c_m_axi_s2mm_data_width   64 \
+            CONFIG.c_s_axis_s2mm_tdata_width $n \
+            CONFIG.c_mm2s_burst_size         16 \
+            CONFIG.c_s2mm_burst_size         16 \
+        ] $dma
+        connect_bd_net [get_bd_pins $ps/pl_clk0] \
+            [get_bd_pins $dma/s_axi_lite_aclk] [get_bd_pins $dma/m_axi_mm2s_aclk] [get_bd_pins $dma/m_axi_s2mm_aclk]
+        connect_bd_net [get_bd_pins $rst/peripheral_aresetn] [get_bd_pins $dma/axi_resetn]
+        set m0 [format M%02d_AXI [expr {2 * $port}]]
+        set m1 [format M%02d_AXI [expr {2 * $port + 1}]]
+        set s0 [format S%02d_AXI [expr {2 * $port}]]
+        set s1 [format S%02d_AXI [expr {2 * $port + 1}]]
+        connect_bd_intf_net [get_bd_intf_pins $ctl/$m0]          [get_bd_intf_pins $vec/s_axi]
+        connect_bd_intf_net [get_bd_intf_pins $ctl/$m1]          [get_bd_intf_pins $dma/S_AXI_LITE]
+        connect_bd_intf_net [get_bd_intf_pins $dma/M_AXIS_MM2S]  [get_bd_intf_pins $vec/s_axis]
+        connect_bd_intf_net [get_bd_intf_pins $vec/m_axis]       [get_bd_intf_pins $dma/S_AXIS_S2MM]
+        connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_MM2S]   [get_bd_intf_pins $data/$s0]
+        connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_S2MM]   [get_bd_intf_pins $data/$s1]
+    }
     lappend engines $e
     incr port
+}
+if {$master} {
+    if {[llength $irqs] == 1} {
+        connect_bd_net [lindex $irqs 0] [get_bd_pins $ps/pl_ps_irq0]
+    } else {
+        set cat [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:xlconcat] irq_concat]
+        set_property CONFIG.NUM_PORTS [llength $irqs] $cat
+        for {set i 0} {$i < [llength $irqs]} {incr i} { connect_bd_net [lindex $irqs $i] [get_bd_pins $cat/In$i] }
+        connect_bd_net [get_bd_pins $cat/dout] [get_bd_pins $ps/pl_ps_irq0]
+    }
 }
 
 assign_bd_address
@@ -203,12 +234,18 @@ catch { set pl0_hz [expr {round([get_property CONFIG.PSU__CRL_APB__PL0_REF_CTRL_
 set placed {}
 foreach e $engines {
     lassign [reg_window $ps [dict get $e vec]] vec_base vec_size
-    lassign [reg_window $ps [dict get $e dma]] dma_base dma_size
     dict set e vec_base $vec_base; dict set e vec_size $vec_size
-    dict set e dma_base $dma_base; dict set e dma_size $dma_size
+    set what "[dict get $e vec] @ [format 0x%llx $vec_base] ($vec_size B)"
+    if {[dict exists $e dma]} {
+        lassign [reg_window $ps [dict get $e dma]] dma_base dma_size
+        dict set e dma_base $dma_base; dict set e dma_size $dma_size
+        append what ", [dict get $e dma] @ [format 0x%llx $dma_base] ($dma_size B)"
+    } else {
+        append what ", master AXI4, przerwanie SPI [dict get $e irq]"
+    }
     dict set e buf_size $buf_size
     lappend placed $e
-    puts "build: [dict get $e vec] @ [format 0x%llx $vec_base] ($vec_size B), [dict get $e dma] @ [format 0x%llx $dma_base] ($dma_size B)"
+    puts "build: $what"
 }
 set engines $placed
 puts "build: pl_clk0 $pl0_hz Hz"

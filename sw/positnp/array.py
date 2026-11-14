@@ -127,7 +127,8 @@ def fma(a, b, c) -> "PositArray":
     """a * b + c with one rounding, broadcast like NumPy.
 
     On the KV260: c a scalar -> OP_FMA (c in OPERAND_C); b a scalar and c an array -> OP_AXPY;
-    three arrays -> PositSw (needs a third stream, stage 6; counted in stats()["fallback"])."""
+    three arrays -> OP_FMA3 on stage 6 engines (own AXI4 master, a third read stream), on older
+    engines PositSw (counted in stats()["fallback"])."""
     first = next((x for x in (a, b, c) if isinstance(x, PositArray)), None)
     cfg = first.config if first is not None else P32
     A, B, C = (x if isinstance(x, PositArray) else array(x, cfg) for x in (a, b, c))

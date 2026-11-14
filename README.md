@@ -21,7 +21,9 @@ Stan:
 - etap 4 (quire: dokładne `sum`, `dot`, `mean`, `norm`): sprawdzony na płytce — `hw/top-modules/vec/README.md`;
 - etap 5 (sqrt, FMA / AXPY, konwersje float32 w PL; `np.sqrt`, `pn.fma`, `pn.axpy`): sprawdzony na płytce — `hw/top-modules/vec/README.md`;
 - kilka silników w jednym bitstreamie (posit8/16/32), tory div / sqrt / FMA, `pn.board`: sprawdzone na płytce
-  (`posit32_16_8_vec`) — `hw/top-modules/vec/README.md`, `sw/README.md`.
+  (`posit32_16_8_vec`) — `hw/top-modules/vec/README.md`, `sw/README.md`;
+- etap 6 (własny master AXI4 zamiast AXI DMA, FMA3 na trzech tablicach, przerwanie): w symulacji z modelem
+  pamięci AXI4 i na atrapach — `hw/top-modules/vec/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)
@@ -98,10 +100,10 @@ Jeden albo kilka formatów w jednym bitstreamie (`-engines`, szczegóły w `hw/t
 sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"                                  # z hw/
 vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"   # z hw/top-modules/vec/vivado
 scripts/build_udmabuf.sh                         # na KV260, z sw/, raz na jądro
-scripts/install_overlay.sh posit32_16_8_vec      # na KV260, z sw/
+scripts/install_overlay.sh posit32_16_8_mem      # na KV260, z sw/ (etap 6; z -io dma: posit32_16_8_vec)
 sudo python3 -m pytest -v -s tests/test_board_vec.py
 ```
-Z Pythona (`pn.board`): `pn.board.apps()`, `pn.board.load("posit32_16_8_vec")` (każdy silnik staje się
+Z Pythona (`pn.board`): `pn.board.apps()`, `pn.board.load("posit32_16_8_mem")` (każdy silnik staje się
 backendem swojego formatu), `pn.board.describe()`, `pn.board.unload()`; opis w `sw/README.md`.
 
 ## synteza OOC (etap 0)

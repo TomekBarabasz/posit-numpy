@@ -28,7 +28,7 @@ object AluSimKit {
       if (!built) PositRef.round(c, None)
       else cmd.op match {
         case PositAluOp.SQRT                    => PositRef.sqrt(c, cmd.a)
-        case PositAluOp.FMA | PositAluOp.AXPY   => PositRef.fma(c, cmd.a, cmd.b, cmd.addend)
+        case PositAluOp.FMA | PositAluOp.AXPY | PositAluOp.FMA3 => PositRef.fma(c, cmd.a, cmd.b, cmd.addend)
         case PositAluOp.F2P                     => PositRef.fromFloat32(c, cmd.a)
         case PositAluOp.P2F                     => PositRef.toFloat32(c, cmd.a)
         case code                               => PositRef.withFlags(c, opOf(code).get, cmd.a, cmd.b)

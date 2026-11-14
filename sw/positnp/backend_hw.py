@@ -316,9 +316,14 @@ class PositVecHw(PositAluHw):
         n = self.config.n
         if n not in self.IN_DTYPE:
             raise PositAluError(f"posit<{n}>: the stream path needs n = 8, 16 or 32")
-        self.dma = AxiDma(dma_mmio)
+        # stage 6: the engine reads and writes memory itself (no AXI DMA); MEM_LO/HI = this buffer
+        self.master = bool(cfg >> regs.CONFIG_HAS_MASTER & 1) and self.version >= 0x0500
+        if not self.master and dma_mmio is None:
+            raise PositAluError("engine without its own AXI4 master needs the AXI DMA (UIO posit_dma*)")
+        self.dma = AxiDma(dma_mmio) if dma_mmio is not None else None
         self.buf = buf
         self.engine: Optional[VecEngine] = None
+        self.fma3 = self.master and bool(self.op_mask >> regs.OP_FMA3 & 1)
         self.in_dtype = self.IN_DTYPE[n]
         self.out_dtype = self.OUT_DTYPE[n]
         self.in_bytes = 2 * n // 8
@@ -327,7 +332,12 @@ class PositVecHw(PositAluHw):
         self._fallback = 0
         from .backend_sw import PositSw
         self._sw = PositSw(self.config)
-        self.dma.reset()
+        if self.dma is not None:
+            self.dma.reset()
+        if self.master:
+            hi = min(self.buf.phys_addr + self.buf.size, 0xFFFFFFF0)
+            self.write(regs.MEM_LO, self.buf.phys_addr)
+            self.write(regs.MEM_HI, hi)
 
     @classmethod
     def open(cls, n: Optional[int] = None) -> "PositVecHw":
@@ -348,12 +358,14 @@ class PositVecHw(PositAluHw):
         parts = []
         try:
             parts.append(UioMmio(e.name))
-            parts.append(UioMmio(e.dma))
+            dma = UioMmio(e.dma) if e.dma and find_uio(e.dma) is not None else None   # none: own AXI4 master
+            parts.append(dma)
             parts.append(UDmaBuf(e.buf))
             hw = cls(*parts)
         except BaseException:
             for p in parts:
-                p.close()
+                if p is not None:
+                    p.close()
             raise
         hw.engine = e
         return hw
@@ -384,7 +396,7 @@ class PositVecHw(PositAluHw):
         """Unmap the registers, the DMA and the buffer (before xmutil unloadapp). Idempotent."""
         if isinstance(self.mmio, _Closed):
             return
-        for part in (self.buf, self.dma.mmio, self.mmio):
+        for part in (self.buf, self.dma.mmio if self.dma is not None else None, self.mmio):
             close = getattr(part, "close", None)
             if close is not None:
                 try:
@@ -422,10 +434,13 @@ class PositVecHw(PositAluHw):
           add/sub/mul/div   a (+) b, or a (+) scalar
           sqrt, f2p, p2f    unary (f2p: a = float32 bits; p2f: result = float32 bits)
           fma               a * b + c: c an int -> OP_FMA (c in OPERAND_C; b an array or `scalar`);
-                            c an array and b `scalar` -> OP_AXPY (y = alpha * x + y in one stream pass)
+                            c an array and b `scalar` -> OP_AXPY (y = alpha * x + y in one stream pass);
+                            three arrays -> OP_FMA3 (stage 6 engines: a third read stream)
 
-        An operation the bitstream lacks, or fma with three arrays (needs a third stream, stage 6),
-        is computed by PositSw instead; stats()["fallback"] counts those elements.
+        An operation the bitstream lacks (or fma with three arrays on an engine without its own AXI4
+        master) is computed by PositSw instead; stats()["fallback"] counts those elements.
+        Stage 6 engines (self.master) read a, b, c from the buffer and write the result there
+        themselves: no {b, a} packing, no AXI DMA.
         Time per phase of the last call, in seconds: self.last_timing
         (pack, sync_device, dma, sync_cpu, copy_out, total).
         """
@@ -433,29 +448,33 @@ class PositVecHw(PositAluHw):
         if route is None:
             self._fallback += int(np.size(a))
             return self._sw.array_op(name, a, b, scalar=scalar, c=c).astype(self.out_dtype)
-        code, b, scalar, c_reg = route
+        code, b, scalar, c_reg, c_arr = route
+        if self.master:
+            return self._mem(code, a, b, scalar, c_reg, c_arr)
         return self._stream(code, a, b, scalar, c_reg)
 
     def _route(self, name, b, scalar, c):
-        """(op code, stream b half, scalar for OPERAND_B, OPERAND_C) or None for the software path."""
+        """(op code, b array, scalar for OPERAND_B, OPERAND_C, c array) or None for the software path."""
         codes = {**regs.OPS, **regs.STAGE5}
         if name not in codes:
             raise ValueError(f"unknown operation {name!r}")
         if name not in self.array_ops:
             return None
         if name in self.UNARY:
-            return codes[name], None, 0, None
+            return codes[name], None, 0, None, None
         if name == "fma":
             if c is None:
                 raise ValueError("fma needs c")
             if np.ndim(c) == 0:
-                return regs.OP_FMA, b, scalar, int(c)
+                return regs.OP_FMA, b, scalar, int(c), None
             if scalar is not None:
-                return regs.OP_AXPY, c, scalar, None    # alpha in OPERAND_B, b half of the stream = the addend
-            return None                                 # three arrays: not with one {b, a} stream
+                return regs.OP_AXPY, c, scalar, None, None   # alpha in OPERAND_B, b stream = the addend
+            if self.fma3:
+                return regs.OP_FMA3, b, None, None, c        # three arrays (stage 6)
+            return None                                      # three arrays: not with one {b, a} stream
         if name == "axpy":
             raise ValueError("use name='fma' with scalar=alpha and c=y")
-        return codes[name], b, scalar, None
+        return codes[name], b, scalar, None, None
 
     def _stream(self, code: int, a, b=None, scalar: Optional[int] = None, c_reg: Optional[int] = None) -> np.ndarray:
         t_start = time.perf_counter()
@@ -525,6 +544,91 @@ class PositVecHw(PositAluHw):
         self.last_timing = timing
         return out.reshape(shape)
 
+    # ---- stage 6: commands with addresses (own AXI4 master) ------------------------------------------
+
+    def _regions(self, k_bytes_per: int, regions: int) -> int:
+        """Elements per command when the buffer holds `regions` arrays of `k_bytes_per` bytes per element."""
+        per = (self.buf.size // regions) // self.ALIGN * self.ALIGN
+        return max(1, min(per // k_bytes_per, 0xFFFFFFFF))
+
+    def _mem_cmd(self, length: int, src: List[int], dst: Optional[int], read_b: bool, read_c: bool) -> int:
+        """One MEM command: addresses, start, wait for MEM_STATUS.done; returns the cycles it took."""
+        self.write(regs.MEM_LEN, length)
+        for reg, off in zip((regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C), src):
+            self.write(reg, self.buf.phys_addr + off)
+        if dst is not None:
+            self.write(regs.MEM_DST, self.buf.phys_addr + dst)
+        self.write(regs.MEM_CFG, read_b << regs.MEM_CFG_READ_B | read_c << regs.MEM_CFG_READ_C |
+                   (dst is not None) << regs.MEM_CFG_WRITE)
+        self.write(regs.CTRL, 1 << regs.CTRL_MEM_START)
+        t0 = time.perf_counter()
+        while True:
+            st = self.read(regs.MEM_STATUS)
+            if st >> regs.MEM_ST_DONE & 1:
+                break
+            if time.perf_counter() - t0 > 10.0:
+                raise PositAluError(f"MEM command did not finish (MEM_STATUS 0x{st:x}, {length} elements)")
+        errs = [n for n, b in (("address outside the buffer", regs.MEM_ST_ERR_RANGE),
+                               ("address not aligned to 16 B", regs.MEM_ST_ERR_ALIGN),
+                               ("AXI error response", regs.MEM_ST_ERR_RESP)) if st >> b & 1]
+        if errs:
+            raise PositAluError(f"MEM command rejected: {', '.join(errs)} (MEM_STATUS 0x{st:x})")
+        return self.read(regs.MEM_CYCLES)
+
+    def _mem(self, code: int, a, b=None, scalar: Optional[int] = None, c_reg: Optional[int] = None,
+             c_arr=None) -> np.ndarray:
+        """Element-wise op with the engine reading a (b, c) from the buffer and writing the result over a."""
+        t_start = time.perf_counter()
+        timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
+        shape = np.shape(a)
+        ins = [self._bits(a)]
+        if b is not None:
+            ins.append(self._bits(b))
+        elif scalar is None:
+            raise ValueError("array_op needs b or scalar")
+        if c_arr is not None:
+            ins.append(self._bits(c_arr))
+        if any(x.size != ins[0].size for x in ins):
+            raise ValueError(f"array sizes differ: {[x.size for x in ins]}")
+        size = ins[0].size
+        out = np.empty(size, self.out_dtype)
+        if size == 0:
+            return out.reshape(shape)
+        self.write(regs.OP, code)
+        self.write(regs.STREAM_CFG, 1 << regs.STREAM_CFG_SCALAR_B if scalar is not None and b is None else 0)
+        if scalar is not None:
+            self.write(regs.OPERAND_B, int(scalar) & self.config.mask)
+        if c_reg is not None:
+            self.write(regs.OPERAND_C, int(c_reg) & self.config.mask)
+
+        step = self._regions(self.out_bytes, len(ins))
+        region = -(-step * self.out_bytes // self.ALIGN) * self.ALIGN
+        offs = [r * region for r in range(len(ins))]
+        cycles = 0
+        for i in range(0, size, step):
+            k = min(step, size - i)
+            t = time.perf_counter()
+            for x, off in zip(ins, offs):
+                self.buf.view(self.out_dtype, off, k)[:] = x[i:i + k]      # contiguous copies, no packing
+            timing["pack"] += time.perf_counter() - t
+            t = time.perf_counter()
+            for off in offs:
+                self.buf.sync_for_device(off, k * self.out_bytes, 1)
+            timing["sync_device"] += time.perf_counter() - t
+            t = time.perf_counter()
+            cycles += self._mem_cmd(k, offs + [0] * (3 - len(offs)), offs[0], b is not None, c_arr is not None)
+            timing["dma"] += time.perf_counter() - t
+            t = time.perf_counter()
+            self.buf.sync_for_cpu(offs[0], k * self.out_bytes, 2)
+            timing["sync_cpu"] += time.perf_counter() - t
+            t = time.perf_counter()
+            out[i:i + k] = self.buf.view(self.out_dtype, offs[0], k)      # result over a (in place)
+            timing["copy_out"] += time.perf_counter() - t
+        timing["total"] = time.perf_counter() - t_start
+        timing["engine_cycles"] = cycles
+        self.last_timing = timing
+        return out.reshape(shape)
+
     def stats(self) -> Dict[str, int]:
         s = super().stats()
         s["elements"] = self.read(regs.CNT_ELEMENTS)
@@ -555,8 +659,18 @@ class PositVecHw(PositAluHw):
         self.write(regs.OP, regs.REDUCE[mode])
         self.write(regs.CTRL, 1 << regs.CTRL_QUIRE_CLEAR)
         before = self.read(regs.CNT_ELEMENTS)
+        if self.master:
+            ins = [av] + ([bv] if bv is not None else [])
+            step = self._regions(self.out_bytes, len(ins))
+            region = -(-step * self.out_bytes // self.ALIGN) * self.ALIGN
+            for i in range(0, av.size, step):
+                k = min(step, av.size - i)
+                for r, x in enumerate(ins):
+                    self.buf.view(self.out_dtype, r * region, k)[:] = x[i:i + k]
+                    self.buf.sync_for_device(r * region, k * self.out_bytes, 1)
+                self._mem_cmd(k, [0, region if bv is not None else 0, 0], None, bv is not None, False)
         step = max(1, min(self.buf.size // self.in_bytes, DMA_MAX_LENGTH // self.in_bytes))
-        for i in range(0, av.size, step):
+        for i in (range(0, av.size, step) if not self.master else ()):
             k = min(step, av.size - i)
             pairs = self.buf.view(self.out_dtype, 0, 2 * k).reshape(k, 2)
             pairs[:, 0] = av[i:i + k]
@@ -590,9 +704,10 @@ class PositVecHw(PositAluHw):
         a = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
         b = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
         args = {"fma": dict(b=b, c=int(a[0])),                       # OP_FMA, c in OPERAND_C
-                "axpy": dict(scalar=int(a[0]), c=b)}.get(name, dict(b=b))   # axpy: OP_AXPY
+                "axpy": dict(scalar=int(a[0]), c=b),                  # axpy: OP_AXPY
+                "fma3": dict(b=b, c=a[::-1].copy())}.get(name, dict(b=b))   # three arrays: OP_FMA3
         t0 = time.perf_counter()
-        self.array_op("fma" if name == "axpy" else name, a, **args)
+        self.array_op("fma" if name in ("axpy", "fma3") else name, a, **args)
         return size / (time.perf_counter() - t0)
 
 
