@@ -409,14 +409,15 @@ def test_matmul_matches_sw(hw, sw, shape):
 def test_matmul_throughput(hw):
     _need_gemv(hw)
     import gc
-    for m, k, n, dev in ((256, 256, 16, False), (256, 256, 16, True), (1024, 1024, 8, True)):
+    P = getattr(hw, "gemv_cols", 1)
+    for m, k, n, dev in ((256, 256, 16, False), (256, 256, 16, True), (1024, 1024, 8, True), (1024, 1024, 64, True)):
         if k > hw.gemv_max_k:
             continue
         r = hw.time_matmul(m, k, n, device=dev)
         t = hw.last_timing
         cyc = t["engine_cycles"]
-        print(f"\nmatmul {m}x{k} @ {k}x{n} ({'A on device' if dev else 'A copied'}): {r / 1e6:6.1f} M MAC/s | "
+        print(f"\nmatmul {m}x{k} @ {k}x{n}, P={P} ({'A on device' if dev else 'A copied'}): {r / 1e6:6.1f} M MAC/s | "
               f"total {t['total'] * 1e3:.1f} ms, engine {t['dma'] * 1e3:.1f} ms ({m * k * n / max(cyc, 1):.3f} MAC/clock), "
               f"copy in {t['pack'] * 1e3:.1f} ms")
-        assert cyc <= 1.1 * m * k * n + 300 * n, f"{cyc} engine cycles for {m * k * n} MAC"
+        assert cyc <= 1.1 * m * k * -(-n // P) + 300 * n, f"{cyc} engine cycles for {m * k * n} MAC, P = {P}"
         gc.collect()

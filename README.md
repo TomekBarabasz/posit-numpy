@@ -30,7 +30,9 @@ Stan:
 - tablice bez kopii (pamięć urządzenia, `x.to_device()`): sprawdzone na płytce — add 147 / 297 / 538 M/s,
   posit16 i posit8 szybsze niż NumPy float32; wentylator sterowany z Linuksa jak w aplikacji fabrycznej.
 - etap 7a (dokładny `A @ B` / `np.matmul` na quire: OP_XLOAD + OP_GEMV, dwa quire na zmianę): sprawdzony na płytce —
-  0,999 MAC na takt, ok. 98 M MAC/s na silnik (posit32, posit16, posit8), każdy element bit w bit z quire — `hw/top-modules/vec/README.md`.
+  0,999 MAC na takt, ok. 98 M MAC/s na silnik (posit32, posit16, posit8), każdy element bit w bit z quire — `hw/top-modules/vec/README.md`;
+- szybszy matmul (5.2: P = 4 kolumny B na jedno przejście A, 8 quire): sprawdzony na płytce — 3,98 MAC na takt,
+  ok. 388 M MAC/s na silnik (4 × więcej niż z jedną kolumną); OOC posit32 35 119 LUT, 103,6 MHz.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

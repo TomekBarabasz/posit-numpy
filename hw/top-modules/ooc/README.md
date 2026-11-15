@@ -15,6 +15,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `vec_p32_mem/` | etap 6: `PositVecAxi` 5.0 z masterem AXI4 (`m_axi` 128 b, FMA3) zamiast AXI4-Stream |
 | `vec_p32_mem_L2/` | to samo z 2 torami elementowymi (2 elementy / takt) |
 | `vec_p32_mem_L2_gemv/` | etap 7a: L2 z gemv (bufor x 4096 elementów, drugi quire, kolejki wyników) |
+| `vec_p32_mem_L2_gemv4/` | 5.2: L2 z gemv na 4 kolumny naraz (4 bufory x, 8 quire) — koszt kolumn |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 
@@ -128,6 +129,23 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
   (np. po wyrównaniu, jak w FMA).
 - Hold −0,18 ns na wejściach `m_axi_rdata` → FIFO w LUTRAM: ten sam artefakt OOC co przy `s_axi` (wejścia z zerowym
   opóźnieniem prosto do przerzutników); w układzie steruje nimi rejestr smartconnecta.
+
+### Szybszy matmul: `vec_p32_mem_L2_gemv4` (2026-11-15)
+
+`PositVecAxi` 5.2 posit32 jak `vec_p32_mem_L2`, plus gemv na 4 kolumny naraz (4 bufory x po 4096 elementów, 8 quire).
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p32_mem_L2_gemv4` | synth | 35 370 | 18 838 | 1 582 | 44 | 0 | 1,981 | 124,7 |
+| `vec_p32_mem_L2_gemv4` | impl | 35 119 | 18 830 | 1 582 | 44 | 0 | 0,351 | 103,6 |
+
+- gemv na 4 kolumny kosztuje ok. +23 300 LUT, +13 000 FF i +32 DSP względem `vec_p32_mem_L2`: ok. 2 900 LUT,
+  1 600 FF i 4 DSP na quire posit32 (512 b, 8 segmentów, automat zaokrąglania z rejestrami modułu); 7 dodatkowych
+  quire to prawie cały przyrost. Cały silnik to ok. 30 % LUT xck26 (117 120).
+- Bufory x (4 × 4096 × 32 b) Vivado dał do URAM (`URAM288`), stąd BRAM = 0.
+- Ścieżka krytyczna bez zmian — dodawanie ALU toru 1 (24 poziomy): 104,8 → 103,6 MHz, zapas 0,35 ns; gemv jej nie dotyka.
+- Hold −0,18 ns (1 670 końcówek) to znów wejścia `m_axi_rdata` → FIFO odczytu w LUTRAM: artefakt OOC (zero input delay),
+  w bitstreamie (build.tcl) timing jest domknięty.
 
 ### Tory wielotaktowe: `vec_p32_u4` (2026-11-14)
 

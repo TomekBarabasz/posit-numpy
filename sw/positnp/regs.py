@@ -94,16 +94,18 @@ CONFIG_HAS_MASTER = 14
 OP_FMA3 = 12          # a * b + c, all three arrays from memory
 MEM_BEAT_BYTES = 16
 
-# ---- stage 7a (PositVecAxi 5.1): exact gemv on the quire (VecKv260 --gemv-k, default 4096) ---------
+# ---- stage 7a (PositVecAxi 5.1, 5.2: P columns at once): exact gemv on the quire (VecKv260 --gemv-k, default 4096) ---------
 MEM_WLEN = 0xC8       # RW  elements written by OP_GEMV (M rows); other ops write MEM_LEN
 GEMV_K = 0xCC         # RW  row length K (elements of x), 1 .. GEMV_CFG.maxK
-GEMV_CFG = 0xD0       # RO  [15:0] maxK: capacity of the x buffer (0: no gemv)
-OP_XLOAD = 13         # MEM_SRC_A, MEM_LEN = K -> x buffer (no write)
-OP_GEMV = 14          # y[i] = round(sum_j A[i, j] x[j]): A at MEM_SRC_A (M * K), y at MEM_DST (MEM_WLEN = M)
-MEM_ST_ERR_SHAPE = 5  # MEM_STATUS: MEM_LEN != MEM_WLEN * GEMV_K, K = 0, K > maxK, or XLOAD longer than maxK
+GEMV_CFG = 0xD0       # RO  [15:0] maxK: capacity of each x buffer (0: no gemv), [23:16] P: columns at once (5.2)
+GEMV_COLS = 0xD4      # RW  columns of x per pass, 1 .. P (5.2; 1 after reset)
+OP_XLOAD = 13         # MEM_SRC_A, MEM_LEN = K * cols: the columns of x one after another -> x buffers (no write)
+OP_GEMV = 14          # y[i, c] = round(sum_j A[i, j] x_c[j]): A at MEM_SRC_A (M * K), y (M x cols, row-major)
+                      # at MEM_DST (MEM_WLEN = M, M * cols elements written)
+MEM_ST_ERR_SHAPE = 5  # MEM_STATUS: GEMV MEM_LEN != M * K, XLOAD MEM_LEN != K * cols, K or cols out of range
 CONFIG_HAS_GEMV = 15
 
-VERSION_VEC = 0x0501
+VERSION_VEC = 0x0502
 VERSION_STREAM_MIN = 0x0200   # oldest PositVecAxi with the stream path that PositVecHw drives
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
 STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}

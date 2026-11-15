@@ -235,7 +235,7 @@ class Board:
             rows.append({"n": n, "config": str(hw.config), "engine": getattr(hw.engine, "name", None),
                          "ops": list(hw.array_ops), "quire": hw.has_quire(),
                          "k": ec.get("k"), "units": ec.get("units"), "lanes": ec.get("lanes", 1),
-                         "gemv_k": getattr(hw, "gemv_max_k", 0),
+                         "gemv_k": getattr(hw, "gemv_max_k", 0), "gemv_cols": getattr(hw, "gemv_cols", 1),
                          "buffer_mb": hw.buf.size >> 20, "version": f"{hw.version >> 8}.{hw.version & 0xFF}"})
         return rows
 
@@ -249,7 +249,7 @@ class Board:
             lanes = f", {r['units']} lane{'s' if r['units'] != 1 else ''} div/sqrt/fma, k={r['k']}" if r["units"] else ""
             if r.get("lanes", 1) > 1:
                 lanes = f", {r['lanes']} elements/clock" + lanes
-            gemv = f", matmul (K <= {r['gemv_k']})" if r.get("gemv_k") else ""
+            gemv = f", matmul (K <= {r['gemv_k']}, {r.get('gemv_cols', 1)} columns/pass)" if r.get("gemv_k") else ""
             lines.append(f"  {r['config']:<12} {r['engine']}: {', '.join(r['ops'])}"
                          f"{', quire' if r['quire'] else ''}{gemv}{lanes}, buffer {r['buffer_mb']} MB, v{r['version']}")
         return "\n".join(lines)

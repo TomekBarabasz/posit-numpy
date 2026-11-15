@@ -285,17 +285,18 @@ def test_udmabuf_sync_writes_only_changes(tmp_path):
 
 # ---- stage 7a: gemv / matmul on the quire (OP_XLOAD, OP_GEMV) -----------------------------------------
 
-def make_gemv(n=32, buf_size=1 << 18, gemv_k=64, lazy=True):
+def make_gemv(n=32, buf_size=1 << 18, gemv_k=64, lazy=True, cols=4):
     mem = FakeUDmaBuf(buf_size)
-    vec = FakeVecMmio(PositConfig(n), mem=mem, lazy_mem=lazy, gemv_k=gemv_k)
+    vec = FakeVecMmio(PositConfig(n), mem=mem, lazy_mem=lazy, gemv_k=gemv_k, gemv_cols=cols)
     return PositVecHw(vec, None, mem), vec, mem
 
 
+@pytest.mark.parametrize("cols", [1, 4])
 @pytest.mark.parametrize("n", [8, 16, 32])
 @pytest.mark.parametrize("shape", [(1, 1, 1), (3, 5, 2), (7, 64, 3), (33, 9, 17), (2, 1, 40)])
-def test_matmul_matches_sw(n, shape):
-    hw, vec, mem = make_gemv(n)
-    assert hw.gemv_max_k == 64
+def test_matmul_matches_sw(n, shape, cols):
+    hw, vec, mem = make_gemv(n, cols=cols)
+    assert hw.gemv_max_k == 64 and hw.gemv_cols == cols
     sw = PositSw(hw.config)
     m, k, nn = shape
     rnd = np.random.default_rng(m * 1000 + k * 10 + nn)
@@ -304,7 +305,7 @@ def test_matmul_matches_sw(n, shape):
     vec.mem_log.clear()
     assert np.array_equal(hw.matmul(a, b), sw.matmul(a, b)), shape
     ops = [cmd for cmd in vec.mem_log]
-    assert len(ops) == 2 * nn                              # one XLOAD and one GEMV per column
+    assert len(ops) == 2 * -(-nn // cols)                   # one XLOAD and one GEMV per group of P columns
     assert np.array_equal(hw.gemv(a, b[:, 0]), sw.gemv(a, b[:, 0]))
 
 
@@ -317,7 +318,7 @@ def test_matmul_blocks_when_heap_small():
     vec.mem_log.clear()
     assert np.array_equal(hw.matmul(a, b), sw.matmul(a, b))
     gemvs = [cmd for cmd in vec.mem_log if cmd[3] >> regs.MEM_CFG_WRITE & 1]
-    assert len(gemvs) > 20 and {cmd[0] % 60 for cmd in gemvs} == {0}   # several row blocks per column
+    assert len(gemvs) > 5 and {cmd[0] % 60 for cmd in gemvs} == {0}    # several row blocks per column group
     assert hw.heap.stats()["blocks"] == 0
     tiny, vec2, _ = make_gemv(32, buf_size=1 << 14, gemv_k=64)        # heap: 2 blocks, no gemv layout fits
     assert np.array_equal(tiny.matmul(a[:3], b[:, :2]), sw.matmul(a[:3], b[:, :2]))
@@ -368,7 +369,7 @@ def test_positarray_matmul_on_fake():
     with pn.using(hw):
         vec.mem_log.clear()
         got = A @ B
-        assert len(vec.mem_log) == 6 and got.equal_bits(want)
+        assert len(vec.mem_log) == 2 and got.equal_bits(want)          # 3 columns of B: one pass of A
         assert np.matmul(A, B).equal_bits(want) and np.dot(A, B).equal_bits(want)
         assert (A @ x).shape == (6,) and (x @ B).shape == (3,)
         assert (A.to_device() @ B).equal_bits(want)
