@@ -386,11 +386,12 @@ class PositVecHw(PositAluHw):
 
     def engine_cfg(self) -> Optional[Dict[str, int]]:
         """Build parameters of the engine (version >= 4.1): k = divider / sqrt bits per cycle,
-        units = div / sqrt / FMA lanes (VecKv260 n:es:k:units). None for older bitstreams."""
+        units = div / sqrt / FMA lanes, lanes = elements per clock (VecKv260 n:es:k:units:lanes).
+        None for older bitstreams."""
         if self.version < 0x0401:
             return None
         v = self.read(regs.ENGINE_CFG)
-        return {"k": v & 0xFF, "units": v >> 8 & 0xFF}
+        return {"k": v & 0xFF, "units": v >> 8 & 0xFF, "lanes": (v >> 16 & 0xFF) or 1}
 
     def close(self) -> None:
         """Unmap the registers, the DMA and the buffer (before xmutil unloadapp). Idempotent."""
@@ -551,10 +552,11 @@ class PositVecHw(PositAluHw):
     # Chunk size: about MEM_CHUNKS chunks per call (the engine overlaps all but the first fill and the
     # last drain; every chunk costs two cache syncs), at least MEM_CHUNK_MIN bytes per array, at most
     # what a half holds. MEM_CHUNK_BYTES, when set, fixes the size instead (measurements).
-    # Board, add 4 M elements, sync pair 57 us: 16 chunks (posit32 1 MB, posit16 512 KB, posit8 256 KB)
-    # give 92-96 % of the engine limit; fewer chunks leave the first fill / last drain exposed.
-    MEM_CHUNKS = 16
-    MEM_CHUNK_MIN = 256 << 10
+    # Board, add 4 M elements, sync pair ~50 us. One lane: 16 chunks gave 92-96 % of the engine limit.
+    # Wider engines (2 / 4 / 8 elements per clock) are faster than the CPU copies; then chunks of 1-4 MB
+    # win (posit32 x2: 4 MB 121 M/s, posit16 x4 and posit8 x8: 1 MB 229 / 400 M/s): 8 chunks, >= 1 MB.
+    MEM_CHUNKS = 8
+    MEM_CHUNK_MIN = 1 << 20
     MEM_CHUNK_BYTES: Optional[int] = None
     double_buffer = True
 

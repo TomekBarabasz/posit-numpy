@@ -30,6 +30,7 @@ class AxiMemModel(axi : Axi4, cd : ClockDomain, rnd : Random, maxBurst : Int = 1
   var idDelay  = Map[Int, Int]()               // dodatkowe opoznienie odczytu dla ID (testy kolejnosci)
   val violations = mutable.ArrayBuffer[String]()
   var arCount, awCount, rBeats, wBeats = 0L
+  var lastW = (BigInt(0), BigInt(0))           // ostatnie slowo W (dane, WSTRB) - do diagnostyki
   var cycle = 0L
 
   def write8(a : Long, v : Int) : Unit = mem(a) = v & 0xff
@@ -154,6 +155,7 @@ class AxiMemModel(axi : Axi4, cd : ClockDomain, rnd : Random, maxBurst : Int = 1
     // W
     if (axi.w.valid.toBoolean && axi.w.ready.toBoolean) {
       wq.enqueue((axi.w.data.toBigInt, axi.w.strb.toBigInt, axi.w.last.toBoolean))
+      lastW = (axi.w.data.toBigInt, axi.w.strb.toBigInt)
       wBeats += 1
     }
     applyWrites()

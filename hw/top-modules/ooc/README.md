@@ -13,6 +13,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `vec_p16/`, `vec_p32/` | `PositVecAxi` (rejestry, AXI4-Stream, quire, sqrt / FMA / konwersje), ta sama konfiguracja co `top-modules/vec` |
 | `vec_p32_u4/` | to samo z 4 torami div / sqrt / FMA (`slowUnits = 4`) — koszt torów względem `vec_p32` |
 | `vec_p32_mem/` | etap 6: `PositVecAxi` 5.0 z masterem AXI4 (`m_axi` 128 b, FMA3) zamiast AXI4-Stream |
+| `vec_p32_mem_L2/` | to samo z 2 torami elementowymi (2 elementy / takt) |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 

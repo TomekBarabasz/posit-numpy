@@ -20,6 +20,9 @@ import spinal.lib.bus.amba4.axi._
 //  (kredyty), wiec R nigdy nie czeka na silnik - dane a i b moga przychodzic
 //  w dowolnej kolejnosci i przeplocie miedzy ID.
 //
+//  Tory (lanes = L): strumienie a, b, c i wyniki ida grupami po L elementow (L * n bitow) - jedna
+//  grupa na takt; ostatnia grupa moze byc niepelna (len mod L elementow), zapis maskuje ja WSTRB.
+//
 //  Adresy: wyrownane do slowa danych (sprawdza PositVecAxi przed startem).
 //  Odpowiedz inna niz OKAY na R albo B: respError (do konca polecenia
 //  dane leca dalej, wynik nalezy odrzucic).
@@ -29,18 +32,27 @@ case class MemMoverConfig(n         : Int,
                           dataWidth : Int = 128,
                           maxBurst  : Int = 16,
                           fifoBeats : Int = 64,
-                          lenWidth  : Int = 32) {
+                          lenWidth  : Int = 32,
+                          lanes     : Int = 1) {
   require(dataWidth % n == 0 && isPow2(dataWidth / n), s"dataWidth $dataWidth / n $n")
   require(isPow2(maxBurst) && maxBurst <= 256 && fifoBeats >= 2 * maxBurst)
+  require(isPow2(lanes) && lanes * n <= dataWidth, s"lanes = $lanes: potega 2, L * n <= $dataWidth")
   def beatBytes : Int = dataWidth / 8
-  def perBeat : Int = dataWidth / n
+  def group : Int = n * lanes                         // bity grupy elementow (jedna na takt)
+  def perBeat : Int = dataWidth / group               // grup w slowie danych
+  def perBeatElems : Int = dataWidth / n
   def sources : Int = 3
   def axi : Axi4Config = Axi4Config(addressWidth = addrWidth, dataWidth = dataWidth, idWidth = 2,
     useRegion = false, useLock = false, useQos = false, useCache = true, useProt = true)
   /** Slowa danych na `len` elementow. */
   def beats(len : UInt) : UInt = {
-    val s = len.resize(lenWidth + 1) + (perBeat - 1)
-    s(lenWidth downto log2Up(perBeat)).resize(lenWidth)
+    val s = len.resize(lenWidth + 1) + (perBeatElems - 1)
+    s(lenWidth downto log2Up(perBeatElems)).resize(lenWidth)
+  }
+  /** Grupy po `lanes` elementow na `len` elementow. */
+  def groups(len : UInt) : UInt = if (lanes == 1) len else {
+    val s = len.resize(lenWidth + 1) + (lanes - 1)
+    s(lenWidth downto log2Up(lanes)).resize(lenWidth)
   }
 }
 
@@ -57,8 +69,8 @@ class PositMemMover(val cfg : MemMoverConfig) extends Component {
   val io = new Bundle {
     val axi       = master(Axi4(cfg.axi))
     val cmd       = slave(Stream(MemCmd(cfg)))
-    val src       = Vec(master(Stream(Fragment(Bits(n bits)))), sources)   // last: ostatni element
-    val res       = slave(Stream(Bits(n bits)))
+    val src       = Vec(master(Stream(Fragment(Bits(group bits)))), sources)   // grupy; last: ostatnia grupa
+    val res       = slave(Stream(Bits(group bits)))
     val busy      = out Bool()
     val done      = out Bool()                        // impuls: polecenie skonczone
     val respError = out Bool()                        // impuls: RRESP / BRESP != OKAY
@@ -97,7 +109,7 @@ class PositMemMover(val cfg : MemMoverConfig) extends Component {
     val out  = io.src(i)
     val lastElem = elemsLeft === 1
     out.valid    := pop.valid && elemsLeft =/= 0
-    out.fragment := (if (perBeat == 1) pop.payload else pop.payload.subdivideIn(n bits)(idx.resize(log2Up(perBeat))))
+    out.fragment := (if (perBeat == 1) pop.payload else pop.payload.subdivideIn(group bits)(idx.resize(log2Up(perBeat))))
     out.last     := lastElem
     pop.ready    := out.fire && (lastElem || (if (perBeat == 1) True else idx === perBeat - 1))
     when(out.fire) {
@@ -164,7 +176,8 @@ class PositMemMover(val cfg : MemMoverConfig) extends Component {
     val active    = RegInit(False)
     val addr      = Reg(UInt(addrWidth bits))
     val beatsLeft = Reg(UInt(lenWidth bits)) init 0     // slowa do zamowienia na AW
-    val elemsLeft = Reg(UInt(lenWidth bits)) init 0     // wyniki do przyjecia
+    val elemsLeft = Reg(UInt(lenWidth bits)) init 0     // grupy wynikow do przyjecia
+    val lastCnt   = Reg(UInt(log2Up(lanes + 1) bits)) init lanes   // elementy w ostatniej grupie
     val bursts    = Reg(UInt(lenWidth bits)) init 0     // serie wyslane na AW, bez B
     val lenQ      = StreamFifo(UInt(8 bits), 8)         // dlugosci serii dla W (WLAST)
 
@@ -206,10 +219,17 @@ class PositMemMover(val cfg : MemMoverConfig) extends Component {
     when(io.res.fire) {
       val base  = Mux(full, U(0, fill.getWidth bits), fill)   // pelne slowo wychodzi w tym takcie: nowe od zera
       val slot  = base.resize(log2Up(perBeat) max 1)
-      val bytesPer = n / 8 max 1
-      val laneStrb = B((BigInt(1) << (n / 8 max 1)) - 1, bytesPer bits)
+      val bytesPer = group / 8
+      val elemBytes = n / 8
+      // grupa: wszystkie bajty; ostatnia grupa: tylko lastCnt elementow
+      val laneStrb = Bits(bytesPer bits)
+      laneStrb.setAll()
+      if (lanes > 1) when(elemsLeft === 1) {
+        for (e <- 0 until lanes) laneStrb(e * elemBytes, elemBytes bits) := (if (e == 0) B((BigInt(1) << elemBytes) - 1, elemBytes bits)
+          else Mux(lastCnt > e, B((BigInt(1) << elemBytes) - 1, elemBytes bits), B(0, elemBytes bits)))
+      }
       for (k <- 0 until perBeat) when(slot === k) {
-        acc(k * n, n bits) := io.res.payload
+        acc(k * group, group bits) := io.res.payload
       }
       val strbNew = Bits(beatBytes bits)
       strbNew := Mux(full, B(0, beatBytes bits), strbAcc)
@@ -252,13 +272,17 @@ class PositMemMover(val cfg : MemMoverConfig) extends Component {
       r.active    := on
       r.addr      := io.cmd.src(i)
       r.beatsLeft := Mux(on, beatsN, U(0, lenWidth bits))
-      r.elemsLeft := Mux(on, io.cmd.len, U(0, lenWidth bits))
+      r.elemsLeft := Mux(on, groups(io.cmd.len), U(0, lenWidth bits))
       r.idx       := 0
     }
     writer.active    := io.cmd.write
     writer.addr      := io.cmd.dst
     writer.beatsLeft := Mux(io.cmd.write, beatsN, U(0, lenWidth bits))
-    writer.elemsLeft := Mux(io.cmd.write, io.cmd.len, U(0, lenWidth bits))
+    writer.elemsLeft := Mux(io.cmd.write, groups(io.cmd.len), U(0, lenWidth bits))
+    if (lanes > 1) {
+      val rem = io.cmd.len(log2Up(lanes) - 1 downto 0)
+      writer.lastCnt := Mux(rem === 0, U(lanes, writer.lastCnt.getWidth bits), rem.resize(writer.lastCnt.getWidth))
+    }
   }
   val readsDone = readers.map(r => r.idle && r.inFlight === 0).reduce(_ && _)
   when(busy && !io.cmd.fire && readsDone && (!writer.active || writer.finished)) {

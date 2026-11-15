@@ -182,7 +182,9 @@ def test_close_is_idempotent_and_blocks_use():
 def test_engine_cfg():
     mem = FakeUDmaBuf(1 << 16)
     vec = FakeVecMmio(PositConfig(32), k=4, units=4)
-    assert PositVecHw(vec, FakeDma(mem, vec), mem).engine_cfg() == {"k": 4, "units": 4}
+    assert PositVecHw(vec, FakeDma(mem, vec), mem).engine_cfg() == {"k": 4, "units": 4, "lanes": 1}
+    vec2 = FakeVecMmio(PositConfig(32), k=4, units=2, lanes=2, mem=mem)
+    assert PositVecHw(vec2, None, mem).engine_cfg() == {"k": 4, "units": 2, "lanes": 2}
 
 
 # ---- stage 6: engine with its own AXI4 master (MEM_* commands, no DMA) ---------------------------------

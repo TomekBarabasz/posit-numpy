@@ -65,7 +65,8 @@ OP_F2P = 10           # a = float32 bits -> posit32
 OP_P2F = 11           # posit32 -> float32 bits
 
 # ---- 4.1: engine parameters (build options, VecKv260 n:es:k:u) ---------------------------------
-ENGINE_CFG = 0x5C     # RO  [7:0] k: divider / sqrt bits per cycle, [15:8] div / sqrt / FMA lanes (slowUnits)
+ENGINE_CFG = 0x5C     # RO  [7:0] k: divider / sqrt bits per cycle, [15:8] div / sqrt / FMA lanes (slowUnits),
+                      #     [23:16] element lanes (elements per clock, stage 6)
 
 # ---- stage 6: own AXI4 master (PositVecAxi 5.0): arrays read and written by the engine ---------
 MEM_LEN = 0x60        # RW  elements of the command
