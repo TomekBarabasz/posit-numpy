@@ -219,9 +219,23 @@ OP_GEMV:   m_axi R --> A wiersz po wierszu, element A[i, j] --> odczyt x[j] (1 t
 Symulacja (`PositVecMemTestplan.mem_gemv*`, model pamięci z losowymi opóźnieniami): kształty 1×1, 1×5, 3×1, 2×2, 5×3,
 7×17, 33×10, 9×maxK, 40×1 i losowe, elementy z rozkładu `stress` (NaR, zera, skrajne skale) — y bit w bit
 z `QuireRef` dla posit32 ×1 / ×2, posit16 ×4, posit8 ×8; bajty za y nietknięte; redukcje po gemv poprawne;
-odrzucenia kształtu; **64 × 64 posit32: 4 133 takty (0,99 MAC / takt)**. Na płytce oczekiwane ok. 100 M MAC/s
-na silnik (100 MHz) — dużo mniej niż BLAS float32 na A53, ale każdy wynik dokładnie zaokrąglony
-(`test_board_vec.py::test_matmul_*`).
+odrzucenia kształtu; **64 × 64 posit32: 4 133 takty (0,99 MAC / takt)**.
+
+**Na płytce (2026-11-15, `posit32_16_8_mem` z gemv)**: `test_board_vec.py -k matmul` przechodzi na wszystkich trzech
+silnikach (kształty 1×1×1 … 17×4096×2, każdy element bit w bit z `PositSw`, także z A w pamięci urządzenia);
+`scripts/diag_gemv.py` — XLOAD / GEMV krok po kroku z rejestrami. M MAC / s:
+
+| | posit32 | posit16 | posit8 | MAC / takt silnika |
+| --- | ---: | ---: | ---: | ---: |
+| 256×256 @ 256×16, A kopiowana | 81,9 | 82,0 | 82,9 | 0,994 |
+| 256×256 @ 256×16, A w pamięci urządzenia | 83,8 | 84,0 | 84,1 | 0,994 |
+| 1024×1024 @ 1024×8, A w pamięci urządzenia | **97,6** | **97,8** | **98,0** | 0,999 |
+
+- Silnik pracuje praktycznie bez przerw (zaokrąglenia wierszy w cieniu drugiego quire); stały koszt to XLOAD
+  i dwa polecenia na kolumnę B, widoczne przy mniejszych macierzach (ok. 12,4 ms zamiast 10,5 ms).
+- Wszystkie formaty mają tę samą szybkość: quire bierze 1 element na takt niezależnie od n i od torów L.
+  Szybszy matmul wymagałby kilku par quire na kolumny B naraz (np. 2–4 kolumny w jednym przejściu A).
+- To dużo mniej niż BLAS float32 na A53, ale każdy element jest dokładnym iloczynem skalarnym z jednym zaokrągleniem.
 
 ## Pamięć urządzenia: tablice bez kopii
 
@@ -416,7 +430,7 @@ dekoder -> prepare -+                                                           
    `tclsh overlay_files_test.tcl` sprawdza generowanie `.dtsi` / `.json` bez Vivado (z `dtc`).
 3. Na płytce, z `sw/`:
    ```
-   scripts/build_udmabuf.sh                    # raz na jądro: moduł u-dma-buf (git, nagłówki jądra)
+   scripts/build_udmabuf.sh                    # raz na jądro: moduł u-dma-buf (git, nagłówki jądra); po aktualizacji jądra znowu
    scripts/install_overlay.sh posit32_16_8_vec # sprawdza /dev/uio i /dev/udmabuf-posit-p<n> każdego silnika
    sudo python3 -m pytest -v -s tests/test_board_vec.py   # każdy test na każdym silniku + silniki naraz
    ```

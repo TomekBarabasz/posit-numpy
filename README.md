@@ -29,8 +29,8 @@ Stan:
   posit8 szybsze niż NumPy float32 — `hw/top-modules/vec/README.md`;
 - tablice bez kopii (pamięć urządzenia, `x.to_device()`): sprawdzone na płytce — add 147 / 297 / 538 M/s,
   posit16 i posit8 szybsze niż NumPy float32; wentylator sterowany z Linuksa jak w aplikacji fabrycznej.
-- etap 7a (dokładny `A @ B` / `np.matmul` na quire: OP_XLOAD + OP_GEMV, dwa quire na zmianę, 1 MAC na takt):
-  w symulacji (testplan `mem_gemv*`, 64×64 posit32 w 4133 taktach), czeka na płytkę — `hw/top-modules/vec/README.md`.
+- etap 7a (dokładny `A @ B` / `np.matmul` na quire: OP_XLOAD + OP_GEMV, dwa quire na zmianę): sprawdzony na płytce —
+  0,999 MAC na takt, ok. 98 M MAC/s na silnik (posit32, posit16, posit8), każdy element bit w bit z quire — `hw/top-modules/vec/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)
@@ -106,10 +106,14 @@ Jeden albo kilka formatów w jednym bitstreamie (`-engines`, szczegóły w `hw/t
 ```
 sbt "top-vec/runMain posit.top.vec.VecKv260 32 16 8"                                  # z hw/
 vivado -mode batch -nojournal -log build.log -source build.tcl -tclargs -engines "32 16 8"   # z hw/top-modules/vec/vivado
-scripts/build_udmabuf.sh                         # na KV260, z sw/, raz na jądro
+scripts/build_udmabuf.sh                         # na KV260, z sw/, raz na jądro (po aktualizacji jądra: znowu)
 scripts/install_overlay.sh posit32_16_8_mem      # na KV260, z sw/ (etap 6; z -io dma: posit32_16_8_vec)
 sudo python3 -m pytest -v -s tests/test_board_vec.py
 ```
+Na płytce roboczej najlepiej wyłączyć automatyczne aktualizacje Ubuntu: podmiana jądra, `systemd` i Pythona w trakcie
+testów zawiesiła raz płytkę, a nowe jądro po restarcie nie ma modułu u-dma-buf
+(`sudo systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer`; aktualizacje ręcznie,
+potem `scripts/build_udmabuf.sh`). Po twardym resecie w trakcie aktualizacji: `sudo dpkg --configure -a`.
 Z Pythona (`pn.board`): `pn.board.apps()`, `pn.board.load("posit32_16_8_mem")` (każdy silnik staje się
 backendem swojego formatu), `pn.board.describe()`, `pn.board.unload()`; opis w `sw/README.md`.
 
