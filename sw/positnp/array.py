@@ -119,8 +119,13 @@ def array(x, config: Optional[PositConfig] = None) -> "PositArray":
     if isinstance(x, np.ndarray) and x.dtype == np.float32 and c.n == 32 and c.es == 2 and x.size:
         be = get_backend(c)
         if "f2p" in getattr(be, "array_ops", ()):
-            return PositArray(be.array_op("f2p", x.view(np.uint32), scalar=0), c)
+            return PositArray._wrap(be.array_op("f2p", x.view(np.uint32), scalar=0), c)
     return PositArray(vecops.from_float(c, np.asarray(x, dtype=np.float64)).bits, c)
+
+
+def to_device(x) -> "PositArray":
+    """pn.to_device(x): x (PositArray) in the device memory of its format's engine (see PositArray.to_device)."""
+    return x.to_device()
 
 
 def fma(a, b, c) -> "PositArray":
@@ -149,7 +154,7 @@ def fma(a, b, c) -> "PositArray":
         r = be.array_op("fma", full(B), scalar=int(A.bits.ravel()[0]), c=full(C))     # a * b = b * a
     else:
         r = be.array_op("fma", full(A), full(B), c=full(C))
-    return PositArray(np.asarray(r).reshape(shape), cfg)
+    return PositArray._wrap(np.asarray(r).reshape(shape), cfg)
 
 
 def axpy(alpha, x, y) -> "PositArray":
@@ -230,6 +235,40 @@ class PositArray:
         # astype copies, so the result is C-contiguous and keeps its shape (0-d too, unlike ascontiguousarray)
         self.bits = (np.asarray(bits).astype(np.int64) & config.mask).astype(bits_dtype(config))
 
+    @classmethod
+    def _wrap(cls, bits, config: PositConfig) -> "PositArray":
+        """Result of a backend: no copy when the bits already have the storage dtype (device memory stays
+        device memory); otherwise as the constructor."""
+        bits = np.asarray(bits)
+        dt = bits_dtype(config)
+        if bits.dtype == dt and config.n == 8 * dt().itemsize and bits.flags.c_contiguous:
+            obj = cls.__new__(cls)
+            obj.config = config
+            obj.bits = bits
+            return obj
+        return cls(bits, config)
+
+    # ---- device memory (KV260 engines with their own AXI4 master) --------------------------------
+
+    def to_device(self) -> "PositArray":
+        """Copy into the device memory of this format's engine; later operations whose inputs are all
+        on the device run without copies and keep their results there. No device: unchanged."""
+        be = get_backend(self.config)
+        if getattr(be, "heap", None) is None:
+            return self
+        if be.on_device(self.bits):
+            return self
+        return PositArray._wrap(be.to_device(self.bits), self.config)
+
+    def to_host(self) -> "PositArray":
+        """A copy in ordinary (host) memory."""
+        return PositArray(self.bits.copy(), self.config)
+
+    @property
+    def on_device(self) -> bool:
+        be = get_backend(self.config)
+        return bool(getattr(be, "heap", None) is not None and be.on_device(self.bits))
+
     # ---- conversion and container ----------------------------------------------------------
 
     def to_float(self) -> np.ndarray:
@@ -254,7 +293,7 @@ class PositArray:
     def sqrt(self) -> "PositArray":
         """Correctly rounded square root; negative -> NaR."""
         r = get_backend(self.config).array_op("sqrt", self.bits.ravel(), scalar=0)
-        return PositArray(np.asarray(r).reshape(self.shape), self.config)
+        return PositArray._wrap(np.asarray(r).reshape(self.shape), self.config)
 
     def __float__(self) -> float:
         if self.size != 1:
@@ -330,10 +369,10 @@ class PositArray:
         if o.size == 1 and o.shape in ((), (1,)) and self.size >= 1:
             r = be.array_op(name, self.bits.ravel(), scalar=int(o.bits.ravel()[0]))
             shape = np.broadcast_shapes(self.shape, o.shape)
-            return PositArray(r.reshape(shape), self.config)
+            return PositArray._wrap(r.reshape(shape), self.config)
         a, b = np.broadcast_arrays(self.bits, o.bits)
         r = be.array_op(name, np.ascontiguousarray(a).ravel(), np.ascontiguousarray(b).ravel())
-        return PositArray(r.reshape(a.shape), self.config)
+        return PositArray._wrap(r.reshape(a.shape), self.config)
 
     def _rbinary(self, name: str, other) -> "PositArray":
         return self._coerce(other)._binary(name, self)

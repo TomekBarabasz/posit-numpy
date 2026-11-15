@@ -191,6 +191,30 @@ Po drodze naprawione: rejestry sterujące są teraz zerowane resetem (`readAndWr
 które w SpinalHDL dokłada niezerowany rejestr pośredni — po resecie OPERAND_B, STREAM_CFG itd. były
 przypadkowe, co na FPGA maskowało zerowanie przy konfiguracji).
 
+## Pamięć urządzenia: tablice bez kopii
+
+Przy szerszym silniku posit32 ogranicza już tylko procesor (kopie do i z bufora). Bufor u-dma-buf silnika z masterem
+dzieli się teraz na dwie części: na początku obszar roboczy podwójnego bufora (`STAGING_MAX` = 24 MB, najwyżej
+połowa bufora), powyżej **sterta urządzenia** (`positnp/devmem.py`, bloki po 4 KB).
+
+```python
+with pn.using(hw):
+    xd = x.to_device()                # jedna kopia do pamięci urządzenia (albo pn.to_device(x))
+    y = xd * xd - xd / 3 + 1          # cztery polecenia, zero kopii: wejścia i wyniki w pamięci urządzenia
+    y.on_device, y.to_float(), np.sum(y)   # zwykła tablica NumPy (widok bufora); y.to_host() kopiuje
+```
+
+- działanie, którego choć jedno wejście jest w pamięci urządzenia, idzie jednym poleceniem po całej tablicy;
+  wejścia z hosta są kopiowane do tymczasowych bloków, wynik dostaje nowy blok w pamięci urządzenia
+  (`device_results = True`: tak samo dla wejść z hosta); bez miejsca na stercie — zwykła ścieżka z kopiami;
+- koherencja: przed poleceniem `sync_for_device` wejść (procesor mógł je zmienić) i wyniku, po nim `sync_for_cpu`
+  wyniku; bloki 4 KB, więc dwie tablice nigdy nie dzielą linii cache;
+- blok zwalnia się, gdy znika ostatni widok NumPy tablicy (`weakref.finalize`); `hw.heap.stats()`;
+- redukcje (`np.sum`, `np.dot`) na tablicach w pamięci urządzenia też bez kopii;
+- pojemność: przy `-buf_mb 64` sterta ma 40 MB (np. dwie tablice posit32 po 4 M elementów + wynik nie zmieszczą
+  się razem) — do dużych obliczeń `-buf_mb 256` albo więcej (CMA: `grep Cma /proc/meminfo`);
+- przed `pn.board.unload()` warto usunąć tablice w pamięci urządzenia (mapowanie bufora zostaje, dopóki żyją).
+
 ## Szerszy silnik: L elementów na takt (tory elementowe, `lanes`)
 
 W trybie z masterem silnik może liczyć L elementów na takt: master czyta i zapisuje grupy po L elementów
