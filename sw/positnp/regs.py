@@ -111,7 +111,12 @@ TABLE_CFG = 0xDC      # RO  [7:0] index bits n (0: no table), [15:8] lookups per
 OP_TABLE = 15         # y = T[a], T: 2**n posits in BRAM (positnp.funcs tables)
 TABLE_CTRL_LOAD = 0
 
-VERSION_VEC = 0x0503
+# ---- 5.4: FIR / convolution - GEMV with a window sliding over the signal -----------------------------
+GEMV_MODE = 0xE0      # RW  bit 0 window: row i of A = x[i * cols .. i * cols + K) (signal read once, ring buffer),
+                      #     MEM_LEN = (M - 1) * cols + K elements of x
+GEMV_MODE_WINDOW = 0
+
+VERSION_VEC = 0x0504
 VERSION_STREAM_MIN = 0x0200   # oldest PositVecAxi with the stream path that PositVecHw drives
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
 STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}

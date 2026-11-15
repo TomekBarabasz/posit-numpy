@@ -112,7 +112,12 @@ object PositVecRegs {
   val OP_TABLE   = 15    // y = T[a] (cala tablica 2^n positow w BRAM); z TABLE_CTRL.load: T := pamiec
   val TABLE_CTRL_LOAD = 0
 
-  val VERSION = 0x0503           // 5.3: funkcje z tablicy
+  // 5.4: FIR / splot - GEMV z oknem przesuwanym po sygnale (GEMV_MODE.window)
+  val GEMV_MODE  = 0xE0  // RW  bit 0 window: wiersz i A = x[i * cols .. i * cols + K) (sygnal czytany raz, bufor kolowy),
+                         //     MEM_LEN = (M - 1) * cols + K elementow x
+  val GEMV_MODE_WINDOW = 0
+
+  val VERSION = 0x0504           // 5.4: okno (FIR)
 
   def idVersion : Long = (ID.toLong << 16) | VERSION
   def config(cfg : PositAluConfig, master : Boolean = false, gemv : Boolean = false, table : Boolean = false) : Long =
@@ -144,7 +149,8 @@ object PositVecRegs {
     "OP_FMA3" -> OP_FMA3, "MEM_BEAT_BYTES" -> MEM_BEAT_BYTES,
     "MEM_WLEN" -> MEM_WLEN, "GEMV_K" -> GEMV_K, "GEMV_CFG" -> GEMV_CFG, "OP_XLOAD" -> OP_XLOAD, "OP_GEMV" -> OP_GEMV,
     "MEM_ST_ERR_SHAPE" -> MEM_ST_ERR_SHAPE, "CONFIG_HAS_GEMV" -> CONFIG_HAS_GEMV, "GEMV_COLS" -> GEMV_COLS,
-    "TABLE_CTRL" -> TABLE_CTRL, "TABLE_CFG" -> TABLE_CFG, "OP_TABLE" -> OP_TABLE, "TABLE_CTRL_LOAD" -> TABLE_CTRL_LOAD)
+    "TABLE_CTRL" -> TABLE_CTRL, "TABLE_CFG" -> TABLE_CFG, "OP_TABLE" -> OP_TABLE, "TABLE_CTRL_LOAD" -> TABLE_CTRL_LOAD,
+    "GEMV_MODE" -> GEMV_MODE, "GEMV_MODE_WINDOW" -> GEMV_MODE_WINDOW)
 }
 
 /** withMaster = false: dane przez AXI4-Stream (s_axis {b, a}, m_axis wynik) z AXI DMA (etapy 2-5);
@@ -375,11 +381,14 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     val wlenReg = withGemv generate (Reg(UInt(32 bits)) init 0)
     val kReg    = withGemv generate (Reg(UInt(log2Up(gemvMaxK + 1) bits)) init 0)
     val colsReg = withGemv generate (Reg(UInt(log2Up(gemvCols + 1) + 1 bits)) init 1)
+    val winReg  = withGemv generate (Reg(Bool()) init False)
     if (withGemv) {
       bus.readAndWrite(wlenReg, MEM_WLEN)
       bus.readAndWrite(kReg, GEMV_K)
       bus.readAndWrite(colsReg, GEMV_COLS)
+      bus.readAndWrite(winReg, GEMV_MODE, GEMV_MODE_WINDOW)
     }
+    val isWin = if (withGemv) isGemv && winReg else False
     // iloczyny z rejestrow (rejestry stoja kilka taktow przed startem): M * K, K * cols, M * cols
     val prodMK = withGemv generate RegNext(wlenReg * kReg)
     val prodKC = withGemv generate RegNext(kReg * colsReg)
@@ -389,7 +398,11 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     val badShape = (if (!withGemv) False else {
       val badK    = kReg === 0 || kReg > gemvMaxK
       val badCols = colsReg === 0 || colsReg > gemvCols
-      (isGemv && (badK || badCols || prodMK =/= len.resize(prodMK.getWidth) || prodMC(prodMC.getWidth - 1 downto 32) =/= 0)) ||
+      // okno: MEM_LEN = (M - 1) * cols + K, M >= 1, cols <= K
+      val winLen = (prodMC.resize(prodMC.getWidth + 1) + kReg - colsReg).resize(prodMC.getWidth + 1)
+      val badLen = Mux(winReg, winLen =/= len.resize(winLen.getWidth) || wlenReg === 0 || colsReg > kReg,
+                       prodMK =/= len.resize(prodMK.getWidth))
+      (isGemv && (badK || badCols || badLen || prodMC(prodMC.getWidth - 1 downto 32) =/= 0)) ||
       (isXload && (badK || badCols || prodKC =/= len.resize(prodKC.getWidth)))
     }) || (if (withTable) isTload && len =/= (1L << c.n) else False)
 
@@ -482,25 +495,59 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
       val s1A      = Reg(Bits(c.n bits))
       val s1End    = Reg(Bool())
       val s1Sel    = Reg(Bool())
+      val s1Col    = Reg(UInt(log2Up(gemvMaxK) bits)) init 0        // okno: pozycja elementu w wierszu
       val s1Ready  = Bool()
       val advance  = !s1Valid || s1Ready
       val x        = xbuf.map(_.readSync(col, enable = advance))
+
+      // 5.4, okno (FIR): sygnal po kolei do bufora kolowego (RS = 2 maxK), wiersze czytane z bufora:
+      // wiersz r = x[rowStart .. rowStart + K), rowStart = r * cols; element dostepny, gdy juz zapisany,
+      // zapis czeka, gdy nadpisalby element >= rowStart (biezacy wiersz jeszcze go czyta)
+      val RS       = 2 * gemvMaxK
+      val ring     = Mem(Bits(c.n bits), RS)
+      val wIdx     = Reg(UInt(32 bits)) init 0                    // elementy x zapisane
+      val rowStart = Reg(UInt(32 bits)) init 0
+      val rowsLeft = Reg(UInt(32 bits)) init 0
+      when(launch) { wIdx := 0; rowStart := 0; rowsLeft := wlenReg }
+      val space    = (wIdx - rowStart) < RS
+      ring.write(wIdx(log2Up(RS) - 1 downto 0), qA, enable = sFire && isWin)
+      when(sFire && isWin) { wIdx := wIdx + 1 }
+      val eIdx     = rowStart + col.resize(32)
+      val avail    = eIdx < wIdx && rowsLeft =/= 0
+      val winIssue = isWin && advance && avail
+      val ringOut  = ring.readSync(eIdx(log2Up(RS) - 1 downto 0), enable = advance)
+
       when(isXload) { sReady := True }
       when(isGemv)  { sReady := advance }
+      when(isWin)   { sReady := space }
       when(advance) {
-        s1Valid := inValid && isGemv
+        s1Valid := Mux(isWin, avail, inValid && isGemv)
         s1A     := qA
         s1End   := rowEnd
         s1Sel   := sel
+        s1Col   := col
       }
-      when(sFire) {
+      when(sFire && !isWin) {
         col := Mux(rowEnd, U(0, col.getWidth bits), col + 1)
         when(rowEnd) {
           when(isGemv) { sel := !sel }
           when(isXload) { xc := xc + 1 }
         }
       }
+      when(winIssue) {
+        col := Mux(rowEnd, U(0, col.getWidth bits), col + 1)
+        when(rowEnd) {
+          sel      := !sel
+          rowStart := rowStart + colsReg.resize(32)
+          rowsLeft := rowsLeft - 1
+        }
+      }
       when(launch || softReset) { s1Valid := False }
+      val aIn = Mux(isWin, ringOut, s1A)
+      // okno: kolumna j liczy tylko elementy m in [j, j + T), T = K - cols + 1; reszta wiersza idzie jako 0
+      // (bufor x ma tam zera, a 0 * NaR = NaR wciagaloby NaR z sasiednich wyjsc)
+      val tLen = (kReg - colsReg.resize(kReg.getWidth) + 1).resize(kReg.getWidth)
+      def inTaps(j : Int) : Bool = s1Col >= j && (s1Col - j).resize(kReg.getWidth) < tLen
 
       val fifo = Seq.tabulate(2, P)((_, _) => StreamFifo(Bits(c.n bits), 4))
       val room = fifo.map(_.map(_.io.availability > 1))         // > 1: wynik z tego taktu moze jeszcze wchodzic
@@ -512,7 +559,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
         val take = s1Valid && mine && bankOk(b) && active(j)
         when(isGemv) {
           q.io.input.valid := take
-          q.io.input.a     := s1A
+          q.io.input.a     := Mux(isWin && !inTaps(j), B(0, c.n bits), aIn)
           q.io.input.b     := x(j)
           q.io.input.dot   := True
           when(take && s1End) { q.io.round := True }

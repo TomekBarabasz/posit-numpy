@@ -294,3 +294,32 @@ def test_float32_conversions():
         assert hw.stats()["elements"] == 10000                       # F2P and P2F ran on the "hardware"
     assert got_p.equal_bits(want_p) and np.array_equal(got_f.view(np.uint32), want_f.view(np.uint32))
     assert x.astype(np.float64).dtype == np.float64
+
+
+@pytest.mark.parametrize("c", [pn.P8, pn.P16, pn.P32])
+def test_convolve_correlate_like_numpy(c):
+    rnd = np.random.default_rng(c.n)
+    for N, T in ((1, 1), (5, 3), (3, 5), (20, 7), (8, 8), (2, 9)):
+        a, v = pn.array(rnd.standard_normal(N), c), pn.array(rnd.standard_normal(T), c)
+        af, vf = a.to_float(), v.to_float()
+        for mode in ("full", "same", "valid"):
+            y = np.convolve(a, v, mode)
+            assert y.shape == np.convolve(af, vf, mode).shape
+            assert np.allclose(y.to_float(), np.convolve(af, vf, mode), rtol=2.0 ** -(c.n // 2 - 2), atol=1e-6)
+            z = np.correlate(a, v, mode)
+            assert z.shape == np.correlate(af, vf, mode).shape
+            assert np.allclose(z.to_float(), np.correlate(af, vf, mode), rtol=2.0 ** -(c.n // 2 - 2), atol=1e-6)
+        # exact: each output is the quire dot of its own terms, rounded once
+        y = np.convolve(a, v)
+        for k in range(N + T - 1):
+            terms = [(int(a.bits[i]), int(v.bits[k - i])) for i in range(N) if 0 <= k - i < T]
+            q, nar = ref.quire_accumulate(c, "dot", [t[0] for t in terms], [t[1] for t in terms])
+            assert int(y.bits[k]) == ref.quire_round(c, q, nar)[0]
+    nan_v = pn.array([np.nan, 1.0, np.nan], c)                     # NaR only where it is a term, like NaN
+    for mode in ("full", "same", "valid"):
+        assert np.array_equal(np.isnan(np.convolve(pn.array([1.0, 2, 3, 4], c), nan_v, mode).to_float()),
+                              np.isnan(np.convolve([1.0, 2, 3, 4], [np.nan, 1.0, np.nan], mode)))
+    assert np.array_equal(np.isnan(np.convolve(pn.array([1.0, 2, 3], c), pn.array([np.nan, 1.0], c)).to_float()),
+                          [True, True, True, False])
+    with pytest.raises(ValueError):
+        np.convolve(pn.array([1.0], c), pn.array([], c))

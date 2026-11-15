@@ -97,6 +97,15 @@ class PositSw:
         self._stats["elements"] += int(np.size(a))
         return funcs.evaluate(self.config, name, np.asarray(a)).astype(self.dtype)
 
+    def correlate(self, x, h) -> np.ndarray:
+        """y[i] = sum_j x[i + j] h[j], i = 0 .. len(x) - len(h): every output the exact quire dot, rounded once."""
+        x, h = np.asarray(x).ravel(), np.asarray(h).ravel()
+        n = x.size - h.size + 1
+        out = np.zeros(max(n, 0), self.dtype)
+        for i in range(n):
+            out[i] = self.reduce("dot", x[i:i + h.size], h)[0]
+        return out
+
     def gemv(self, a, x) -> np.ndarray:
         """y = A x on raw bits: matmul with one column."""
         return self.matmul(a, np.asarray(x).reshape(-1, 1)).reshape(np.shape(a)[0])

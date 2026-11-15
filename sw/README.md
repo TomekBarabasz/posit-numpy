@@ -60,6 +60,9 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
   (A już na urządzeniu: `A.to_device()` — czytana w miejscu). Silnik 5.2 liczy P kolumn B na jedno przejście A
   (`hw.gemv_cols`, domyślnie 4: 4 MAC na takt). K > 4096, brak gemv albo pełna pamięć urządzenia:
   jeden dot quire na element (też dokładnie). `hw.time_matmul(m, k, n)` mierzy MAC/s.
+- Etap 7, splot: `np.convolve`, `np.correlate` (tryby full / same / valid), `pn.convolve`, `pn.correlate`; każde wyjście
+  dokładnie w quire, zaokrąglone raz; NaR tylko tam, gdzie jest składnikiem sumy (jak `nan` w NumPy). Silnik 5.4:
+  FIR przez gemv z oknem (`hw.correlate`, P wyjść na wiersz); bez okna albo dla odczepów dłuższych niż maxK − P + 1: PositSw.
 - Etap 7, funkcje: `np.exp`, `np.exp2`, `np.expm1`, `np.log`, `np.log2`, `np.log10`, `np.log1p`, `np.sin`, `np.cos`, `np.tan`,
   `np.arcsin`, `np.arccos`, `np.arctan`, `np.sinh`, `np.cosh`, `np.tanh`, `np.arcsinh`, `np.arccosh`, `np.arctanh`, `np.cbrt`,
   `pn.sigmoid(x)`, `pn.func(name, x)` (`positnp/funcs.py`). posit8 / posit16: pełne tablice, poprawnie zaokrąglone

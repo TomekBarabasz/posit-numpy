@@ -192,6 +192,77 @@ def matmul(a, b) -> "PositArray":
     return PositArray._wrap(np.ascontiguousarray(C), A.config)
 
 
+def _conv_slice(A: "PositArray", V: "PositArray", lo: int, n_out: int) -> "PositArray":
+    """Exact full convolution of 1-D A and V, elements [lo, lo + n_out); each rounded once.
+
+    The longer array is the signal (convolution commutes). Through the backend's correlate:
+    y[k] = sum_j xz[k + j] h[j] with h = taps reversed and xz the signal with T - 1 zeros on each side.
+    NaR taps would meet those padding zeros (0 * NaR = NaR) in outputs where they are no term of the
+    sum, so they go in as 0 and NaR is set afterwards exactly where it belongs (k - q in [0, N)).
+    """
+    c = A.config
+    if V.size > A.size:
+        A, V = V, A
+    x, v = A.bits.ravel(), V.bits.ravel()
+    N, T = x.size, v.size
+    nar_q = np.nonzero(v == c.nar)[0]
+    h = np.where(v == c.nar, 0, v)[::-1].copy()
+    xp = np.zeros(n_out + T - 1, x.dtype)                  # xz[lo : lo + n_out + T - 1], xz[k] = x[k - (T - 1)]
+    s0 = lo - (T - 1)
+    a0, a1 = max(0, s0), min(N, s0 + xp.size)
+    if a1 > a0:
+        xp[a0 - s0:a1 - s0] = x[a0:a1]
+    be = get_backend(c)
+    corr = getattr(be, "correlate", None) or _sw.setdefault(c, PositSw(c)).correlate
+    y = np.asarray(corr(xp, h)).astype(bits_dtype(c))
+    if nar_q.size:                                         # full output k is NaR when k - q in [0, N) for a NaR tap q
+        d = np.zeros(N + T, np.int64)
+        np.add.at(d, nar_q, 1)
+        np.add.at(d, nar_q + N, -1)
+        hit = np.cumsum(d)[lo:lo + n_out] > 0
+        y = np.where(hit, c.nar, y)
+    return PositArray._wrap(y, c)
+
+
+def _conv_args(a, v):
+    first = a if isinstance(a, PositArray) else v
+    if not isinstance(first, PositArray):
+        first = array(a)
+    A, V = first._coerce(a), first._coerce(v)
+    if A.ndim != 1 or V.ndim != 1:
+        raise ValueError("convolve / correlate: 1-D arrays only")
+    if A.size == 0 or V.size == 0:
+        raise ValueError("convolve / correlate: empty array")
+    return A, V
+
+
+def convolve(a, v, mode: str = "full") -> "PositArray":
+    """np.convolve on posits: every output the exact sum of products in the quire, rounded once.
+
+    On a 5.4 KV260 engine: FIR through GEMV with a window over the signal (signal read once, P outputs
+    per pass); elsewhere PositSw."""
+    A, V = _conv_args(a, v)
+    n, t = max(A.size, V.size), min(A.size, V.size)
+    lo, ln = {"full": (0, n + t - 1), "same": ((t - 1) // 2, n), "valid": (t - 1, n - t + 1)}[_mode(mode)]
+    return _conv_slice(A, V, lo, ln)
+
+
+def correlate(a, v, mode: str = "valid") -> "PositArray":
+    """np.correlate on posits (real): c[k] = sum_n a[n + k] v[n], exact in the quire, rounded once."""
+    A, V = _conv_args(a, v)
+    n, t = max(A.size, V.size), min(A.size, V.size)
+    same_lo = (t - 1) // 2 if A.size >= V.size else (t - 1) - (t - 1) // 2
+    lo, ln = {"full": (0, n + t - 1), "same": (same_lo, n), "valid": (t - 1, n - t + 1)}[_mode(mode)]
+    return _conv_slice(A, PositArray._wrap(V.bits[::-1].copy(), V.config), lo, ln)
+
+
+def _mode(mode) -> str:
+    m = {0: "valid", 1: "same", 2: "full"}.get(mode, mode)
+    if m not in ("full", "same", "valid"):
+        raise ValueError(f"mode {mode!r}: expected 'full', 'same' or 'valid'")
+    return m
+
+
 def func(name: str, x) -> "PositArray":
     """f(x) for a positnp.funcs function (exp, log, sin, tanh, sigmoid, ...): correctly rounded tables for
     posit8 / posit16 (looked up by the engine on 5.3 KV260 bitstreams), float64 evaluation for posit32."""
@@ -676,6 +747,8 @@ _FUNCTIONS: Dict[Any, Any] = {
     np.inner: lambda a, b: (a if isinstance(a, PositArray) else b._coerce(a)).dot(b),
     np.vdot: lambda a, b: (a if isinstance(a, PositArray) else b._coerce(a)).dot(b),
     np.linalg.norm: lambda x, ord=None, axis=None, keepdims=False: _norm(x, ord, axis),
+    np.convolve: lambda a, v, mode="full": convolve(a, v, mode),
+    np.correlate: lambda a, v, mode="valid": correlate(a, v, mode),
 }
 
 

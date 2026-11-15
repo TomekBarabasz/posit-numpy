@@ -466,3 +466,38 @@ def test_func_throughput(hw, sw):
           f"device memory {dev / 1e6:.1f} M/s | NumPy table lookup {np_lookup / 1e6:.1f} M/s, "
           f"NumPy float32 exp {np_exp / 1e6:.1f} M/s")
     gc.collect()
+
+
+# ---- 5.4: FIR / convolve (GEMV with a window over the signal) ---------------------------------------------
+
+def _need_window(hw):
+    if not getattr(hw, "gemv_max_k", 0) or hw.version < 0x0504:
+        pytest.skip("bitstream without the gemv window (PositVecAxi 5.4)")
+
+
+@pytest.mark.parametrize("N,T", [(1, 1), (100, 7), (10_000, 64), (3000, 1000)])
+def test_correlate_matches_sw(hw, sw, N, T):
+    _need_window(hw)
+    rnd = np.random.default_rng(N + T)
+    x = rnd.integers(0, 1 << hw.config.n, N).astype(hw.out_dtype)
+    h = rnd.integers(0, 1 << hw.config.n, T).astype(hw.out_dtype)
+    got = hw.correlate(x, h)
+    want = sw.correlate(x, h)
+    bad = np.nonzero(got != want)[0]
+    assert bad.size == 0, f"{bad.size} mismatches, first at {bad[0]}"
+
+
+def test_correlate_throughput(hw):
+    _need_window(hw)
+    size = 1 << 20
+    f32 = np.random.default_rng(1).standard_normal(size).astype(np.float32)
+    for taps in (16, 64, 256):
+        r = hw.time_correlate(size, taps)
+        t = hw.last_timing
+        mac = (size - taps + 1) * taps
+        t0 = time.perf_counter()
+        np.convolve(f32, f32[:taps], "valid")
+        npr = (size - taps + 1) / (time.perf_counter() - t0)
+        print(f"\n{hw.config} FIR {taps} taps, {size} samples, {hw.gemv_cols} outputs/row: {r / 1e6:.2f} M outputs/s "
+              f"({mac / t['total'] / 1e6:.0f} M MAC/s; engine {mac / max(t['engine_cycles'], 1):.2f} MAC/clock) | "
+              f"NumPy float32 np.convolve {npr / 1e6:.2f} M outputs/s")

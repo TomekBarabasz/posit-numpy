@@ -420,3 +420,55 @@ def test_positarray_func_on_fake():
         got = np.exp(x)
         assert got.shape == x.shape and got.equal_bits(want) and vec.table_loads == 1
         assert np.exp(x.to_device()).on_device
+
+
+# ---- 5.4: FIR / correlate through GEMV with a window -------------------------------------------------
+
+@pytest.mark.parametrize("cols", [1, 4])
+@pytest.mark.parametrize("n", [8, 16, 32])
+@pytest.mark.parametrize("N,T", [(1, 1), (5, 1), (10, 3), (33, 7), (200, 13), (50, 61), (9, 9)])
+def test_correlate_matches_sw(n, N, T, cols):
+    hw, vec, mem = make_gemv(n, cols=cols)
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(N * 100 + T)
+    x = rnd.integers(0, 1 << n, N)
+    h = rnd.integers(0, 1 << n, T)
+    x[rnd.random(N) < 0.05] = hw.config.nar                       # NaR in the signal stays in its windows
+    vec.mem_log.clear()
+    got = hw.correlate(x, h)
+    assert np.array_equal(got, sw.correlate(x, h)), (N, T, cols)
+    if T + min(cols, N - T + 1) - 1 <= 64:
+        assert hw.stats()["fallback"] == 0 and vec.regs[regs.GEMV_MODE] == 0
+
+
+def test_correlate_blocks_and_long_taps():
+    hw, vec, mem = make_gemv(16, buf_size=1 << 15, cols=4)        # small heap: several blocks of rows
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(5)
+    x = rnd.integers(0, 1 << 16, 3000)
+    h = rnd.integers(0, 1 << 16, 20)
+    vec.mem_log.clear()
+    assert np.array_equal(hw.correlate(x, h), sw.correlate(x, h))
+    gemvs = [cmd for cmd in vec.mem_log if cmd[3] >> regs.MEM_CFG_WRITE & 1]
+    assert len(gemvs) > 1 and hw.stats()["fallback"] == 0
+    assert hw.heap.stats()["blocks"] == 0
+    long_h = rnd.integers(0, 1 << 16, 70)                           # > gemv_max_k - cols + 1: software
+    assert np.array_equal(hw.correlate(x[:200], long_h), sw.correlate(x[:200], long_h))
+    assert hw.stats()["fallback"] == 200 - 70 + 1
+
+
+def test_positarray_convolve_on_fake():
+    import positnp as pn
+    hw, vec, mem = make_gemv(16, cols=4)
+    rnd = np.random.default_rng(8)
+    a = pn.array(rnd.standard_normal(300), pn.P16)
+    v = pn.array(rnd.standard_normal(9), pn.P16)
+    want = {m: np.convolve(a, v, m) for m in ("full", "same", "valid")}
+    with pn.using(hw):
+        vec.mem_log.clear()
+        for m, w in want.items():
+            assert np.convolve(a, v, m).equal_bits(w), m
+            assert np.convolve(v, a, m).equal_bits(w), m                 # commutes
+        assert np.correlate(a, v).equal_bits(pn.correlate(a, v, "valid"))
+        assert any(cmd[3] >> regs.MEM_CFG_WRITE & 1 for cmd in vec.mem_log)   # ran on the engine
+        assert hw.stats()["fallback"] == 0
