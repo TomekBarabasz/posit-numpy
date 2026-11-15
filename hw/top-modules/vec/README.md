@@ -237,6 +237,33 @@ silnikach (kształty 1×1×1 … 17×4096×2, każdy element bit w bit z `PositS
   Szybszy matmul wymagałby kilku par quire na kolumny B naraz (np. 2–4 kolumny w jednym przejściu A).
 - To dużo mniej niż BLAS float32 na A53, ale każdy element jest dokładnym iloczynem skalarnym z jednym zaokrągleniem.
 
+### P kolumn naraz (wersja 5.2)
+
+Jedno przejście A liczy P kolumn wyniku: każda kolumna ma własny bufor x i własną parę quire, element A[i, j]
+idzie jednocześnie do wszystkich aktywnych kolumn — **P mnożeń z dodawaniem na takt** przy tym samym odczycie A.
+
+```
+OP_XLOAD (MEM_LEN = K · cols):  x_0[0..K), x_1[0..K), ... po kolei --> bufory x_0 .. x_{cols-1}
+OP_GEMV:  A[i, j] --+--> x_0[j] --> quire (bank i mod 2, kolumna 0) --> kolejka --+
+                    +--> x_1[j] --> quire (bank i mod 2, kolumna 1) --> kolejka --+--> wierszami: y[i, 0..cols) --> zapis
+                    ...                                                            |   (M · cols elementów)
+                    +--> x_{P-1}[j] -----------------------------------------------+
+```
+
+- `GEMV_COLS` (0xD4, RW) = cols ≤ P (po resecie 1: sterownik 5.1 działa bez zmian), `GEMV_CFG[23:16]` = P;
+  XLOAD czyta cols kolumn po K elementów (`MEM_LEN = K · cols`), GEMV zapisuje Y (M × cols) wierszami;
+  `err_shape` także dla XLOAD `MEM_LEN ≠ K · cols` i cols poza 1..P;
+- element wchodzi do banku tylko razem do wszystkich aktywnych kolumn (każda gotowa i z miejscem w kolejce),
+  więc kolumny idą krok w krok; scalanie wyników: wiersz po wierszu, w wierszu kolumny po kolei;
+- koszt: 2 P quire i P buforów x (posit32, P = 4: 8 quire, 16 BRAM36); `VecKv260 --gemv-cols P`, domyślnie 4;
+  OOC: `vec_p32_mem_L2_gemv4`;
+- Python: `matmul` dzieli B na grupy po P kolumn (Bᵀ grupami w pamięci urządzenia, C grupami wierszy),
+  jedna para XLOAD + GEMV na grupę; `hw.gemv_cols`.
+
+Symulacja: wszystkie kształty z `mem_gemv` dla P = 4 (cols = 4, 1, 3, 2) na posit32 ×1 / ×2, posit16 ×4,
+posit8 ×8 bit w bit z `QuireRef`; **64 × 64 posit32 na 4 kolumny: 4 160 taktów = 3,94 MAC / takt**
+(jedna kolumna: 4 141 taktów, 0,99). Na płytce oczekiwane ok. 390 M MAC/s na silnik.
+
 ## Pamięć urządzenia: tablice bez kopii
 
 Przy szerszym silniku posit32 ogranicza już tylko procesor (kopie do i z bufora). Bufor u-dma-buf silnika z masterem

@@ -25,7 +25,7 @@ object PositVecMemPlan {
   val plan : Seq[Testpoint] = Seq(
     Testpoint("mem_regs", Stage.V1,
       "Wersja 5.0, CONFIG.has_master, rejestry MEM_*",
-      checking = Seq("ID_VERSION == 0x50530501", "CONFIG bit 14 i maska z FMA3 (bit 12)",
+      checking = Seq("ID_VERSION == 0x50530502", "CONFIG bit 14 i maska z FMA3 (bit 12)",
                      "MEM_*: odczyt == zapis, po resecie pusty zakres [0, 0)")),
 
     Testpoint("mem_elementwise", Stage.V1,
@@ -72,21 +72,23 @@ object PositVecMemPlan {
       checking = Seq("MEM_CYCLES <= 1,1 * len + 200 (1 element / takt mimo dwoch strumieni odczytu i zapisu)")),
 
     Testpoint("mem_gemv", Stage.V1,
-      "Etap 7a: y = A x dokladnie (OP_XLOAD, OP_GEMV), posit32 x 1 / x 2, posit16 x 4, posit8 x 8",
+      "Etap 7a: Y = A X dokladnie (OP_XLOAD, OP_GEMV), posit32 x 1 / x 2, posit16 x 4, posit8 x 8; P = 1 i 4 kolumny",
       stimulus = Seq("M x K: 1x1, 1x5, 3x1, 2x2, 5x3, 7x17, 33x10, 9x maxK i losowe; K = 1 (zaokraglenia co takt)",
                      "elementy A z rozkladu stress (NaR, zera, skrajne skale), losowe opoznienia pamieci"),
-      checking = Seq("y[i] == QuireRef.round(sum_j A[i, j] x[j]) bit w bit, kolejnosc wierszy",
-                     "bajty za y nietkniete", "CONFIG.has_gemv i maska OP 13/14, GEMV_CFG == maxK, wersja 5.1",
+      checking = Seq("y[i, c] == QuireRef.round(sum_j A[i, j] x_c[j]) bit w bit, wierszami, dla cols = 1 .. P",
+                     "bajty za y nietkniete", "CONFIG.has_gemv i maska OP 13/14, GEMV_CFG == P << 16 | maxK, wersja 5.2",
                      "redukcje (dot) po gemv nadal poprawne")),
 
     Testpoint("mem_gemv_reject", Stage.V1,
       "gemv z niepasujacym ksztaltem",
-      stimulus = Seq("MEM_LEN != MEM_WLEN * GEMV_K", "GEMV_K = 0", "GEMV_K > maxK", "XLOAD dluzszy niz maxK"),
+      stimulus = Seq("MEM_LEN != MEM_WLEN * GEMV_K", "GEMV_K = 0", "GEMV_K > maxK", "XLOAD MEM_LEN != K * cols",
+                     "GEMV_COLS = 0 albo > P"),
       checking = Seq("MEM_STATUS: done + err_shape, zero transakcji AR / AW")),
 
     Testpoint("mem_gemv_throughput", Stage.V2,
-      "gemv 64 x 64 posit32 bez przerw w pamieci",
-      checking = Seq("MEM_CYCLES <= 1,1 * M * K + 200 (1 element / takt, zaokraglenie wiersza w cieniu nastepnego)"))
+      "gemv 64 x 64 posit32 bez przerw w pamieci, P = 1 i P = 4 kolumny",
+      checking = Seq("MEM_CYCLES <= 1,1 * M * K + 200 (1 element A / takt, zaokraglenie wiersza w cieniu nastepnego)",
+                     "P = 4: 4 kolumny w tym samym czasie (4 MAC / takt)"))
   )
 }
 
@@ -104,10 +106,10 @@ class PositVecMemTestplan extends TestplanSuite {
   lazy val m16 = SimEnv(Conventions.spinal, "vecmem_16").compile(new PositVecAxi(cfgFor(p16, 1), withMaster = true))
   lazy val m8  = SimEnv(Conventions.spinal, "vecmem_8").compile(new PositVecAxi(cfgFor(p8, 1), withMaster = true))
   val GEMV_MAXK = 64
-  def gemvd(c : PositConfig, l : Int) =
-    SimEnv(Conventions.spinal, s"vecmem_gemv_${c.n}_L$l").compile(
+  def gemvd(c : PositConfig, l : Int, cols : Int = 1) =
+    SimEnv(Conventions.spinal, s"vecmem_gemv_${c.n}_L${l}_P$cols").compile(
       new PositVecAxi(cfgFor(c, 1), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l)),
-                      withGemv = true, gemvMaxK = GEMV_MAXK))
+                      withGemv = true, gemvMaxK = GEMV_MAXK, gemvCols = cols))
   def laned(c : PositConfig, l : Int) =
     SimEnv(Conventions.spinal, s"vecmem_${c.n}_L$l").compile(
       new PositVecAxi(cfgFor(c, 2), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l))))
@@ -152,12 +154,14 @@ class PositVecMemTestplan extends TestplanSuite {
       s
     }
 
-    /** x -> bufor (XLOAD), potem y = A x (GEMV); zwraca MEM_STATUS GEMV. */
-    def gemv(m : Int, k : Int, a : Long, x : Long, y : Long, xlen : Int = -1) : Long = {
-      val s0 = run(OP_XLOAD, if (xlen < 0) k else xlen, x)
-      assert((s0 & 0x3c) == 0, f"XLOAD: MEM_STATUS 0x$s0%x")
+    /** Kolumny x (cols po K elementow, po kolei pod x) -> bufory (XLOAD), potem Y = A X (GEMV, M x cols
+      * wierszami pod y); zwraca MEM_STATUS GEMV. */
+    def gemv(m : Int, k : Int, a : Long, x : Long, y : Long, cols : Int = 1) : Long = {
       wr(GEMV_K, k)
+      wr(GEMV_COLS, cols)
       wr(MEM_WLEN, m)
+      val s0 = run(OP_XLOAD, k.toLong * cols, x)
+      assert((s0 & 0x3c) == 0, f"XLOAD: MEM_STATUS 0x$s0%x")
       run(OP_GEMV, m.toLong * k, a, None, None, Some(y))
     }
 
@@ -198,7 +202,7 @@ class PositVecMemTestplan extends TestplanSuite {
 
   testpoint("mem_regs") {
     sim(m32, "mem_regs") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530501L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == 0x50530502L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
       val cfg = e.rd(CONFIG)
       assert(((cfg >> CONFIG_HAS_MASTER) & 1) == 1 && ((cfg >> (16 + OP_FMA3)) & 1) == 1, f"CONFIG 0x$cfg%x")
       for ((r, v) <- Seq(MEM_LEN -> 123L, MEM_SRC_A -> 0x1230L, MEM_SRC_B -> 0x4560L, MEM_SRC_C -> 0x7890L,
@@ -420,34 +424,40 @@ class PositVecMemTestplan extends TestplanSuite {
 
   // ---- etap 7a: gemv ------------------------------------------------------------------------
 
-  def gemvRef(c : PositConfig, a : Seq[BigInt], x : Seq[BigInt], m : Int, k : Int) : Seq[BigInt] =
-    (0 until m).map { i =>
-      val (q, nar) = QuireRef.accumulate(c, (0 until k).iterator.map(j => (a(i * k + j), Some(x(j)))))
+  /** Y (M x cols, wierszami) = A (M x K) X, kolumna c w x(c * K until (c + 1) * K). */
+  def gemvRef(c : PositConfig, a : Seq[BigInt], x : Seq[BigInt], m : Int, k : Int, cols : Int = 1) : Seq[BigInt] =
+    for (i <- 0 until m; cc <- 0 until cols) yield {
+      val (q, nar) = QuireRef.accumulate(c, (0 until k).iterator.map(j => (a(i * k + j), Some(x(cc * k + j)))))
       QuireRef.round(c, q, nar)._1
     }
 
-  for ((c, l) <- Seq((p32, 1), (p32, 2), (p16, 4), (p8, 8))) {
-    testpoint("mem_gemv", s"p${c.n}_L$l") {
-      sim(gemvd(c, l), s"mem_gemv_${c.n}_$l") { e =>
+  for ((c, l, pc) <- Seq((p32, 1, 1), (p32, 2, 1), (p32, 1, 4), (p32, 2, 4), (p16, 4, 4), (p8, 8, 4))) {
+    testpoint("mem_gemv", s"p${c.n}_L${l}_P$pc") {
+      sim(gemvd(c, l, pc), s"mem_gemv_${c.n}_${l}_$pc") { e =>
         val cfg = e.rd(CONFIG)
         assert(((cfg >> CONFIG_HAS_GEMV) & 1) == 1 && ((cfg >> (16 + OP_XLOAD)) & 1) == 1 &&
                ((cfg >> (16 + OP_GEMV)) & 1) == 1, f"CONFIG 0x$cfg%x")
-        assert(e.rd(GEMV_CFG) == GEMV_MAXK, s"GEMV_CFG ${e.rd(GEMV_CFG)}")
-        for ((r, v) <- Seq(GEMV_K -> 17L, MEM_WLEN -> 1234L)) { e.wr(r, v); assert(e.rd(r) == v, f"rejestr 0x$r%x") }
+        assert(e.rd(GEMV_CFG) == ((pc.toLong << 16) | GEMV_MAXK), s"GEMV_CFG ${e.rd(GEMV_CFG)}")
+        assert(e.rd(GEMV_COLS) == 1, "GEMV_COLS po resecie")
+        for ((r, v) <- Seq(GEMV_K -> 17L, MEM_WLEN -> 1234L, GEMV_COLS -> pc.toLong)) {
+          e.wr(r, v); assert(e.rd(r) == v, f"rejestr 0x$r%x")
+        }
         val shapes = Seq((1, 1), (1, 5), (3, 1), (2, 2), (5, 3), (7, 17), (33, 10), (9, GEMV_MAXK), (40, 1)) ++
           Seq.fill(3)((1 + e.rnd.nextInt(30), 1 + e.rnd.nextInt(GEMV_MAXK)))
-        for ((m, k) <- shapes) {
-          val (a, x, y) = (e.addr(0, m * k), e.addr(1, k), e.addr(2, m))
+        for (((m, k), t) <- shapes.zipWithIndex) {
+          val cols = if (pc == 1) 1 else Seq(pc, 1, pc - 1, 2)(t % 4) max 1   // tez mniej kolumn niz P
+          val (a, x, y) = (e.addr(0, m * k), e.addr(1, k * cols), e.addr(2, m * cols))
           val as = stress(c, m * k, e.rnd).toSeq.map(_._1)
-          val xs = stress(c, k, e.rnd).toSeq.map(_._2)
+          val xs = stress(c, k * cols, e.rnd).toSeq.map(_._2)
           e.put(a, as); e.put(x, xs)
           val guard = Seq.fill(32)(BigInt(0x5a))
-          mem(e).writeWords(y + e.bytes.toLong * m, 1, guard)
+          val ny = m * cols
+          mem(e).writeWords(y + e.bytes.toLong * ny, 1, guard)
           e.wr(CTRL, 1 << CTRL_CLEAR_COUNTERS)
-          val s = e.gemv(m, k, a, x, y)
-          assert((s & 0x3c) == 0, f"gemv ${m}x$k: MEM_STATUS 0x$s%x")
-          assertSeq(s"gemv L=$l ${m}x$k", e.get(y, m), gemvRef(c, as, xs, m, k))
-          assert(mem(e).readWords(y + e.bytes.toLong * m, 1, 32) == guard, s"gemv ${m}x$k: zapis za y")
+          val s = e.gemv(m, k, a, x, y, cols)
+          assert((s & 0x3c) == 0, f"gemv ${m}x$k x $cols: MEM_STATUS 0x$s%x")
+          assertSeq(s"gemv L=$l P=$pc ${m}x$k x $cols", e.get(y, ny), gemvRef(c, as, xs, m, k, cols))
+          assert(mem(e).readWords(y + e.bytes.toLong * ny, 1, 32) == guard, s"gemv ${m}x$k x $cols: zapis za y")
         }
         // po gemv zwykla redukcja
         val len = 50
@@ -474,25 +484,35 @@ class PositVecMemTestplan extends TestplanSuite {
       shape("len != M * K", 4, 8, 31)
       shape("K = 0", 4, 0, 0 + 1)
       shape("K > maxK", 1, GEMV_MAXK + 1, GEMV_MAXK + 1)
-      val s = e.run(OP_XLOAD, GEMV_MAXK + 1, BASE)
-      assert(((s >> MEM_ST_ERR_SHAPE) & 1) == 1, f"XLOAD > maxK: MEM_STATUS 0x$s%x")
+      def xload(label : String, k : Long, cols : Long, len : Long) : Unit = {
+        e.wr(GEMV_K, k); e.wr(GEMV_COLS, cols)
+        val s = e.run(OP_XLOAD, len, BASE)
+        assert(((s >> MEM_ST_ERR_SHAPE) & 1) == 1 && (s & 1) == 0, f"XLOAD $label: MEM_STATUS 0x$s%x")
+      }
+      xload("> maxK", GEMV_MAXK + 1, 1, GEMV_MAXK + 1)
+      xload("len != K * cols", 8, 1, 9)
+      xload("cols = 0", 8, 0, 8)
+      xload("cols > P", 8, 2, 16)                 // P = 1
+      e.wr(GEMV_COLS, 2); e.wr(GEMV_K, 4)
+      shape("GEMV cols > P", 2, 4, 8)
+      e.wr(GEMV_COLS, 1)
       e.cd.waitSampling(50)
       assert(e.mem.arCount == ar0 && e.mem.awCount == aw0, "transakcje po odrzuceniu")
     }
   }
 
-  testpoint("mem_gemv_throughput") {
-    sim(gemvd(p32, 1), "mem_gemv_throughput") { e =>
+  for (pc <- Seq(1, 4)) testpoint("mem_gemv_throughput", s"P$pc") {
+    sim(gemvd(p32, 1, pc), s"mem_gemv_throughput_P$pc") { e =>
       e.mem.stall = 0.0
       e.mem.maxDelay = 20
       val (m, k) = (64, GEMV_MAXK)
-      val as = e.rand(m * k); val xs = e.rand(k)
+      val as = e.rand(m * k); val xs = e.rand(k * pc)
       e.put(BASE, as); e.put(BASE + 0x10000, xs)
-      assert((e.gemv(m, k, BASE, BASE + 0x10000, BASE + 0x20000) & 0x3c) == 0)
-      assertSeq("gemv 64x64", e.get(BASE + 0x20000, m), gemvRef(e.c, as, xs, m, k))
+      assert((e.gemv(m, k, BASE, BASE + 0x10000, BASE + 0x20000, pc) & 0x3c) == 0)
+      assertSeq(s"gemv 64x64 x $pc", e.get(BASE + 0x20000, m * pc), gemvRef(e.c, as, xs, m, k, pc))
       val cyc = e.rd(MEM_CYCLES)
-      assert(cyc <= 1.1 * m * k + 200, s"gemv ${m}x$k: $cyc taktow")
-      info(f"gemv posit32 ${m}x$k: $cyc taktow (${m * k.toDouble / cyc}%.3f MAC / takt)")
+      assert(cyc <= 1.1 * m * k + 200, s"gemv ${m}x$k x $pc: $cyc taktow")
+      info(f"gemv posit32 ${m}x$k, $pc kolumn: $cyc taktow (${m * k.toDouble * pc / cyc}%.3f MAC / takt)")
     }
   }
 }

@@ -15,6 +15,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `vec_p32_mem/` | etap 6: `PositVecAxi` 5.0 z masterem AXI4 (`m_axi` 128 b, FMA3) zamiast AXI4-Stream |
 | `vec_p32_mem_L2/` | to samo z 2 torami elementowymi (2 elementy / takt) |
 | `vec_p32_mem_L2_gemv/` | etap 7a: L2 z gemv (bufor x 4096 elementów, drugi quire, kolejki wyników) |
+| `vec_p32_mem_L2_gemv4/` | 5.2: L2 z gemv na 4 kolumny naraz (4 bufory x, 8 quire) — koszt kolumn |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 

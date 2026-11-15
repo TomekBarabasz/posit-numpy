@@ -325,8 +325,10 @@ class PositVecHw(PositAluHw):
         self.engine: Optional[VecEngine] = None
         self.fma3 = self.master and bool(self.op_mask >> regs.OP_FMA3 & 1)
         # stage 7a: exact gemv on the quire (x buffer of gemv_max_k elements; 0: not in this bitstream)
-        self.gemv_max_k = self.read(regs.GEMV_CFG) & 0xFFFF \
-            if self.master and self.version >= 0x0501 and cfg >> regs.CONFIG_HAS_GEMV & 1 else 0
+        gcfg = self.read(regs.GEMV_CFG) if self.master and self.version >= 0x0501 and cfg >> regs.CONFIG_HAS_GEMV & 1 else 0
+        self.gemv_max_k = gcfg & 0xFFFF
+        # 5.2: P columns of B per pass of A (each with its own pair of quires): P multiply-adds per clock
+        self.gemv_cols = max(1, gcfg >> 16 & 0xFF) if self.gemv_max_k and self.version >= 0x0502 else 1
         self.in_dtype = self.IN_DTYPE[n]
         self.out_dtype = self.OUT_DTYPE[n]
         self.in_bytes = 2 * n // 8
@@ -862,11 +864,12 @@ class PositVecHw(PositAluHw):
     def matmul(self, a, b) -> np.ndarray:
         """C = A B on raw bits, A (M, K), B (K, N): every C[i, j] exact in the quire, rounded once.
 
-        With OP_GEMV (5.1, K <= gemv_max_k): the columns of B are loaded one after another into the
-        engine's x buffer (OP_XLOAD) and each streams A through two alternating quires (OP_GEMV),
-        1 multiply-add per clock. A, B^T and C stay in device memory for the whole product (A in place
-        when it already is a device array); matrices larger than the heap go in blocks of rows / columns.
-        Without gemv, or K > gemv_max_k: one quire dot per element (exact as well, slower).
+        With OP_GEMV (5.1, K <= gemv_max_k): groups of P = gemv_cols columns of B (5.2; 5.1: P = 1) are
+        loaded into the engine's x buffers (OP_XLOAD) and each group streams A once through P pairs of
+        alternating quires (OP_GEMV): P multiply-adds per clock. A, B^T and C stay in device memory for the
+        whole product (A in place when it already is a device array); matrices larger than the heap go in
+        blocks of rows / columns. Without gemv, or K > gemv_max_k: one quire dot per element (exact as
+        well, slower).
         """
         A, B = np.asarray(a), np.asarray(b)
         if A.ndim != 2 or B.ndim != 2 or A.shape[1] != B.shape[0]:
@@ -881,23 +884,26 @@ class PositVecHw(PositAluHw):
         t_start = time.perf_counter()
         timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
         by = self.out_bytes
-        per = regs.MEM_BEAT_BYTES // by                       # elements per 16 B: column starts aligned
+        P = self.gemv_cols
+        per = regs.MEM_BEAT_BYTES // by                       # elements per 16 B: group starts aligned
         pad = lambda n: -(-n // per) * per                    # noqa: E731
+        groups = lambda n: -(-n // P)                         # noqa: E731
         a_dev = self.heap.offset_of(A)                        # A already in device memory: read in place
-        kp = pad(K)
-        rows = min(M, max(1, 0xFFFF0000 // K))                # MEM_LEN is 32 bits
+        gp = pad(P * K)                                       # B^T: one group of P columns (P x K) per gp elements
+        rows = min(M, max(1, 0xFFFF0000 // K), max(1, 0xFFFFFFFF // P))   # MEM_LEN and M * cols are 32 bits
         cols = N
         while True:                                           # largest blocks the heap can hold
-            keep = []
             ab = None if (a_dev is not None and rows == M) else self.heap.empty(rows * K, self.out_dtype)
-            bt = self.heap.empty(cols * kp, self.out_dtype)
-            yb = self.heap.empty(cols * pad(rows), self.out_dtype)
+            bt = self.heap.empty(groups(cols) * gp, self.out_dtype)
+            yb = self.heap.empty(groups(cols) * pad(rows * P), self.out_dtype)
             keep = [v for v in (ab, bt, yb) if v is not None]
             if bt is not None and yb is not None and (ab is not None or (a_dev is not None and rows == M)):
                 break
             del keep, ab, bt, yb
-            if rows > 1 and rows * K >= cols * kp:
+            if rows > 1 and rows * K >= groups(cols) * gp:
                 rows = -(-rows // 2)
+            elif cols > P:
+                cols = groups(cols) // 2 * P if groups(cols) > 1 else P
             elif cols > 1:
                 cols = -(-cols // 2)
             elif rows > 1:
@@ -906,17 +912,18 @@ class PositVecHw(PositAluHw):
                 return self._matmul_dots(A, B, out)          # not even one row / column fits: quire dots
         Av = A if ab is None else self._bits(A).reshape(M, K)
         Bv = self._bits(B).reshape(K, N)
-        mp = pad(rows)
-        bt2, yb2 = bt.reshape(cols, kp), yb.reshape(cols, mp)
+        yp = pad(rows * P)                                    # C: one group (rows x P, row-major) per yp elements
         off_bt, off_y = self.heap.offset_of(bt), self.heap.offset_of(yb)
         cycles = 0
         for c0 in range(0, N, cols):
             nc = min(cols, N - c0)
+            parts = [(g, c0 + g * P, min(P, nc - g * P)) for g in range(groups(nc))]   # (group, first column, width)
             t = time.perf_counter()
-            bt2[:nc, :K] = Bv[:, c0:c0 + nc].T
+            for g, cc, w in parts:
+                bt[g * gp:g * gp + w * K] = Bv[:, cc:cc + w].T.ravel()
             timing["pack"] += time.perf_counter() - t
             t = time.perf_counter()
-            self.buf.sync_for_device(off_bt, nc * kp * by, 1)
+            self.buf.sync_for_device(off_bt, len(parts) * gp * by, 1)
             timing["sync_device"] += time.perf_counter() - t
             for r0 in range(0, M, rows):
                 nr = min(rows, M - r0)
@@ -929,22 +936,25 @@ class PositVecHw(PositAluHw):
                     off_a = self.heap.offset_of(ab)
                 t = time.perf_counter()
                 self.buf.sync_for_device(off_a, nr * K * by, 1)
-                self.buf.sync_for_device(off_y, nc * mp * by, 0)
+                self.buf.sync_for_device(off_y, len(parts) * yp * by, 0)
                 timing["sync_device"] += time.perf_counter() - t
                 t = time.perf_counter()
                 self.write(regs.GEMV_K, K)
                 self.write(regs.MEM_WLEN, nr)
-                for j in range(nc):
+                for g, cc, w in parts:
+                    if self.version >= 0x0502:
+                        self.write(regs.GEMV_COLS, w)
                     self.write(regs.OP, regs.OP_XLOAD)
-                    cycles += self._mem_cmd(K, [off_bt + j * kp * by, 0, 0], None, False, False)
+                    cycles += self._mem_cmd(w * K, [off_bt + g * gp * by, 0, 0], None, False, False)
                     self.write(regs.OP, regs.OP_GEMV)
-                    cycles += self._mem_cmd(nr * K, [off_a, 0, 0], off_y + j * mp * by, False, False)
+                    cycles += self._mem_cmd(nr * K, [off_a, 0, 0], off_y + g * yp * by, False, False)
                 timing["dma"] += time.perf_counter() - t
                 t = time.perf_counter()
-                self.buf.sync_for_cpu(off_y, nc * mp * by, 2)
+                self.buf.sync_for_cpu(off_y, len(parts) * yp * by, 2)
                 timing["sync_cpu"] += time.perf_counter() - t
                 t = time.perf_counter()
-                out[r0:r0 + nr, c0:c0 + nc] = yb2[:nc, :nr].T
+                for g, cc, w in parts:
+                    out[r0:r0 + nr, cc:cc + w] = yb[g * yp:g * yp + nr * w].reshape(nr, w)
                 timing["copy_out"] += time.perf_counter() - t
         del keep
         timing["total"] = time.perf_counter() - t_start

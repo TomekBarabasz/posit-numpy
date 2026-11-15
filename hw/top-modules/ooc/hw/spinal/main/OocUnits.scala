@@ -24,6 +24,7 @@ import posit.kv260.PositGen.{DividerJob, UnitJob}
 //    hw/gen/vec_p32_mem/ etap 6: PositVecAxi 5.0 z masterem AXI4 (m_axi 128 b, FMA3), bez AXI4-Stream
 //    hw/gen/vec_p32_mem_L2/ to samo z 2 torami elementowymi (2 elementy / takt)
 //    hw/gen/vec_p32_mem_L2_gemv/ etap 7a: L2 z gemv (bufor x 4096 elementow, drugi quire)
+//    hw/gen/vec_p32_mem_L2_gemv4/ 5.2: L2 z gemv na 4 kolumny (4 bufory x, 8 quire)
 //
 //  sbt "top-ooc/runMain posit.top.ooc.OocUnits"
 //  Synteza: vivado/ooc_synth.tcl (opis w README.md).
@@ -60,5 +61,10 @@ object OocUnits {
       .generateVerilog(new PositVecAxi(PositAluConfig(PositConfig(32), PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full,
                                                       sqrt = true, fma = true, convert = true, fma3 = true), withMaster = true,
                                        memCfg = Some(MemMoverConfig(32, lanes = 2)), withGemv = true, gemvMaxK = 4096))
+    Kv260.spinal.copy(targetDirectory = "hw/gen/vec_p32_mem_L2_gemv4")
+      .generateVerilog(new PositVecAxi(PositAluConfig(PositConfig(32), PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full,
+                                                      sqrt = true, fma = true, convert = true, fma3 = true), withMaster = true,
+                                       memCfg = Some(MemMoverConfig(32, lanes = 2)), withGemv = true, gemvMaxK = 4096,
+                                       gemvCols = 4))
   }
 }

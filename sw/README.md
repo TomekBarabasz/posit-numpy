@@ -57,7 +57,8 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
   każdy element to dokładny iloczyn skalarny w quire, zaokrąglony raz. Na silniku z gemv (PositVecAxi 5.1,
   `VecKv260 --gemv-k`, domyślnie K ≤ 4096) kolumny B idą kolejno do bufora x silnika (OP_XLOAD), a A przechodzi
   przez dwa quire na zmianę (OP_GEMV, 1 mnożenie z dodawaniem na takt); A, Bᵀ i C siedzą w pamięci urządzenia
-  (A już na urządzeniu: `A.to_device()` — czytana w miejscu). K > 4096, brak gemv albo pełna pamięć urządzenia:
+  (A już na urządzeniu: `A.to_device()` — czytana w miejscu). Silnik 5.2 liczy P kolumn B na jedno przejście A
+  (`hw.gemv_cols`, domyślnie 4: 4 MAC na takt). K > 4096, brak gemv albo pełna pamięć urządzenia:
   jeden dot quire na element (też dokładnie). `hw.time_matmul(m, k, n)` mierzy MAC/s.
 - `pn.array(tablica float32)` i `x.to_float32()` / `x.astype(np.float32)` dla posit32 idą przez F2P / P2F backendu
   (bez rzutowania przez float64); dla innych formatów przez `vecops`.
