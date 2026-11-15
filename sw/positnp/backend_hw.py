@@ -324,6 +324,9 @@ class PositVecHw(PositAluHw):
         self.buf = buf
         self.engine: Optional[VecEngine] = None
         self.fma3 = self.master and bool(self.op_mask >> regs.OP_FMA3 & 1)
+        # stage 7a: exact gemv on the quire (x buffer of gemv_max_k elements; 0: not in this bitstream)
+        self.gemv_max_k = self.read(regs.GEMV_CFG) & 0xFFFF \
+            if self.master and self.version >= 0x0501 and cfg >> regs.CONFIG_HAS_GEMV & 1 else 0
         self.in_dtype = self.IN_DTYPE[n]
         self.out_dtype = self.OUT_DTYPE[n]
         self.in_bytes = 2 * n // 8
@@ -606,7 +609,9 @@ class PositVecHw(PositAluHw):
                 raise PositAluError(f"MEM command did not finish (MEM_STATUS 0x{st:x}, {self._mem_len} elements)")
         errs = [n for n, b in (("address outside the buffer", regs.MEM_ST_ERR_RANGE),
                                ("address not aligned to 16 B", regs.MEM_ST_ERR_ALIGN),
-                               ("AXI error response", regs.MEM_ST_ERR_RESP)) if st >> b & 1]
+                               ("AXI error response", regs.MEM_ST_ERR_RESP),
+                               ("gemv shape (MEM_LEN != MEM_WLEN * GEMV_K or K out of range)",
+                                regs.MEM_ST_ERR_SHAPE)) if st >> b & 1]
         if errs:
             raise PositAluError(f"MEM command rejected: {', '.join(errs)} (MEM_STATUS 0x{st:x})")
         return self.read(regs.MEM_CYCLES)
@@ -844,6 +849,130 @@ class PositVecHw(PositAluHw):
             raw = (raw << 32) | self.read(regs.QUIRE + 4 * k)
         q = 0 if nar else ref.quire_from_raw(self.config, raw)
         return bits, flags, q, nar
+
+    # ---- stage 7a: gemv / matmul on the quire -----------------------------------------------------
+
+    def gemv(self, a, x) -> np.ndarray:
+        """y = A x on raw bits, A (M, K), x (K,): every y[i] the exact quire of row i, rounded once."""
+        a2 = np.asarray(a)
+        if a2.ndim != 2 or np.ndim(x) != 1:
+            raise ValueError(f"gemv: A (M, K) and x (K,), got {a2.shape} and {np.shape(x)}")
+        return self.matmul(a2, np.asarray(x).reshape(-1, 1)).reshape(a2.shape[0])
+
+    def matmul(self, a, b) -> np.ndarray:
+        """C = A B on raw bits, A (M, K), B (K, N): every C[i, j] exact in the quire, rounded once.
+
+        With OP_GEMV (5.1, K <= gemv_max_k): the columns of B are loaded one after another into the
+        engine's x buffer (OP_XLOAD) and each streams A through two alternating quires (OP_GEMV),
+        1 multiply-add per clock. A, B^T and C stay in device memory for the whole product (A in place
+        when it already is a device array); matrices larger than the heap go in blocks of rows / columns.
+        Without gemv, or K > gemv_max_k: one quire dot per element (exact as well, slower).
+        """
+        A, B = np.asarray(a), np.asarray(b)
+        if A.ndim != 2 or B.ndim != 2 or A.shape[1] != B.shape[0]:
+            raise ValueError(f"matmul of shapes {A.shape} and {B.shape}")
+        M, K = A.shape
+        N = B.shape[1]
+        out = np.zeros((M, N), self.out_dtype)
+        if M == 0 or N == 0 or K == 0:
+            return out
+        if not self.gemv_max_k or K > self.gemv_max_k or self.heap is None:
+            return self._matmul_dots(A, B, out)
+        t_start = time.perf_counter()
+        timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
+        by = self.out_bytes
+        per = regs.MEM_BEAT_BYTES // by                       # elements per 16 B: column starts aligned
+        pad = lambda n: -(-n // per) * per                    # noqa: E731
+        a_dev = self.heap.offset_of(A)                        # A already in device memory: read in place
+        kp = pad(K)
+        rows = min(M, max(1, 0xFFFF0000 // K))                # MEM_LEN is 32 bits
+        cols = N
+        while True:                                           # largest blocks the heap can hold
+            keep = []
+            ab = None if (a_dev is not None and rows == M) else self.heap.empty(rows * K, self.out_dtype)
+            bt = self.heap.empty(cols * kp, self.out_dtype)
+            yb = self.heap.empty(cols * pad(rows), self.out_dtype)
+            keep = [v for v in (ab, bt, yb) if v is not None]
+            if bt is not None and yb is not None and (ab is not None or (a_dev is not None and rows == M)):
+                break
+            del keep, ab, bt, yb
+            if rows > 1 and rows * K >= cols * kp:
+                rows = -(-rows // 2)
+            elif cols > 1:
+                cols = -(-cols // 2)
+            elif rows > 1:
+                rows = -(-rows // 2)
+            else:
+                return self._matmul_dots(A, B, out)          # not even one row / column fits: quire dots
+        Av = A if ab is None else self._bits(A).reshape(M, K)
+        Bv = self._bits(B).reshape(K, N)
+        mp = pad(rows)
+        bt2, yb2 = bt.reshape(cols, kp), yb.reshape(cols, mp)
+        off_bt, off_y = self.heap.offset_of(bt), self.heap.offset_of(yb)
+        cycles = 0
+        for c0 in range(0, N, cols):
+            nc = min(cols, N - c0)
+            t = time.perf_counter()
+            bt2[:nc, :K] = Bv[:, c0:c0 + nc].T
+            timing["pack"] += time.perf_counter() - t
+            t = time.perf_counter()
+            self.buf.sync_for_device(off_bt, nc * kp * by, 1)
+            timing["sync_device"] += time.perf_counter() - t
+            for r0 in range(0, M, rows):
+                nr = min(rows, M - r0)
+                if ab is None:
+                    off_a = a_dev
+                else:
+                    t = time.perf_counter()
+                    ab[:nr * K] = Av[r0:r0 + nr].ravel()
+                    timing["pack"] += time.perf_counter() - t
+                    off_a = self.heap.offset_of(ab)
+                t = time.perf_counter()
+                self.buf.sync_for_device(off_a, nr * K * by, 1)
+                self.buf.sync_for_device(off_y, nc * mp * by, 0)
+                timing["sync_device"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.write(regs.GEMV_K, K)
+                self.write(regs.MEM_WLEN, nr)
+                for j in range(nc):
+                    self.write(regs.OP, regs.OP_XLOAD)
+                    cycles += self._mem_cmd(K, [off_bt + j * kp * by, 0, 0], None, False, False)
+                    self.write(regs.OP, regs.OP_GEMV)
+                    cycles += self._mem_cmd(nr * K, [off_a, 0, 0], off_y + j * mp * by, False, False)
+                timing["dma"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.buf.sync_for_cpu(off_y, nc * mp * by, 2)
+                timing["sync_cpu"] += time.perf_counter() - t
+                t = time.perf_counter()
+                out[r0:r0 + nr, c0:c0 + nc] = yb2[:nc, :nr].T
+                timing["copy_out"] += time.perf_counter() - t
+        del keep
+        timing["total"] = time.perf_counter() - t_start
+        timing["engine_cycles"] = cycles
+        timing["device"] = a_dev is not None
+        self.last_timing = timing
+        return out
+
+    def _matmul_dots(self, A, B, out) -> np.ndarray:
+        """C[i, j] as one quire dot each (no gemv in the bitstream, K > gemv_max_k, or no device memory)."""
+        M, K = A.shape
+        Av, Bt = self._bits(A).reshape(M, K), self._bits(B).reshape(K, -1).T.copy()
+        for i in range(M):
+            for j in range(Bt.shape[0]):
+                out[i, j] = self.reduce("dot", Av[i], Bt[j])[0]
+        return out
+
+    def time_matmul(self, m: int = 256, k: int = 256, n: int = 256, device: bool = True) -> float:
+        """Multiply-adds per second of one matmul on random (m, k) x (k, n) matrices (A on the device:
+        device=True)."""
+        rnd = np.random.default_rng(0)
+        a = rnd.integers(0, 1 << self.config.n, (m, k), dtype=np.int64).astype(self.out_dtype)
+        b = rnd.integers(0, 1 << self.config.n, (k, n), dtype=np.int64).astype(self.out_dtype)
+        if device:
+            a = self.to_device(a)
+        t0 = time.perf_counter()
+        self.matmul(a, b)
+        return m * k * n / (time.perf_counter() - t0)
 
     def time_array(self, name: str = "add", size: int = 1 << 20, device: bool = False) -> float:
         """Elements per second for one array_op on `size` random elements (DMA, packing and copies included;

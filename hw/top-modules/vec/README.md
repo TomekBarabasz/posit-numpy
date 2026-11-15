@@ -191,6 +191,38 @@ Po drodze naprawione: rejestry sterujące są teraz zerowane resetem (`readAndWr
 które w SpinalHDL dokłada niezerowany rejestr pośredni — po resecie OPERAND_B, STREAM_CFG itd. były
 przypadkowe, co na FPGA maskowało zerowanie przy konfiguracji).
 
+## Etap 7a: dokładny `A @ B` na quire (wersja 5.1)
+
+Każdy element iloczynu macierzy to iloczyn skalarny wiersza A i kolumny B, policzony dokładnie w quire
+i zaokrąglony raz — jak `np.dot` z etapu 4, ale z jednym poleceniem na całą kolumnę B zamiast jednego na element.
+
+```
+OP_XLOAD:  m_axi R --> x (kolumna B, K elementów) --> bufor x (BRAM, maxK = 4096 elementów)
+OP_GEMV:   m_axi R --> A wiersz po wierszu, element A[i, j] --> odczyt x[j] (1 takt) --> quire i mod 2
+                       quire 0: wiersze 0, 2, 4 ...   koniec wiersza: round --> kolejka 0 --+--> po kolei --> grupy po L --> m_axi W
+                       quire 1: wiersze 1, 3, 5 ...   koniec wiersza: round --> kolejka 1 --+    (y, M elementów)
+```
+
+- dwa quire na zmianę: zaokrąglenie wiersza i (ok. 20 taktów dla posit32) idzie w cieniu wiersza i + 1, więc
+  silnik bierze 1 element A na takt także dla krótkich wierszy; quire zeruje się w takcie wyniku;
+- wynik wchodzi do quire tylko przy wolnym miejscu w jego kolejce, kolejki scala licznik wierszy — kolejność
+  y zachowana przy dowolnym czekaniu zapisu;
+- rejestry: `MEM_WLEN` (0xC8) = M, elementy do zapisu (zapis movera liczy teraz osobno `wlen`), `GEMV_K` (0xCC) = K,
+  `GEMV_CFG` (0xD0, RO) = maxK; `MEM_LEN` = M · K; `MEM_STATUS.err_shape` (bit 5): `MEM_LEN ≠ M · K`, K = 0,
+  K > maxK albo XLOAD dłuższy niż maxK — polecenie odrzucone bez transakcji; CONFIG bit 15 `has_gemv`, opMask bity 13 / 14;
+- koszt: bufor x (posit32: 4 BRAM36), drugi quire i dwie małe kolejki; `VecKv260 --gemv-k N` zmienia maxK,
+  `--gemv-k 0` buduje silnik bez gemv; OOC: `vec_p32_mem_L2_gemv`;
+- Python: `A @ B`, `np.matmul`, `np.dot`, `pn.matmul`, `hw.matmul` / `hw.gemv`: kolumny B po kolei (XLOAD + GEMV),
+  A, Bᵀ i C w pamięci urządzenia (A z `to_device()` czytana w miejscu), za duże macierze w blokach wierszy
+  i kolumn; K > maxK albo bitstream bez gemv: jeden dot quire na element.
+
+Symulacja (`PositVecMemTestplan.mem_gemv*`, model pamięci z losowymi opóźnieniami): kształty 1×1, 1×5, 3×1, 2×2, 5×3,
+7×17, 33×10, 9×maxK, 40×1 i losowe, elementy z rozkładu `stress` (NaR, zera, skrajne skale) — y bit w bit
+z `QuireRef` dla posit32 ×1 / ×2, posit16 ×4, posit8 ×8; bajty za y nietknięte; redukcje po gemv poprawne;
+odrzucenia kształtu; **64 × 64 posit32: 4 133 takty (0,99 MAC / takt)**. Na płytce oczekiwane ok. 100 M MAC/s
+na silnik (100 MHz) — dużo mniej niż BLAS float32 na A53, ale każdy wynik dokładnie zaokrąglony
+(`test_board_vec.py::test_matmul_*`).
+
 ## Pamięć urządzenia: tablice bez kopii
 
 Przy szerszym silniku posit32 ogranicza już tylko procesor (kopie do i z bufora). Bufor u-dma-buf silnika z masterem
@@ -498,6 +530,7 @@ to znów dodawanie z etapu 1). Szczegóły w `hw/top-modules/ooc/README.md`.
 | etap 5, ALU | `posit-vector/.../PositAluStage5Testplan` | sqrt: wszystkie posit8/16 i losowe posit32, odstęp = `sqrtCycles`; FMA z znoszeniem się; konwersje z przypadkami brzegowymi; przeplot wszystkich operacji; ALU bez etapu 5 |
 | tory | `posit-vector/.../PositAluUnitsTestplan` | div / sqrt / FMA na 2 i 4 torach: średni odstęp = cycles / L; przeplot wszystkich operacji na 3 torach (kolejność, losowe valid / ready); add / mul nadal 1 / takt; `PositStreamAlu` z 4 torami ok. 4 razy szybszy na div |
 | etap 5, IP | `posit-kv260/.../PositVecStage5Testplan` | sqrt, FMA, AXPY (też z `scalar_b`), F2P, P2F na tablicach przez AXI; sqrt i FMA przez rejestry |
+| etap 6 / 7a, IP | `posit-kv260/.../PositVecMemTestplan` | master AXI4 z modelem pamięci: wszystkie operacje, tory, odrzucenia, SLVERR, irq; gemv: y kontra `QuireRef` wiersz po wierszu, kształty brzegowe, err_shape, 1 MAC / takt |
 | sterownik | `sw/tests/test_vec_fake.py` | `PositVecHw` na atrapach rejestrów, DMA i bufora: porcjowanie, protokół cache, błędy DMA |
 | płytka | `sw/tests/test_board_vec.py` | długości 1 … 1 000 001, wszystkie operacje kontra `ref.py`, tablica ⊕ skalar, liczniki, przepustowość; etap 5: sqrt, FMA / AXPY, F2P / P2F kontra `PositSw`, `PositArray` na sprzęcie, przepustowość |
 

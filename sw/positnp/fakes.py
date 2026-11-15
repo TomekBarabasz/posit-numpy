@@ -27,7 +27,7 @@ class FakeVecMmio(FakeAluMmio):
 
     def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1,
                  stage5: bool = True, k: int = 4, units: int = 1, mem: Optional[FakeUDmaBuf] = None, lanes: int = 1,
-                 lazy_mem: bool = False):
+                 lazy_mem: bool = False, gemv_k: Optional[int] = None):
         super().__init__(config, ops, busy_reads)
         self.engine_cfg = lanes << 16 | units << 8 | k
         # stage 6: with `mem` the engine has its own AXI4 master and works on that buffer (MEM_* registers)
@@ -36,6 +36,11 @@ class FakeVecMmio(FakeAluMmio):
                   regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG, regs.MEM_STATUS):
             self.regs[r] = 0
         self.mem_log = []
+        # stage 7a: gemv (x buffer of gemv_k elements); default 4096 with the master, none without
+        self.gemv_k = (4096 if mem is not None else 0) if gemv_k is None else gemv_k
+        self.xbuf = np.zeros(max(self.gemv_k, 1), np.uint64)
+        self.regs[regs.MEM_WLEN] = 0
+        self.regs[regs.GEMV_K] = 0
         # lazy_mem: the command runs only at the first MEM_STATUS read after the start - the latest
         # moment real hardware could read its input - so a driver that touches a half of the buffer
         # still in use (or starts a command before the previous one finished) gets wrong results
@@ -59,8 +64,15 @@ class FakeVecMmio(FakeAluMmio):
             if self.mem is not None and "fma" in self.stage5:
                 s5 |= 1 << regs.OP_FMA3
             master = (1 << regs.CONFIG_HAS_MASTER) if self.mem is not None else 0
+            if self.gemv_k:
+                master |= 1 << regs.CONFIG_HAS_GEMV
+                s5 |= 1 << regs.OP_XLOAD | 1 << regs.OP_GEMV
             return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | master | \
                 (reduce_mask | s5) << 16
+        if offset == regs.GEMV_CFG:
+            return self.gemv_k
+        if offset in (regs.MEM_WLEN, regs.GEMV_K):
+            return self.regs[offset]
         if offset == regs.CNT_ELEMENTS:
             self.log.append(("r", offset))
             return self.counters["elements"]
@@ -94,6 +106,9 @@ class FakeVecMmio(FakeAluMmio):
         if offset in (regs.MEM_LEN, regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C, regs.MEM_DST,
                       regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG):
             self.regs[offset] = value & 0xFFFFFFFF
+            return
+        if offset in (regs.MEM_WLEN, regs.GEMV_K) and self.gemv_k:
+            self.regs[offset] = value & (0xFFFFFFFF if offset == regs.MEM_WLEN else (2 * self.gemv_k - 1))
             return
         if offset == regs.CTRL and value >> regs.CTRL_MEM_START & 1 and self.mem is not None:
             if self.mem_pending:
@@ -129,23 +144,47 @@ class FakeVecMmio(FakeAluMmio):
         r = self.regs
         n, by = self.config.n, self.config.n // 8
         length, cfg = r[regs.MEM_LEN], r[regs.MEM_CFG]
+        op = r[regs.OP]
+        gemv = bool(self.gemv_k) and op == regs.OP_GEMV
+        xload = bool(self.gemv_k) and op == regs.OP_XLOAD
         use = [True, bool(cfg >> regs.MEM_CFG_READ_B & 1), bool(cfg >> regs.MEM_CFG_READ_C & 1)]
-        write = bool(cfg >> regs.MEM_CFG_WRITE & 1)
+        write = bool(cfg >> regs.MEM_CFG_WRITE & 1) and not xload
         srcs = [r[regs.MEM_SRC_A], r[regs.MEM_SRC_B], r[regs.MEM_SRC_C]]
         nbytes = -(-length * by // 16) * 16
-        addrs = [a for a, u in zip(srcs, use) if u] + ([r[regs.MEM_DST]] if write else [])
-        bad_range = any(a < r[regs.MEM_LO] or a + nbytes > r[regs.MEM_HI] for a in addrs)
-        bad_align = any(a % 16 for a in addrs)
+        wlen = r[regs.MEM_WLEN] if gemv else length
+        wbytes = -(-wlen * by // 16) * 16
+        bad_range = any(a < r[regs.MEM_LO] or a + nbytes > r[regs.MEM_HI] for a, u in zip(srcs, use) if u) or \
+            (write and (r[regs.MEM_DST] < r[regs.MEM_LO] or r[regs.MEM_DST] + wbytes > r[regs.MEM_HI]))
+        bad_align = any(a % 16 for a, u in zip(srcs, use) if u) or (write and r[regs.MEM_DST] % 16)
+        k = r[regs.GEMV_K]
+        bad_shape = (gemv and (k == 0 or k > self.gemv_k or wlen * k != length)) or (xload and length > self.gemv_k)
         self.mem_log.append((length, srcs, r[regs.MEM_DST], cfg))
-        st = 1 << regs.MEM_ST_DONE | bad_range << regs.MEM_ST_ERR_RANGE | bad_align << regs.MEM_ST_ERR_ALIGN
-        if bad_range or bad_align or length == 0:
+        st = 1 << regs.MEM_ST_DONE | bad_range << regs.MEM_ST_ERR_RANGE | bad_align << regs.MEM_ST_ERR_ALIGN | \
+            bad_shape << regs.MEM_ST_ERR_SHAPE
+        if bad_range or bad_align or bad_shape or length == 0:
             r[regs.MEM_STATUS] = st
             return
         dt = {8: np.uint8, 16: np.uint16, 32: np.uint32}[n]
         view = lambda a: np.frombuffer(self.mem.memory, dt, length, a - self.mem.phys_addr)   # noqa: E731
         a = view(srcs[0]).astype(np.uint64)
         b = view(srcs[1]).astype(np.uint64) if use[1] else np.zeros(length, np.uint64)
-        if self.is_reduce():
+        if xload:
+            self.xbuf[:length] = a
+        elif gemv:
+            x = self.xbuf[:k].tolist()
+            rows = a.reshape(wlen, k).tolist()
+            y = []
+            for row in rows:
+                q, nar = ref.quire_accumulate(self.config, "dot", row, x, 0, False)
+                v, f = ref.quire_round(self.config, q, nar)
+                y.append(v)
+                for kk in ("nar", "sat", "inexact"):
+                    self.counters[kk] += getattr(f, kk)
+            self.counters["elements"] += length
+            if write:
+                np.frombuffer(self.mem.memory, dt, wlen, r[regs.MEM_DST] - self.mem.phys_addr)[:] = \
+                    np.array(y, dtype=np.uint64).astype(dt)
+        elif self.is_reduce():
             words = a | (b << np.uint64(n))
             if self.regs[regs.OP] == regs.OP_SUMSQ:
                 words = a | (a << np.uint64(n))

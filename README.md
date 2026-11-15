@@ -29,6 +29,8 @@ Stan:
   posit8 szybsze niż NumPy float32 — `hw/top-modules/vec/README.md`;
 - tablice bez kopii (pamięć urządzenia, `x.to_device()`): sprawdzone na płytce — add 147 / 297 / 538 M/s,
   posit16 i posit8 szybsze niż NumPy float32; wentylator sterowany z Linuksa jak w aplikacji fabrycznej.
+- etap 7a (dokładny `A @ B` / `np.matmul` na quire: OP_XLOAD + OP_GEMV, dwa quire na zmianę, 1 MAC na takt):
+  w symulacji (testplan `mem_gemv*`, 64×64 posit32 w 4133 taktach), czeka na płytkę — `hw/top-modules/vec/README.md`.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

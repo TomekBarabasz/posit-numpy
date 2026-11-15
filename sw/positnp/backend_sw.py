@@ -77,6 +77,24 @@ class PositSw:
         self._stats["elements"] += int(np.size(a))
         return bits, f, q, nar
 
+    def matmul(self, a, b) -> np.ndarray:
+        """C = A B on raw bits (A (M, K), B (K, N)): every element the exact quire dot, rounded once."""
+        A, B = np.asarray(a), np.asarray(b)
+        if A.ndim != 2 or B.ndim != 2 or A.shape[1] != B.shape[0]:
+            raise ValueError(f"matmul of shapes {A.shape} and {B.shape}")
+        out = np.zeros((A.shape[0], B.shape[1]), self.dtype)
+        if A.shape[1] == 0:
+            return out
+        Bt = np.ascontiguousarray(B.T)
+        for i in range(A.shape[0]):
+            for j in range(B.shape[1]):
+                out[i, j] = self.reduce("dot", A[i], Bt[j])[0]
+        return out
+
+    def gemv(self, a, x) -> np.ndarray:
+        """y = A x on raw bits: matmul with one column."""
+        return self.matmul(a, np.asarray(x).reshape(-1, 1)).reshape(np.shape(a)[0])
+
     def _count(self, r: vecops.Rounded) -> None:
         self._stats["nar"] += int(r.nar.sum())
         self._stats["sat"] += int(r.sat.sum())

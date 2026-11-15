@@ -62,6 +62,7 @@ case class MemCmd(cfg : MemMoverConfig) extends Bundle {
   val read  = Bits(cfg.sources bits)                  // ktore strumienie czytac (a zawsze)
   val dst   = UInt(cfg.addrWidth bits)
   val write = Bool()
+  val wlen  = UInt(cfg.lenWidth bits)                 // elementy do zapisu (zwykle = len; gemv: M)
 }
 
 class PositMemMover(val cfg : MemMoverConfig) extends Component {
@@ -277,10 +278,10 @@ class PositMemMover(val cfg : MemMoverConfig) extends Component {
     }
     writer.active    := io.cmd.write
     writer.addr      := io.cmd.dst
-    writer.beatsLeft := Mux(io.cmd.write, beatsN, U(0, lenWidth bits))
-    writer.elemsLeft := Mux(io.cmd.write, groups(io.cmd.len), U(0, lenWidth bits))
+    writer.beatsLeft := Mux(io.cmd.write, beats(io.cmd.wlen), U(0, lenWidth bits))
+    writer.elemsLeft := Mux(io.cmd.write, groups(io.cmd.wlen), U(0, lenWidth bits))
     if (lanes > 1) {
-      val rem = io.cmd.len(log2Up(lanes) - 1 downto 0)
+      val rem = io.cmd.wlen(log2Up(lanes) - 1 downto 0)
       writer.lastCnt := Mux(rem === 0, U(lanes, writer.lastCnt.getWidth bits), rem.resize(writer.lastCnt.getWidth))
     }
   }
