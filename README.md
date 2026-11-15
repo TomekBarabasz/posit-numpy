@@ -26,7 +26,9 @@ Stan:
   (`posit32_16_8_mem`, add posit32 59,5 M/s wobec 25,4 z AXI DMA; z podwójnym buforem ok. 92 M/s) —
   `hw/top-modules/vec/README.md`;
 - szerszy silnik (L elementów na takt: posit32 ×2, posit16 ×4, posit8 ×8): sprawdzony na płytce — add 121 / 229 / 400 M/s,
-  posit8 szybsze niż NumPy float32 — `hw/top-modules/vec/README.md`.
+  posit8 szybsze niż NumPy float32 — `hw/top-modules/vec/README.md`;
+- tablice bez kopii (pamięć urządzenia, `x.to_device()`): sprawdzone na płytce — add 147 / 297 / 538 M/s,
+  posit16 i posit8 szybsze niż NumPy float32; wentylator sterowany z Linuksa jak w aplikacji fabrycznej.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

@@ -215,6 +215,20 @@ with pn.using(hw):
   się razem) — do dużych obliczeń `-buf_mb 256` albo więcej (CMA: `grep Cma /proc/meminfo`);
 - przed `pn.board.unload()` warto usunąć tablice w pamięci urządzenia (mapowanie bufora zostaje, dopóki żyją).
 
+Na płytce (2026-11-15, `posit32_16_8_mem`, posit32 ×2 / posit16 ×4 / posit8 ×8, `test_device_memory_zero_copy`),
+M elementów / s (posit32: 2,6 M elementów — tyle mieści sterta 40 MB; posit16 / posit8: 4 M):
+
+| | posit32 ×2 | posit16 ×4 | posit8 ×8 | NumPy float32 add |
+| --- | ---: | ---: | ---: | ---: |
+| add, z kopiami → **bez kopii** | 70 → **147** | 154 → **297** | 242 → **538** | ok. 250 |
+| mul | 90 → 147 | 195 → 294 | 376 → 555 | |
+| FMA | 91 → 146 | 198 → 223 | 225 → 236 | |
+| div (ogranicza silnik) | 71 → 72 | 119 → 121 | 174 → 182 | |
+
+- Bez kopii zostaje praca silnika i synchronizacja cache: add posit32 14,1 ms silnika (0,54 taktu / element przy 2 torach)
+  + 3,1 ms synchronizacji na 2,6 M elementów.
+- posit16 add w pamięci urządzenia jest już szybsze niż NumPy float32 na A53, posit8 ponad 2 ×.
+
 ## Szerszy silnik: L elementów na takt (tory elementowe, `lanes`)
 
 W trybie z masterem silnik może liczyć L elementów na takt: master czyta i zapisuje grupy po L elementów
