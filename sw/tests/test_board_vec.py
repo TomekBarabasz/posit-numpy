@@ -342,3 +342,40 @@ def test_master_double_buffer_gain(hw):
               f"sync cpu {t['sync_cpu'] * 1e3:5.1f}, copy out {t['copy_out'] * 1e3:5.1f} ms")
     if size >= 1 << 20:                                      # on the board (not the small fake run)
         assert max(r[2] for r in rows[1:]) > rows[0][2], "double buffering slower than a single buffer"
+
+
+# ---- device memory: arrays in the u-dma-buf buffer, no copies ---------------------------------------------
+
+def test_device_memory_zero_copy(hw, sw):
+    _need_master(hw)
+    if hw.heap is None:
+        pytest.skip("no device memory heap (buffer too small)")
+    import gc
+    import positnp as pn
+    free = hw.heap.stats()["largest_free"]
+    size = min(1 << 22, free // (4 * hw.out_bytes))            # a, b and two results must fit
+    rnd = np.random.default_rng(41)
+    a, b = (rnd.integers(0, 1 << hw.config.n, size) for _ in range(2))
+    want = sw.array_op("add", a, b)
+    got = hw.array_op("add", hw.to_device(a), hw.to_device(b))
+    assert hw.on_device(got) and np.array_equal(got, want)
+    del got
+    gc.collect()
+    rows = []
+    for name in ("add", "mul", "div", "fma"):
+        host = hw.time_array(name, size)
+        dev = hw.time_array(name, size, device=True)
+        rows.append((name, host, dev, dict(hw.last_timing)))
+        gc.collect()
+    print(f"\n{hw.heap}, {size} elements")
+    for name, host, dev, t in rows:
+        print(f"{name:>5}: copies {host / 1e6:7.2f} M elem/s, device memory {dev / 1e6:7.2f} M elem/s | "
+              f"engine {t['dma'] * 1e3:.1f} ms, sync {(t['sync_device'] + t['sync_cpu']) * 1e3:.1f} ms")
+    with pn.using(hw):                                           # PositArray chain on the device
+        x = pn.array(np.linspace(-3, 3, size), hw.config)
+        xd = x.to_device()
+        y = xd * xd - xd / 3 + 1
+        assert y.on_device and y.equal_bits(pn.array(np.linspace(-3, 3, size), hw.config) * x - x / 3 + 1)
+    del xd, y
+    gc.collect()
+    assert hw.heap.stats()["blocks"] == 0, hw.heap

@@ -191,6 +191,44 @@ Po drodze naprawione: rejestry sterujące są teraz zerowane resetem (`readAndWr
 które w SpinalHDL dokłada niezerowany rejestr pośredni — po resecie OPERAND_B, STREAM_CFG itd. były
 przypadkowe, co na FPGA maskowało zerowanie przy konfiguracji).
 
+## Pamięć urządzenia: tablice bez kopii
+
+Przy szerszym silniku posit32 ogranicza już tylko procesor (kopie do i z bufora). Bufor u-dma-buf silnika z masterem
+dzieli się teraz na dwie części: na początku obszar roboczy podwójnego bufora (`STAGING_MAX` = 24 MB, najwyżej
+połowa bufora), powyżej **sterta urządzenia** (`positnp/devmem.py`, bloki po 4 KB).
+
+```python
+with pn.using(hw):
+    xd = x.to_device()                # jedna kopia do pamięci urządzenia (albo pn.to_device(x))
+    y = xd * xd - xd / 3 + 1          # cztery polecenia, zero kopii: wejścia i wyniki w pamięci urządzenia
+    y.on_device, y.to_float(), np.sum(y)   # zwykła tablica NumPy (widok bufora); y.to_host() kopiuje
+```
+
+- działanie, którego choć jedno wejście jest w pamięci urządzenia, idzie jednym poleceniem po całej tablicy;
+  wejścia z hosta są kopiowane do tymczasowych bloków, wynik dostaje nowy blok w pamięci urządzenia
+  (`device_results = True`: tak samo dla wejść z hosta); bez miejsca na stercie — zwykła ścieżka z kopiami;
+- koherencja: przed poleceniem `sync_for_device` wejść (procesor mógł je zmienić) i wyniku, po nim `sync_for_cpu`
+  wyniku; bloki 4 KB, więc dwie tablice nigdy nie dzielą linii cache;
+- blok zwalnia się, gdy znika ostatni widok NumPy tablicy (`weakref.finalize`); `hw.heap.stats()`;
+- redukcje (`np.sum`, `np.dot`) na tablicach w pamięci urządzenia też bez kopii;
+- pojemność: przy `-buf_mb 64` sterta ma 40 MB (np. dwie tablice posit32 po 4 M elementów + wynik nie zmieszczą
+  się razem) — do dużych obliczeń `-buf_mb 256` albo więcej (CMA: `grep Cma /proc/meminfo`);
+- przed `pn.board.unload()` warto usunąć tablice w pamięci urządzenia (mapowanie bufora zostaje, dopóki żyją).
+
+Na płytce (2026-11-15, `posit32_16_8_mem`, posit32 ×2 / posit16 ×4 / posit8 ×8, `test_device_memory_zero_copy`),
+M elementów / s (posit32: 2,6 M elementów — tyle mieści sterta 40 MB; posit16 / posit8: 4 M):
+
+| | posit32 ×2 | posit16 ×4 | posit8 ×8 | NumPy float32 add |
+| --- | ---: | ---: | ---: | ---: |
+| add, z kopiami → **bez kopii** | 70 → **147** | 154 → **297** | 242 → **538** | ok. 250 |
+| mul | 90 → 147 | 195 → 294 | 376 → 555 | |
+| FMA | 91 → 146 | 198 → 223 | 225 → 236 | |
+| div (ogranicza silnik) | 71 → 72 | 119 → 121 | 174 → 182 | |
+
+- Bez kopii zostaje praca silnika i synchronizacja cache: add posit32 14,1 ms silnika (0,54 taktu / element przy 2 torach)
+  + 3,1 ms synchronizacji na 2,6 M elementów.
+- posit16 add w pamięci urządzenia jest już szybsze niż NumPy float32 na A53, posit8 ponad 2 ×.
+
 ## Szerszy silnik: L elementów na takt (tory elementowe, `lanes`)
 
 W trybie z masterem silnik może liczyć L elementów na takt: master czyta i zapisuje grupy po L elementów
@@ -246,7 +284,8 @@ posit8 ×8)**: `test_board_vec.py` przechodzi w całości. M elementów / s, 4 1
 - Porcje: przy szerszym silniku stały koszt porcji (synchronizacja ok. 50 µs, polecenie) waży więcej; domyślnie
   8 porcji po co najmniej 1 MB (było 16 po 256 KB).
 
-OOC: `top-modules/ooc` wariant `vec_p32_mem_L2`.
+OOC (`vec_p32_mem_L2`): 11 842 LUT, 5 867 FF, 12 DSP, 104,8 MHz po routingu (z jednym torem 8 405 LUT, 113,5 MHz) —
+drugi tor to ok. +3 400 LUT i +4 DSP; ścieżka krytyczna ta sama (dodawanie ALU), zapas przy 100 MHz 0,45 ns.
 
 ## Kilka silników w jednym bitstreamie
 
@@ -362,10 +401,19 @@ dekoder -> prepare -+                                                           
    (x * x - x / 3).to_float()
    ```
 
+## Wentylator
+
+Sygnał `fan_en_b` wentylatora KV260 (pin A12) idzie z PS przez PL: w fabrycznej aplikacji wyjście TTC0 (EMIO, bit 2)
+jest z nim połączone, a Linux steruje obrotami przez `pwm-fan`. Bitstream bez tego połączenia zostawia pin niesterowany
+i wentylator kręci się na maksa. `build.tcl` (vec i alu) dokłada je domyślnie (`common/vivado/kv260_fan.tcl`:
+TTC0 z wyjściem fali na EMIO, `emio_ttc0_wave_o[2]` → port `fan_en_b`, ograniczenia pinu A12 LVCMOS33);
+`-fan 0` wyłącza. Krzywa obrotów zostaje po stronie Linuksa, jak w fabrycznej aplikacji.
+
 ## build.tcl
 
 | opcja `-tclargs` | domyślnie | |
 | --- | --- | --- |
+| `-fan 0\|1` | `1` | wentylator: PWM z TTC0 przez EMIO na pin `fan_en_b` (bez tego po wgraniu kręci się na maksa) |
 | `-io master\|dma` | `master` | etap 6: master AXI4 silnika (bez AXI DMA, przerwanie) albo stara ścieżka z AXI DMA |
 | `-engines "<n> ..."` | `32` | silniki: 8, 16, 32, każdy co najwyżej raz (`tdata` AXI DMA w pełnych bajtach); `-n <n>` = jeden |
 | `-name <nazwa>` | `posit<n>[_<n>…]_mem` (`_vec` z `-io dma`) | nazwa aplikacji dla xmutil |

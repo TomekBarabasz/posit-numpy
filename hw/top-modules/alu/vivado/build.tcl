@@ -24,6 +24,7 @@
 #    -deploy <dir>    gdzie zapisac katalog aplikacji             (../../../../sw/positnp/overlays)
 #    -jobs <n>        rownolegle przebiegi (synteza IP z block designu) (8)
 #    -threads <n>     watki Vivado na przebieg (general.maxThreads)    (8)
+#    -fan 0|1            wentylator KV260: PWM z TTC0 (EMIO) na pin fan_en_b, sterowanie z Linuksa  (1)
 #    -stop ip|bd      zatrzymaj po spakowaniu IP albo po block designie
 #
 #  Wynik: katalog aplikacji <deploy>/posit<n>_alu/, kopiowany na plytce do
@@ -39,8 +40,10 @@
 set ::posit_build 1
 set script_dir [file normalize [file dirname [info script]]]
 source [file join $script_dir .. .. common vivado package_ip.tcl]
+source [file join $script_dir .. .. common vivado kv260_fan.tcl]
 
 array set opt [list \
+    fan     1 \
     n      32 \
     part   xck26-sfvc784-2LV-c \
     board  0 \
@@ -59,7 +62,7 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
         -board { set opt(board) 1 }
-        -n - -part - -out - -deploy - -jobs - -threads - -stop {
+        -n - -fan - -part - -out - -deploy - -jobs - -threads - -stop {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([string range $a 1 end]) [lindex $argv $i]
@@ -133,6 +136,7 @@ set_property -dict [list \
     CONFIG.PSU__FPGA_PL0_ENABLE                1 \
     CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ 100 \
 ] $ps
+if {$opt(fan)} { set_property -dict [kv260_fan::ps_config] $ps }
 
 set rst [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:proc_sys_reset] rst_pl0]
 set ic  [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:smartconnect] smartconnect_0]
@@ -147,6 +151,8 @@ connect_bd_net [get_bd_pins $rst/interconnect_aresetn] [get_bd_pins $ic/aresetn]
 connect_bd_net [get_bd_pins $rst/peripheral_aresetn]   [get_bd_pins $alu/aresetn]
 connect_bd_intf_net [get_bd_intf_pins $ps/M_AXI_HPM0_FPD] [get_bd_intf_pins $ic/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins $ic/M00_AXI]        [get_bd_intf_pins $alu/s_axi]
+
+if {$opt(fan)} { kv260_fan::connect $ps }
 
 assign_bd_address
 
@@ -183,6 +189,7 @@ set_property top ${bd_name}_wrapper [current_fileset]
 set xdc [file join $proj_dir bitstream.xdc]
 set fh [open $xdc w]
 puts $fh "set_property BITSTREAM.GENERAL.COMPRESS TRUE \[current_design\]"
+if {$opt(fan)} { kv260_fan::xdc $fh }
 close $fh
 add_files -fileset constrs_1 -norecurse $xdc
 

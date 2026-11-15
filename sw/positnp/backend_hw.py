@@ -334,10 +334,17 @@ class PositVecHw(PositAluHw):
         self._sw = PositSw(self.config)
         if self.dma is not None:
             self.dma.reset()
+        self.heap = None
+        self.staging_size = self.buf.size
         if self.master:
             hi = min(self.buf.phys_addr + self.buf.size, 0xFFFFFFF0)
             self.write(regs.MEM_LO, self.buf.phys_addr)
             self.write(regs.MEM_HI, hi)
+            # staging for the double-buffered copy path at the start, device-memory heap above it
+            from .devmem import DeviceHeap
+            self.staging_size = min(self.buf.size // 2, self.STAGING_MAX) // self.ALIGN * self.ALIGN
+            if self.buf.size - self.staging_size >= self.ALIGN:
+                self.heap = DeviceHeap(self.buf, self.staging_size, self.buf.size - self.staging_size)
 
     @classmethod
     def open(cls, n: Optional[int] = None) -> "PositVecHw":
@@ -559,11 +566,13 @@ class PositVecHw(PositAluHw):
     MEM_CHUNK_MIN = 1 << 20
     MEM_CHUNK_BYTES: Optional[int] = None
     double_buffer = True
+    STAGING_MAX = 24 << 20          # staging of the copy path; the rest of the buffer is device memory
+    device_results = False          # True: results on the device even when every input is on the host
 
     def _layout(self, arrays: int, size: int = 0):
         """(elements per chunk, [offsets of the `arrays` regions in half 0], offset of half 1)."""
         halves = 2 if self.double_buffer else 1
-        per = (self.buf.size // halves // arrays) // self.ALIGN * self.ALIGN
+        per = (self.staging_size // halves // arrays) // self.ALIGN * self.ALIGN
         if self.double_buffer:
             if self.MEM_CHUNK_BYTES:
                 want = self.MEM_CHUNK_BYTES
@@ -665,6 +674,70 @@ class PositVecHw(PositAluHw):
                 drain(j)                          # ... while the CPU takes chunk j out
         return cycles
 
+    # ---- device memory (no copies) --------------------------------------------------------------------
+
+    def to_device(self, x) -> np.ndarray:
+        """Copy raw bits into device memory (an array the engine reads without copying); shape kept."""
+        if self.heap is None:
+            raise PositAluError("no device memory: engine without its own AXI4 master, or buffer too small")
+        bits = self._bits(x)
+        d = self.heap.empty(bits.size, self.out_dtype)
+        if d is None:
+            raise PositAluError(f"device memory full ({self.heap}); free arrays or build with a larger -buf_mb")
+        d[:] = bits
+        return d.reshape(np.shape(x))
+
+    def on_device(self, x) -> bool:
+        return self.heap is not None and self.heap.offset_of(np.asarray(x)) is not None
+
+    def _device_inputs(self, ins: List[np.ndarray], keep: List[np.ndarray], timing) -> Optional[List[int]]:
+        """Buffer offsets of the inputs; host inputs copied into temporary device blocks (kept in `keep`)."""
+        offs = []
+        for x in ins:
+            off = self.heap.offset_of(x)
+            if off is None:
+                t = time.perf_counter()
+                tmp = self.heap.empty(x.size, self.out_dtype)
+                if tmp is None:
+                    return None
+                tmp[:] = x
+                keep.append(tmp)
+                off = self.heap.offset_of(tmp)
+                timing["pack"] += time.perf_counter() - t
+            offs.append(off)
+        return offs
+
+    def _mem_device(self, ins, read_b: bool, read_c: bool, timing, t_start) -> Optional[np.ndarray]:
+        """One command over the whole array, result allocated in device memory; None if the heap is full."""
+        keep: List[np.ndarray] = []
+        offs = self._device_inputs(ins, keep, timing)
+        out = self.heap.empty(ins[0].size, self.out_dtype) if offs is not None else None
+        if out is None:
+            return None
+        nbytes = ins[0].size * self.out_bytes
+        dst = self.heap.offset_of(out)
+        t = time.perf_counter()
+        for off in offs:
+            self.buf.sync_for_device(off, nbytes, 1)           # clean: CPU writes reach memory
+        self.buf.sync_for_device(dst, nbytes, 0)               # no dirty line left over the result
+        timing["sync_device"] += time.perf_counter() - t
+        t = time.perf_counter()
+        cycles = 0
+        for i in range(0, ins[0].size, 0xFFFF0000):             # MEM_LEN is 32 bits
+            k = min(0xFFFF0000, ins[0].size - i)
+            step = i * self.out_bytes
+            src = [o + step for o in offs] + [0] * (3 - len(offs))
+            cycles += self._mem_cmd(k, src, dst + step, read_b, read_c)
+        timing["dma"] += time.perf_counter() - t
+        t = time.perf_counter()
+        self.buf.sync_for_cpu(dst, nbytes, 2)                  # invalidate: the CPU sees the engine's writes
+        timing["sync_cpu"] += time.perf_counter() - t
+        timing["total"] = time.perf_counter() - t_start
+        timing["engine_cycles"] = cycles
+        timing["device"] = True
+        self.last_timing = timing
+        return out
+
     def _mem(self, code: int, a, b=None, scalar: Optional[int] = None, c_reg: Optional[int] = None,
              c_arr=None) -> np.ndarray:
         """Element-wise op with the engine reading a (b, c) from the buffer and writing the result over a."""
@@ -690,6 +763,10 @@ class PositVecHw(PositAluHw):
             self.write(regs.OPERAND_B, int(scalar) & self.config.mask)
         if c_reg is not None:
             self.write(regs.OPERAND_C, int(c_reg) & self.config.mask)
+        if self.heap is not None and (self.device_results or any(self.heap.offset_of(x) is not None for x in ins)):
+            dev = self._mem_device(ins, b is not None, c_arr is not None, timing, t_start)
+            if dev is not None:
+                return dev.reshape(shape)
         cycles = self._mem_pipeline(ins, out, b is not None, c_arr is not None, timing)
         timing["total"] = time.perf_counter() - t_start
         timing["engine_cycles"] = cycles
@@ -728,7 +805,17 @@ class PositVecHw(PositAluHw):
         before = self.read(regs.CNT_ELEMENTS)
         if self.master and av.size:
             timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
-            self._mem_pipeline([av] + ([bv] if bv is not None else []), None, bv is not None, False, timing)
+            ins = [av] + ([bv] if bv is not None else [])
+            keep: List[np.ndarray] = []
+            offs = None
+            if self.heap is not None and any(self.heap.offset_of(x) is not None for x in ins):
+                offs = self._device_inputs(ins, keep, timing)     # device inputs: no copies
+            if offs is not None:
+                for off in offs:
+                    self.buf.sync_for_device(off, av.size * self.out_bytes, 1)
+                self._mem_cmd(av.size, offs + [0] * (3 - len(offs)), None, bv is not None, False)
+            else:
+                self._mem_pipeline(ins, None, bv is not None, False, timing)
         step = max(1, min(self.buf.size // self.in_bytes, DMA_MAX_LENGTH // self.in_bytes))
         for i in (range(0, av.size, step) if not self.master else ()):
             k = min(step, av.size - i)
@@ -758,11 +845,14 @@ class PositVecHw(PositAluHw):
         q = 0 if nar else ref.quire_from_raw(self.config, raw)
         return bits, flags, q, nar
 
-    def time_array(self, name: str = "add", size: int = 1 << 20) -> float:
-        """Elements per second for one array_op on `size` random elements (DMA, packing and copies included)."""
+    def time_array(self, name: str = "add", size: int = 1 << 20, device: bool = False) -> float:
+        """Elements per second for one array_op on `size` random elements (DMA, packing and copies included;
+        device=True: inputs in device memory, no copies)."""
         rnd = np.random.default_rng(0)
         a = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
         b = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
+        if device:
+            a, b = self.to_device(a), self.to_device(b)
         args = {"fma": dict(b=b, c=int(a[0])),                       # OP_FMA, c in OPERAND_C
                 "axpy": dict(scalar=int(a[0]), c=b),                  # axpy: OP_AXPY
                 "fma3": dict(b=b, c=a[::-1].copy())}.get(name, dict(b=b))   # three arrays: OP_FMA3

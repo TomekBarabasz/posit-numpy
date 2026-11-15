@@ -33,6 +33,7 @@
 #    -buf_mb <MB>        bufor DMA (u-dma-buf) na silnik; suma musi sie zmiescic w CMA   (64)
 #    -jobs <n>           rownolegle przebiegi                           (8)
 #    -threads <n>        watki Vivado na przebieg (general.maxThreads)  (8)
+#    -fan 0|1            wentylator KV260: PWM z TTC0 (EMIO) na pin fan_en_b, sterowanie z Linuksa  (1)
 #    -stop ip|bd         zatrzymaj po spakowaniu IP albo po block designie
 #
 #  Wynik: <deploy>/<nazwa>/ (.bit.bin, .dtsi, shell.json, .json z lista silnikow); na plytce
@@ -42,9 +43,11 @@
 set ::posit_build 1
 set script_dir [file normalize [file dirname [info script]]]
 source [file join $script_dir .. .. common vivado package_ip.tcl]
+source [file join $script_dir .. .. common vivado kv260_fan.tcl]
 source [file join $script_dir overlay_files.tcl]
 
 array set opt [list \
+    fan     1 \
     engines 32 \
     io      master \
     name    "" \
@@ -64,7 +67,7 @@ proc usage {} {
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
-        -n - -engines - -io - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
+        -n - -fan - -engines - -io - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([expr {$a eq "-n" ? "engines" : [string range $a 1 end]}]) [lindex $argv $i]
@@ -141,6 +144,7 @@ set_property -dict [list \
     CONFIG.PSU__USE__IRQ0                      $master \
     CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ 100 \
 ] $ps
+if {$opt(fan)} { set_property -dict [kv260_fan::ps_config] $ps }
 
 set k    [llength $ns]
 set rst  [create_bd_cell -type ip -vlnv [latest xilinx.com:ip:proc_sys_reset] rst_pl0]
@@ -214,6 +218,8 @@ if {$master} {
     }
 }
 
+if {$opt(fan)} { kv260_fan::connect $ps }
+
 assign_bd_address
 
 proc to_bytes {range} {
@@ -264,6 +270,7 @@ set_property top ${bd_name}_wrapper [current_fileset]
 set xdc [file join $proj_dir bitstream.xdc]
 set fh [open $xdc w]
 puts $fh "set_property BITSTREAM.GENERAL.COMPRESS TRUE \[current_design\]"
+if {$opt(fan)} { kv260_fan::xdc $fh }
 close $fh
 add_files -fileset constrs_1 -norecurse $xdc
 

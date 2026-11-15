@@ -29,6 +29,9 @@ pn.board.open()                         # podłączenie do już wgranej aplikacj
 pn.board.unload()                       # zamyka silniki (backendy wracają do PositSw), xmutil unloadapp
 ```
 
+- Pamięć urządzenia (silniki `*_mem`): `x.to_device()` / `pn.to_device(x)` przenosi tablicę do bufora silnika;
+  działania na takich tablicach idą bez kopii i zostawiają wyniki w pamięci urządzenia (`y.on_device`,
+  `y.to_host()`); opis w `hw/top-modules/vec/README.md`.
 - Silniki z etapu 6 (`*_mem`, własny master AXI4) czytają i zapisują bufor sami: bez AXI DMA i bez pakowania
   `{b, a}`; `pn.fma(x, y, z)` na trzech tablicach liczy sprzęt (FMA3). Starsze aplikacje (`*_vec`, AXI DMA) działają dalej.
 - Jedna aplikacja naraz (płaski shell KV260); kilka formatów naraz = jeden bitstream z kilkoma silnikami
@@ -73,6 +76,7 @@ positnp/
   backend_sw.py    PositSw: te same array_op na vecops (bez płytki, wzorzec)   etap 2-3
   array.py         PositArray z protokołami NumPy, pn.array, using, stats       etap 3
   board.py         pn.board: aplikacje PL z Pythona (xmutil), silniki jako backendy
+  devmem.py        pamięć urządzenia: sterta w buforze u-dma-buf, tablice bez kopii
   overlays/        katalogi aplikacji dla xmutil: .bit.bin, .dtsi, shell.json (poza gitem)
 tests/
   test_ref.py           ref.py kontra skróty SHA-256 z PositRef.scala (ref_digests.txt)
