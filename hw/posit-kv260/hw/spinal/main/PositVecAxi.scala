@@ -493,7 +493,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
       // grupy po L wynikow (ostatnia niepelna: zapisuje ja writer z lastCnt z MEM_WLEN)
       val packed = Stream(Bits(L * c.n bits))
       if (L == 1) packed << merged else {
-        val buf     = Vec.fill(L)(Reg(Bits(c.n bits)))
+        val buf     = Vec.fill(L)(Reg(Bits(c.n bits)) init 0)   // init: tory za koncem ostatniej grupy bez X na W
         val idx     = Reg(UInt(log2Up(L) bits)) init 0
         val left    = Reg(UInt(32 bits)) init 0        // wyniki jeszcze do zebrania
         val full    = RegInit(False)
