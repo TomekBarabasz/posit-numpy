@@ -20,6 +20,8 @@ import posit.kv260._
 //
 //  Etap 6: domyslnie silnik z wlasnym masterem AXI4 (m_axi, irq, FMA3); --dma: stara sciezka
 //  AXI4-Stream + AXI DMA (s_axis / m_axis), np. VecKv260 --dma 32 16.
+//  Etap 7a: z masterem tez gemv (OP_XLOAD / OP_GEMV, bufor x na --gemv-k elementow, domyslnie 4096;
+//  --gemv-k 0: bez gemv - bez drugiego quire i bufora).
 //
 //  Wynik: hw/gen/p<n>/PositVecAxi_p<n>.v dla kazdego silnika; dalej vivado/build.tcl -engines "32 16 8"
 //  (z --dma: build.tcl -io dma).
@@ -28,6 +30,7 @@ import posit.kv260._
 // =====================================================================
 object VecKv260 {
   var master = true      // etap 6: master AXI4; --dma przelacza na AXI4-Stream + AXI DMA
+  var gemvK  = 4096      // etap 7a: pojemnosc bufora x (0: bez gemv)
 
   val lanes = scala.collection.mutable.Map[Int, Int]()     // n -> L z argumentow
 
@@ -52,17 +55,22 @@ object VecKv260 {
     require(Seq(8, 16, 32).contains(n), s"n = $n: AXI DMA chce tdata w pelnych bajtach (8, 16, 32)")
     val rep = Kv260.spinal.copy(targetDirectory = s"hw/gen/p$n", globalPrefix = s"p${n}_")
       .generateVerilog(new PositVecAxi(cfg, withMaster = master,
-        memCfg = Some(MemMoverConfig(n, lanes = lanes.getOrElse(n, 1)))).setDefinitionName(topName(n)))
+        memCfg = Some(MemMoverConfig(n, lanes = lanes.getOrElse(n, 1))),
+        withGemv = master && gemvK > 0, gemvMaxK = gemvK max 2).setDefinitionName(topName(n)))
     require(master || lanes.getOrElse(n, 1) == 1, "L > 1 tylko z masterem AXI4 (bez --dma)")
-    val ports = (if (master) "m_axi 128 b, irq" else s"s_axis ${2 * n} b, m_axis $n b") + s", L=${lanes.getOrElse(n, 1)}"
-    println(s"${rep.toplevelName}: $cfg, CONFIG = 0x${PositVecRegs.config(cfg, master).toHexString}, " +
+    val gemv  = master && gemvK > 0
+    val ports = (if (master) "m_axi 128 b, irq" else s"s_axis ${2 * n} b, m_axis $n b") + s", L=${lanes.getOrElse(n, 1)}" +
+                (if (gemv) s", gemv K <= $gemvK" else "")
+    println(s"${rep.toplevelName}: $cfg, CONFIG = 0x${PositVecRegs.config(cfg, master, gemv).toHexString}, " +
             s"$ports -> hw/gen/p$n/${rep.toplevelName}.v")
     rep.toplevelName
   }
 
   def main(args : Array[String]) : Unit = {
     master = !args.contains("--dma")
-    val specs = args.toSeq.filter(_ != "--dma")
+    val gi = args.indexOf("--gemv-k")
+    if (gi >= 0) gemvK = args(gi + 1).toInt
+    val specs = args.toSeq.zipWithIndex.collect { case (a, i) if a != "--dma" && a != "--gemv-k" && !(gi >= 0 && i == gi + 1) => a }
     val cfgs = (if (specs.isEmpty) Seq("32") else specs).map(parse)
     val dup  = cfgs.groupBy(_.c.n).collect { case (n, s) if s.size > 1 => n }
     require(dup.isEmpty, s"jeden silnik na format: n = ${dup.mkString(", ")} powtorzone")

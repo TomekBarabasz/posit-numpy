@@ -7,13 +7,13 @@
 
 from . import ref, regs, vecops
 from .array import (P8, P16, P32, PositArray, active_backends, array, axpy, clear_stats, fma, from_bits, get_backend,
-                    nar, quire, set_backend, stats, to_device, using, zeros)
+                    matmul, nar, quire, set_backend, stats, to_device, using, zeros)
 from . import board
 from .backend_sw import PositSw
 from .ref import Flags, PositConfig
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = ["ref", "regs", "vecops", "Flags", "PositConfig", "PositArray", "PositSw", "P8", "P16", "P32",
-           "array", "from_bits", "zeros", "nar", "quire", "fma", "axpy", "to_device", "set_backend", "get_backend", "active_backends", "board", "using", "stats", "clear_stats",
+           "array", "from_bits", "zeros", "nar", "quire", "fma", "axpy", "matmul", "to_device", "set_backend", "get_backend", "active_backends", "board", "using", "stats", "clear_stats",
            "__version__"]

@@ -281,3 +281,95 @@ def test_udmabuf_sync_writes_only_changes(tmp_path):
                       b"8192", b"1",                  # same size and direction: offset + trigger
                       b"2", b"1"]                     # same offset and size: direction + trigger
     assert (tmp_path / "sync_offset").read_text() == "8192" and (tmp_path / "sync_direction").read_text() == "2"
+
+
+# ---- stage 7a: gemv / matmul on the quire (OP_XLOAD, OP_GEMV) -----------------------------------------
+
+def make_gemv(n=32, buf_size=1 << 18, gemv_k=64, lazy=True):
+    mem = FakeUDmaBuf(buf_size)
+    vec = FakeVecMmio(PositConfig(n), mem=mem, lazy_mem=lazy, gemv_k=gemv_k)
+    return PositVecHw(vec, None, mem), vec, mem
+
+
+@pytest.mark.parametrize("n", [8, 16, 32])
+@pytest.mark.parametrize("shape", [(1, 1, 1), (3, 5, 2), (7, 64, 3), (33, 9, 17), (2, 1, 40)])
+def test_matmul_matches_sw(n, shape):
+    hw, vec, mem = make_gemv(n)
+    assert hw.gemv_max_k == 64
+    sw = PositSw(hw.config)
+    m, k, nn = shape
+    rnd = np.random.default_rng(m * 1000 + k * 10 + nn)
+    a = rnd.integers(0, 1 << n, (m, k))
+    b = rnd.integers(0, 1 << n, (k, nn))
+    vec.mem_log.clear()
+    assert np.array_equal(hw.matmul(a, b), sw.matmul(a, b)), shape
+    ops = [cmd for cmd in vec.mem_log]
+    assert len(ops) == 2 * nn                              # one XLOAD and one GEMV per column
+    assert np.array_equal(hw.gemv(a, b[:, 0]), sw.gemv(a, b[:, 0]))
+
+
+def test_matmul_blocks_when_heap_small():
+    hw, vec, mem = make_gemv(32, buf_size=1 << 15, gemv_k=64)   # heap: 16 KB = 4 blocks
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(3)
+    a = rnd.integers(0, 1 << 32, (50, 60))                      # 12 KB alone: row blocks
+    b = rnd.integers(0, 1 << 32, (60, 20))                      # B^T 5 KB: column blocks
+    vec.mem_log.clear()
+    assert np.array_equal(hw.matmul(a, b), sw.matmul(a, b))
+    gemvs = [cmd for cmd in vec.mem_log if cmd[3] >> regs.MEM_CFG_WRITE & 1]
+    assert len(gemvs) > 20 and {cmd[0] % 60 for cmd in gemvs} == {0}   # several row blocks per column
+    assert hw.heap.stats()["blocks"] == 0
+    tiny, vec2, _ = make_gemv(32, buf_size=1 << 14, gemv_k=64)        # heap: 2 blocks, no gemv layout fits
+    assert np.array_equal(tiny.matmul(a[:3], b[:, :2]), sw.matmul(a[:3], b[:, :2]))
+
+
+def test_matmul_device_input_in_place():
+    hw, vec, mem = make_gemv(16)
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(4)
+    a = rnd.integers(0, 1 << 16, (20, 30))
+    b = rnd.integers(0, 1 << 16, (30, 4))
+    ad = hw.to_device(a)
+    vec.mem_log.clear()
+    assert np.array_equal(hw.matmul(ad, b), sw.matmul(a, b))
+    gemv_src = {cmd[1][0] for cmd in vec.mem_log if cmd[3] >> regs.MEM_CFG_WRITE & 1}
+    assert gemv_src == {mem.phys_addr + hw.heap.offset_of(ad)}     # GEMV read A where it is
+
+
+def test_matmul_k_beyond_buffer_uses_dots():
+    hw, vec, mem = make_gemv(32, gemv_k=16)
+    sw = PositSw(hw.config)
+    rnd = np.random.default_rng(6)
+    a = rnd.integers(0, 1 << 32, (3, 40))
+    b = rnd.integers(0, 1 << 32, (40, 2))
+    vec.mem_log.clear()
+    assert np.array_equal(hw.matmul(a, b), sw.matmul(a, b))
+    assert len(vec.mem_log) == 6                                   # 6 quire dots, no gemv (nothing written)
+    assert not any(cmd[3] >> regs.MEM_CFG_WRITE & 1 for cmd in vec.mem_log)
+
+
+def test_gemv_shape_error_raises():
+    hw, vec, mem = make_gemv(32, gemv_k=16, lazy=False)
+    hw.write(regs.OP, regs.OP_GEMV)
+    hw.write(regs.GEMV_K, 4)
+    hw.write(regs.MEM_WLEN, 3)
+    with pytest.raises(PositAluError, match="gemv shape"):
+        hw._mem_cmd(11, [0, 0, 0], 4096, False, False)
+
+
+def test_positarray_matmul_on_fake():
+    import positnp as pn
+    hw, vec, mem = make_gemv(32)
+    rnd = np.random.default_rng(7)
+    A = pn.array(rnd.normal(size=(6, 5)))
+    B = pn.array(rnd.normal(size=(5, 3)))
+    want = (A @ B)                                       # PositSw
+    x = pn.array(rnd.normal(size=5))
+    with pn.using(hw):
+        vec.mem_log.clear()
+        got = A @ B
+        assert len(vec.mem_log) == 6 and got.equal_bits(want)
+        assert np.matmul(A, B).equal_bits(want) and np.dot(A, B).equal_bits(want)
+        assert (A @ x).shape == (6,) and (x @ B).shape == (3,)
+        assert (A.to_device() @ B).equal_bits(want)
+    assert (A @ x).equal_bits(pn.matmul(A, x))

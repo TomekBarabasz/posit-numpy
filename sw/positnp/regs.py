@@ -77,7 +77,7 @@ MEM_DST = 0x70        # RW  address of the result (may equal MEM_SRC_A: in place
 MEM_LO = 0x74         # RW  allowed addresses [MEM_LO, MEM_HI); empty after reset
 MEM_HI = 0x78         # RW
 MEM_CFG = 0x7C        # RW  bit 0 read_b, 1 read_c, 2 write, 3 irq_en
-MEM_STATUS = 0xC0     # RO  bit 0 busy, 1 done, 2 err_range, 3 err_align, 4 err_resp
+MEM_STATUS = 0xC0     # RO  bit 0 busy, 1 done, 2 err_range, 3 err_align, 4 err_resp, 5 err_shape (5.1)
 MEM_CYCLES = 0xC4     # RO  clock cycles of the last command
 MEM_CFG_READ_B = 0
 MEM_CFG_READ_C = 1
@@ -94,7 +94,16 @@ CONFIG_HAS_MASTER = 14
 OP_FMA3 = 12          # a * b + c, all three arrays from memory
 MEM_BEAT_BYTES = 16
 
-VERSION_VEC = 0x0500
+# ---- stage 7a (PositVecAxi 5.1): exact gemv on the quire (VecKv260 --gemv-k, default 4096) ---------
+MEM_WLEN = 0xC8       # RW  elements written by OP_GEMV (M rows); other ops write MEM_LEN
+GEMV_K = 0xCC         # RW  row length K (elements of x), 1 .. GEMV_CFG.maxK
+GEMV_CFG = 0xD0       # RO  [15:0] maxK: capacity of the x buffer (0: no gemv)
+OP_XLOAD = 13         # MEM_SRC_A, MEM_LEN = K -> x buffer (no write)
+OP_GEMV = 14          # y[i] = round(sum_j A[i, j] x[j]): A at MEM_SRC_A (M * K), y at MEM_DST (MEM_WLEN = M)
+MEM_ST_ERR_SHAPE = 5  # MEM_STATUS: MEM_LEN != MEM_WLEN * GEMV_K, K = 0, K > maxK, or XLOAD longer than maxK
+CONFIG_HAS_GEMV = 15
+
+VERSION_VEC = 0x0501
 VERSION_STREAM_MIN = 0x0200   # oldest PositVecAxi with the stream path that PositVecHw drives
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
 STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}

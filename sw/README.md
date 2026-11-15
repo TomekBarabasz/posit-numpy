@@ -44,7 +44,7 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
 - Aplikacje instaluje `scripts/install_overlay.sh <nazwa>` (kopiuje też `<nazwa>.json`, z którego `pn.board` zna silniki).
 
 - Własna klasa, nie podklasa `ndarray`: nic nie przechodzi po cichu do arytmetyki na liczbach całkowitych;
-  nieobsługiwane funkcje NumPy rzucają `TypeError` (`np.matmul`, `np.sin`: etap 7).
+  nieobsługiwane funkcje NumPy rzucają `TypeError` (`np.sin`, `np.exp`: etap 7).
 - Poziom 0 (neg, abs, porównania, sort, min, max, argmin, argmax) na bitach jako liczbach ze znakiem.
 - NaR według standardu: równy sobie, mniejszy od każdej liczby (sortuje się na początek, jest minimum).
 - Rozgłaszanie jak w NumPy; tablica ⊕ skalar idzie trybem skalarnym backendu.
@@ -53,6 +53,12 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
 - Etap 5: `np.sqrt`, `pn.fma(a, b, c)` (a · b + c, rozgłaszanie), `pn.axpy(α, x, y)`; na KV260 stała `c` idzie
   przez OP_FMA, skalarne `b` (lub `a`) z tablicą `c` przez OP_AXPY — oba w jednym przejściu strumienia;
   trzy tablice i operacje, których bitstream nie ma, liczy `PositSw` (`pn.stats()["fallback"]`).
+- Etap 7a: `A @ B`, `np.matmul`, `np.dot` macierzy, `pn.matmul` (też macierz · wektor i wsadowe `(..., M, K) @ (K, N)`):
+  każdy element to dokładny iloczyn skalarny w quire, zaokrąglony raz. Na silniku z gemv (PositVecAxi 5.1,
+  `VecKv260 --gemv-k`, domyślnie K ≤ 4096) kolumny B idą kolejno do bufora x silnika (OP_XLOAD), a A przechodzi
+  przez dwa quire na zmianę (OP_GEMV, 1 mnożenie z dodawaniem na takt); A, Bᵀ i C siedzą w pamięci urządzenia
+  (A już na urządzeniu: `A.to_device()` — czytana w miejscu). K > 4096, brak gemv albo pełna pamięć urządzenia:
+  jeden dot quire na element (też dokładnie). `hw.time_matmul(m, k, n)` mierzy MAC/s.
 - `pn.array(tablica float32)` i `x.to_float32()` / `x.astype(np.float32)` dla posit32 idą przez F2P / P2F backendu
   (bez rzutowania przez float64); dla innych formatów przez `vecops`.
 

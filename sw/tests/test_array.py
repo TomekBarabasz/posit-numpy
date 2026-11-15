@@ -178,8 +178,33 @@ def test_sum_axis_and_dot():
     assert np.array_equal(a.sum(axis=1).to_float(), [6, 22, 38])
     v = pn.array([1.0, 2.0, 3.0])
     assert float(np.dot(v, v)) == 14.0 and float(v.dot([1, 1, 1])) == 6.0
-    with pytest.raises(TypeError, match="stage 7"):
+    with pytest.raises(ValueError, match="not aligned"):
         np.dot(a, a)
+    g = np.dot(a, a.T)                                  # stage 7a: matrices, exact in the quire
+    m = np.arange(12.0).reshape(3, 4)
+    assert np.array_equal(g.to_float(), m @ m.T)
+
+
+def test_matmul_exact_and_numpy_forms():
+    rnd = np.random.default_rng(11)
+    for c in (pn.P8, pn.P16, pn.P32):
+        A = pn.array(rnd.standard_normal((5, 4)), c)
+        B = pn.array(rnd.standard_normal((4, 3)), c)
+        C = A @ B
+        for i in range(5):
+            for j in range(3):
+                q, nar = ref.quire_accumulate(c, "dot", A.bits[i].tolist(), B.bits[:, j].tolist())
+                assert int(C.bits[i, j]) == ref.quire_round(c, q, nar)[0]
+        assert np.matmul(A, B).equal_bits(C) and pn.matmul(A, B).equal_bits(C) and A.dot(B).equal_bits(C)
+        x = pn.array(rnd.standard_normal(4), c)
+        y = A @ x
+        assert y.shape == (5,) and y.equal_bits(pn.matmul(A, x.reshape(4, 1)).reshape(5))
+        assert (x @ B).shape == (3,) and float(x @ x) == float(x.dot(x))
+        assert (np.arange(5.0) @ A).shape == (4,)           # ndarray @ PositArray: __rmatmul__ / ufunc
+        batch = pn.array(rnd.standard_normal((2, 5, 4)), c) @ B
+        assert batch.shape == (2, 5, 3)
+    with pytest.raises(ValueError, match="scalar"):
+        pn.array([1.0, 2.0]) @ pn.array(2.0)
 
 
 @pytest.mark.parametrize("c", [pn.P16, pn.P32])

@@ -379,3 +379,44 @@ def test_device_memory_zero_copy(hw, sw):
     del xd, y
     gc.collect()
     assert hw.heap.stats()["blocks"] == 0, hw.heap
+
+
+# ---- stage 7a: exact gemv / matmul on the quire ------------------------------------------------------------
+
+def _need_gemv(hw):
+    if not getattr(hw, "gemv_max_k", 0):
+        pytest.skip("bitstream without gemv (PositVecAxi 5.1, VecKv260 --gemv-k)")
+
+
+@pytest.mark.parametrize("shape", [(1, 1, 1), (3, 7, 2), (64, 64, 4), (100, 1000, 3), (17, 4096, 2)])
+def test_matmul_matches_sw(hw, sw, shape):
+    _need_gemv(hw)
+    m, k, n = shape
+    if k > hw.gemv_max_k:
+        pytest.skip(f"K = {k} > gemv_max_k = {hw.gemv_max_k}")
+    rnd = np.random.default_rng(m + k + n)
+    a = rnd.integers(0, 1 << hw.config.n, (m, k)).astype(hw.out_dtype)
+    b = rnd.integers(0, 1 << hw.config.n, (k, n)).astype(hw.out_dtype)
+    got = hw.matmul(a, b)
+    want = sw.matmul(a, b)
+    bad = np.argwhere(got != want)
+    assert bad.size == 0, f"{len(bad)} mismatches, first at {tuple(bad[0])}"
+    ad = hw.to_device(a)
+    assert np.array_equal(hw.matmul(ad, b), want)                # A in device memory, read in place
+    del ad
+
+
+def test_matmul_throughput(hw):
+    _need_gemv(hw)
+    import gc
+    for m, k, n, dev in ((256, 256, 16, False), (256, 256, 16, True), (1024, 1024, 8, True)):
+        if k > hw.gemv_max_k:
+            continue
+        r = hw.time_matmul(m, k, n, device=dev)
+        t = hw.last_timing
+        cyc = t["engine_cycles"]
+        print(f"\nmatmul {m}x{k} @ {k}x{n} ({'A on device' if dev else 'A copied'}): {r / 1e6:6.1f} M MAC/s | "
+              f"total {t['total'] * 1e3:.1f} ms, engine {t['dma'] * 1e3:.1f} ms ({m * k * n / max(cyc, 1):.3f} MAC/clock), "
+              f"copy in {t['pack'] * 1e3:.1f} ms")
+        assert cyc <= 1.1 * m * k * n + 300 * n, f"{cyc} engine cycles for {m * k * n} MAC"
+        gc.collect()

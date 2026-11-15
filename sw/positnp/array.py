@@ -157,6 +157,41 @@ def fma(a, b, c) -> "PositArray":
     return PositArray._wrap(np.asarray(r).reshape(shape), cfg)
 
 
+def matmul(a, b) -> "PositArray":
+    """a @ b like np.matmul: every element the exact quire dot product, rounded once.
+
+    On a KV260 engine with gemv (PositVecAxi 5.1): OP_XLOAD / OP_GEMV, 1 multiply-add per clock;
+    elsewhere PositSw or one quire dot per element (both exact, slower)."""
+    first = a if isinstance(a, PositArray) else b
+    if not isinstance(first, PositArray):
+        first = array(a)
+    A, B = first._coerce(a), first._coerce(b)
+    if A.ndim == 0 or B.ndim == 0:
+        raise ValueError("matmul: scalar operands are not allowed, use *")
+    if A.ndim == 1 and B.ndim == 1:
+        return A.dot(B)
+    Ab = A.bits if A.ndim > 1 else A.bits[None, :]
+    Bb = B.bits if B.ndim > 1 else B.bits[:, None]
+    if Ab.shape[-1] != Bb.shape[-2]:
+        raise ValueError(f"matmul: shapes {A.shape} and {B.shape} not aligned")
+    be = get_backend(A.config)
+    mm = getattr(be, "matmul", None) or _sw.setdefault(A.config, PositSw(A.config)).matmul
+    batch = np.broadcast_shapes(Ab.shape[:-2], Bb.shape[:-2])
+    if not batch:
+        C = mm(Ab, Bb)
+    else:
+        Ab = np.broadcast_to(Ab, batch + Ab.shape[-2:])
+        Bb = np.broadcast_to(Bb, batch + Bb.shape[-2:])
+        C = np.empty(batch + (Ab.shape[-2], Bb.shape[-1]), bits_dtype(A.config))
+        for idx in np.ndindex(*batch):
+            C[idx] = mm(np.ascontiguousarray(Ab[idx]), np.ascontiguousarray(Bb[idx]))
+    if A.ndim == 1:
+        C = C[..., 0, :]
+    if B.ndim == 1:
+        C = C[..., 0]
+    return PositArray._wrap(np.ascontiguousarray(C), A.config)
+
+
 def axpy(alpha, x, y) -> "PositArray":
     """alpha * x + y with one rounding (BLAS axpy); one stream pass on the KV260."""
     return fma(x, alpha, y)
@@ -179,7 +214,7 @@ def zeros(shape, config: PositConfig = P32) -> "PositArray":
 
 _LATER = {
     "prod": "no exact posit product reduction planned", "cumsum": "not planned (one quire per prefix)",
-    "matmul": "stage 7", "exp": "stage 7",
+    "exp": "stage 7",
     "log": "stage 7", "sin": "stage 7", "cos": "stage 7", "tanh": "stage 7",
 }
 
@@ -391,6 +426,12 @@ class PositArray:
     def __truediv__(self, other):
         return self._binary("div", other)
 
+    def __matmul__(self, other):
+        return matmul(self, other)
+
+    def __rmatmul__(self, other):
+        return matmul(self._coerce(other), self)
+
     def __radd__(self, other):
         return self._rbinary("add", other)
 
@@ -486,10 +527,12 @@ class PositArray:
         return self._along(axis, one)
 
     def dot(self, other) -> "PositArray":
-        """1-D . 1-D: exact sum of products in the quire, rounded once."""
+        """1-D . 1-D: exact sum of products in the quire, rounded once; 2-D: matmul (np.dot of matrices)."""
         o = self._coerce(other)
+        if self.ndim in (1, 2) and o.ndim in (1, 2) and (self.ndim == 2 or o.ndim == 2):
+            return matmul(self, o)
         if self.ndim != 1 or o.ndim != 1:
-            raise TypeError(f"dot of shapes {self.shape} and {o.shape}: only vectors (matrices: stage 7)")
+            raise TypeError(f"dot of shapes {self.shape} and {o.shape}: vectors and matrices only (use matmul)")
         if o.size != self.size:
             raise ValueError(f"dot of {self.size} and {o.size} elements")
         return PositArray(_quire(self, "dot", o)[0], self.config)
@@ -506,7 +549,7 @@ class PositArray:
         np.negative: "neg", np.positive: "pos", np.absolute: "abs", np.square: "square",
         np.less: "lt", np.less_equal: "le", np.greater: "gt", np.greater_equal: "ge",
         np.equal: "eq", np.not_equal: "ne", np.maximum: "maximum", np.minimum: "minimum",
-        np.isnan: "isnar", np.sqrt: "sqrt",
+        np.isnan: "isnar", np.sqrt: "sqrt", np.matmul: "matmul",
     }
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -522,6 +565,8 @@ class PositArray:
         a = args[0]
         if what in ("add", "sub", "mul", "div"):
             return a._binary(what, args[1])
+        if what == "matmul":
+            return matmul(a, args[1])
         if what == "square":
             return a._binary("mul", a)
         if what == "neg":
