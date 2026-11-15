@@ -421,3 +421,48 @@ def test_matmul_throughput(hw):
               f"copy in {t['pack'] * 1e3:.1f} ms")
         assert cyc <= 1.1 * m * k * -(-n // P) + 300 * n, f"{cyc} engine cycles for {m * k * n} MAC, P = {P}"
         gc.collect()
+
+
+# ---- 5.3: functions from a table (posit8 / posit16 engines) ----------------------------------------------
+
+def _need_table(hw):
+    if not (hasattr(hw, "has_table") and hw.has_table()):
+        pytest.skip("engine without a function table (PositVecAxi 5.3, posit8 / posit16)")
+
+
+@pytest.mark.parametrize("name", ["exp", "log", "sin", "tanh", "sigmoid", "arctan"])
+def test_func_matches_sw(hw, sw, name):
+    _need_table(hw)
+    rnd = np.random.default_rng(len(name))
+    for size in (1, 7, 1000, 1 << 20):
+        a = rnd.integers(0, 1 << hw.config.n, size).astype(hw.out_dtype)
+        got = hw.func(name, a)
+        want = sw.func(name, a)
+        bad = np.nonzero(got != want)[0]
+        assert bad.size == 0, f"{name}, {size}: {bad.size} mismatches, first at {bad[0]}"
+    a = hw.to_device(rnd.integers(0, 1 << hw.config.n, 4096).astype(hw.out_dtype))
+    r = hw.func(name, a)
+    assert hw.on_device(r) and np.array_equal(r, sw.func(name, a))
+
+
+def test_func_throughput(hw, sw):
+    _need_table(hw)
+    import gc
+    from positnp import funcs
+    size = 1 << 22
+    rnd = np.random.default_rng(9)
+    a = rnd.integers(0, 1 << hw.config.n, size).astype(hw.out_dtype)
+    t = funcs.table(hw.config, "exp")
+    t0 = time.perf_counter()
+    t[a]                                                        # the same lookup in NumPy (table in cache)
+    np_lookup = size / (time.perf_counter() - t0)
+    f32 = rnd.standard_normal(size).astype(np.float32)
+    t0 = time.perf_counter()
+    np.exp(f32)
+    np_exp = size / (time.perf_counter() - t0)
+    host = hw.time_func("exp", size)
+    dev = hw.time_func("exp", size, device=True)
+    print(f"\n{hw.config} exp, {size} elements, {hw.table_rate} lookups/clock: copies {host / 1e6:.1f} M/s, "
+          f"device memory {dev / 1e6:.1f} M/s | NumPy table lookup {np_lookup / 1e6:.1f} M/s, "
+          f"NumPy float32 exp {np_exp / 1e6:.1f} M/s")
+    gc.collect()

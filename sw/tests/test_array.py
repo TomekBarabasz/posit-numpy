@@ -97,8 +97,9 @@ def test_ufuncs_and_functions():
     assert np.concatenate([x, y]).shape == (6,) and np.stack([x, y]).shape == (2, 3)
     assert np.where(x > 0, x, y).to_float().tolist() == [1.0, 0.5, 4.0]
     assert np.argsort(x).tolist() == [1, 0, 2] and np.array_equal(x, x.copy())
-    with pytest.raises(TypeError, match="stage 7"):
-        np.sin(x)
+    assert np.sin(x).equal_bits(pn.func("sin", x))                 # stage 7: positnp.funcs
+    with pytest.raises(TypeError, match="not planned"):
+        np.cumsum(x)
     with pytest.raises(TypeError):
         np.cumprod(x)                                          # not implemented at all
 

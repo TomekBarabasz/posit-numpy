@@ -5,15 +5,15 @@
     (x * x - 1).to_float()
 """
 
-from . import ref, regs, vecops
+from . import funcs, ref, regs, vecops
 from .array import (P8, P16, P32, PositArray, active_backends, array, axpy, clear_stats, fma, from_bits, get_backend,
-                    matmul, nar, quire, set_backend, stats, to_device, using, zeros)
+                    func, matmul, nar, sigmoid, quire, set_backend, stats, to_device, using, zeros)
 from . import board
 from .backend_sw import PositSw
 from .ref import Flags, PositConfig
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 __all__ = ["ref", "regs", "vecops", "Flags", "PositConfig", "PositArray", "PositSw", "P8", "P16", "P32",
-           "array", "from_bits", "zeros", "nar", "quire", "fma", "axpy", "matmul", "to_device", "set_backend", "get_backend", "active_backends", "board", "using", "stats", "clear_stats",
+           "array", "from_bits", "zeros", "nar", "quire", "fma", "axpy", "matmul", "func", "sigmoid", "funcs", "to_device", "set_backend", "get_backend", "active_backends", "board", "using", "stats", "clear_stats",
            "__version__"]

@@ -16,6 +16,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `vec_p32_mem_L2/` | to samo z 2 torami elementowymi (2 elementy / takt) |
 | `vec_p32_mem_L2_gemv/` | etap 7a: L2 z gemv (bufor x 4096 elementów, drugi quire, kolejki wyników) |
 | `vec_p32_mem_L2_gemv4/` | 5.2: L2 z gemv na 4 kolumny naraz (4 bufory x, 8 quire) — koszt kolumn |
+| `vec_p16_mem_L4_table/` | 5.3: posit16 ×4 z tablicą funkcji 65 536 × 16 b w 2 kopiach (4 odczyty na takt), bez gemv |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 

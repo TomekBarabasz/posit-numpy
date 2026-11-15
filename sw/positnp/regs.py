@@ -105,7 +105,13 @@ OP_GEMV = 14          # y[i, c] = round(sum_j A[i, j] x_c[j]): A at MEM_SRC_A (M
 MEM_ST_ERR_SHAPE = 5  # MEM_STATUS: GEMV MEM_LEN != M * K, XLOAD MEM_LEN != K * cols, K or cols out of range
 CONFIG_HAS_GEMV = 15
 
-VERSION_VEC = 0x0502
+# ---- 5.3: functions from a table (posit8 / posit16 engines, VecKv260 tables) ------------------------
+TABLE_CTRL = 0xD8     # RW  bit 0 load: OP_TABLE loads the table from MEM_SRC_A (MEM_LEN = 2**n, no write)
+TABLE_CFG = 0xDC      # RO  [7:0] index bits n (0: no table), [15:8] lookups per clock (2 * copies)
+OP_TABLE = 15         # y = T[a], T: 2**n posits in BRAM (positnp.funcs tables)
+TABLE_CTRL_LOAD = 0
+
+VERSION_VEC = 0x0503
 VERSION_STREAM_MIN = 0x0200   # oldest PositVecAxi with the stream path that PositVecHw drives
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
 STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}

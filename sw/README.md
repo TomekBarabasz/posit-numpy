@@ -60,6 +60,12 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
   (A już na urządzeniu: `A.to_device()` — czytana w miejscu). Silnik 5.2 liczy P kolumn B na jedno przejście A
   (`hw.gemv_cols`, domyślnie 4: 4 MAC na takt). K > 4096, brak gemv albo pełna pamięć urządzenia:
   jeden dot quire na element (też dokładnie). `hw.time_matmul(m, k, n)` mierzy MAC/s.
+- Etap 7, funkcje: `np.exp`, `np.exp2`, `np.expm1`, `np.log`, `np.log2`, `np.log10`, `np.log1p`, `np.sin`, `np.cos`, `np.tan`,
+  `np.arcsin`, `np.arccos`, `np.arctan`, `np.sinh`, `np.cosh`, `np.tanh`, `np.arcsinh`, `np.arccosh`, `np.arctanh`, `np.cbrt`,
+  `pn.sigmoid(x)`, `pn.func(name, x)` (`positnp/funcs.py`). posit8 / posit16: pełne tablice, poprawnie zaokrąglone
+  (sprawdzone ±4 ulp float64, `funcs.uncertified`); posit32: float64 libm zaokrąglone raz (poprawne poza wynikami
+  w odległości 1 ulp float64 od remisu). Reguły positów: NaR, bieguny → NaR, nadmiar → maxpos, niedomiar → minpos.
+  Silniki 5.3 posit8 / posit16 czytają tablicę same (OP_TABLE, `hw.func`, `hw.time_func`).
 - `pn.array(tablica float32)` i `x.to_float32()` / `x.astype(np.float32)` dla posit32 idą przez F2P / P2F backendu
   (bez rzutowania przez float64); dla innych formatów przez `vecops`.
 
@@ -81,6 +87,7 @@ positnp/
                    konwersje float <-> posit, poziom 0; bit w bit z ref.py      etap 3
                    quire, sqrt, fma, float32 <-> posit32                        etap 4-5
   backend_sw.py    PositSw: te same array_op na vecops (bez płytki, wzorzec)   etap 2-3
+  funcs.py         funkcje elementarne: tablice posit8 / posit16, posit32 z float64  etap 7
   array.py         PositArray z protokołami NumPy, pn.array, using, stats       etap 3
   board.py         pn.board: aplikacje PL z Pythona (xmutil), silniki jako backendy
   devmem.py        pamięć urządzenia: sterta w buforze u-dma-buf, tablice bez kopii

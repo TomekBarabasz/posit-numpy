@@ -280,6 +280,39 @@ posit8 ×8 bit w bit z `QuireRef`; **64 × 64 posit32 na 4 kolumny: 4 160 taktó
 - Dalej: więcej kolumn (P = 8: ok. +20 000 LUT dla posit32, zmieści się) albo L elementów A na takt
   (wymaga L quire na kolumnę).
 
+## Funkcje elementarne z tablicy (wersja 5.3)
+
+posit16 ma 65 536 wartości, posit8 — 256: każdą funkcję jednej zmiennej da się stablicować w całości, poprawnie
+zaokrągloną. Tablice liczy Python (`positnp/funcs.py`), silnik tylko czyta T[a] z BRAM — tak samo szybko dla
+`exp`, `log`, `sin`, `tanh` czy `sigmoid`.
+
+```
+OP_TABLE + TABLE_CTRL.load (MEM_LEN = 2^n):  pamięć --> T[0 .. 2^n) we wszystkich kopiach (po 1 elemencie na takt)
+OP_TABLE:  grupa L elementów a --> porcje po 2 C --> kopia k: port A = T[a_2k], port B = T[a_2k+1] (1 takt) --> grupa y --> zapis
+```
+
+- tablica w C kopiach dwuportowej BRAM: 2 C odczytów na takt; domyślnie C = L / 2 (posit16 ×4: 2 kopie, 4 odczyty /
+  takt; posit8 ×8: 4 kopie w LUTRAM); posit16: 64 K × 16 b = 32 BRAM36 na kopię (`ram_style = block`, kaskada URAM
+  byłaby wolniejsza); `VecKv260 --table-copies C`, `0`: bez tablicy; OOC: `vec_p16_mem_L4_table`;
+- rejestry: `TABLE_CTRL` (0xD8) bit 0 load, `TABLE_CFG` (0xDC, RO) = 2 C << 8 | n; OP_TABLE = 15 (ostatni kod 4-bitowego OP),
+  bit 15 maski operacji w CONFIG; ładowanie z `MEM_LEN ≠ 2^n` → `err_shape`; wersja 5.3;
+- Python: `np.exp`, `np.log`, `np.log1p`, `np.sin`, `np.tanh`, `np.arctan`, ... (20 ufunc NumPy) i `pn.sigmoid`, `pn.func(name, x)`;
+  `PositVecHw.func` ładuje tablicę raz (128 KB dla posit16, ok. 0,7 ms) i trzyma ją, dopóki nie trzeba innej funkcji;
+  tablice w pamięci urządzenia działają bez kopii; posit32 i silniki bez tablicy: `positnp.funcs` w programie;
+- poprawność: wartość z float64 libm zaokrąglona raz; każdą pozycję sprawdza zaokrąglenie wartości zaburzonej o ±2⁻⁵⁰
+  (ok. 4 ulp float64, więcej niż błąd libm) — wszystkie 21 funkcji × posit8 / posit16 mają 0 pozycji niepewnych
+  (`funcs.uncertified`); jedyne remisy to wyniki dokładne (exp2 z liczby całkowitej, log2 potęgi dwójki);
+- reguły positów: NaR → NaR, bieguny i poza dziedziną → NaR (log 0, arctanh 1), nadmiar → ±maxpos, niedomiar
+  niezerowego wyniku → ±minpos (exp(−10⁹) = minpos).
+
+Symulacja (`PositVecMemTestplan.mem_table`): posit16 ×1 / ×4 (1 i 2 kopie), posit8 ×8 (4 i 1 kopia), posit8 ×2 — losowa
+tablica, przeładowanie drugą, długości 1 … 2L + 1, 97 i losowe, przeplot z `add`; wynik bit w bit, WSTRB, CNT_ELEMENTS,
+odrzucenie złej długości ładowania. Przepustowość (4096 elementów):
+
+| | posit16 ×1, C = 1 | posit16 ×4, C = 1 | posit16 ×4, C = 2 | posit8 ×8, C = 4 | posit8 ×8, C = 1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| elementy / takt | 0,99 | 1,97 | 3,86 | 7,54 | 1,98 |
+
 ## Pamięć urządzenia: tablice bez kopii
 
 Przy szerszym silniku posit32 ogranicza już tylko procesor (kopie do i z bufora). Bufor u-dma-buf silnika z masterem

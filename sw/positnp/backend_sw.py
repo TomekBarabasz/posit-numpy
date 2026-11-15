@@ -91,6 +91,12 @@ class PositSw:
                 out[i, j] = self.reduce("dot", A[i], Bt[j])[0]
         return out
 
+    def func(self, name: str, a) -> np.ndarray:
+        """f(a) on raw bits (positnp.funcs): the correctly rounded table for n <= 16, float64 for posit32."""
+        from . import funcs
+        self._stats["elements"] += int(np.size(a))
+        return funcs.evaluate(self.config, name, np.asarray(a)).astype(self.dtype)
+
     def gemv(self, a, x) -> np.ndarray:
         """y = A x on raw bits: matmul with one column."""
         return self.matmul(a, np.asarray(x).reshape(-1, 1)).reshape(np.shape(a)[0])

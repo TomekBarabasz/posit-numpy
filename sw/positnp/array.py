@@ -192,6 +192,18 @@ def matmul(a, b) -> "PositArray":
     return PositArray._wrap(np.ascontiguousarray(C), A.config)
 
 
+def func(name: str, x) -> "PositArray":
+    """f(x) for a positnp.funcs function (exp, log, sin, tanh, sigmoid, ...): correctly rounded tables for
+    posit8 / posit16 (looked up by the engine on 5.3 KV260 bitstreams), float64 evaluation for posit32."""
+    x = x if isinstance(x, PositArray) else array(x)
+    return x._func(name)
+
+
+def sigmoid(x) -> "PositArray":
+    """1 / (1 + exp(-x)), rounded once (not a NumPy ufunc)."""
+    return func("sigmoid", x)
+
+
 def axpy(alpha, x, y) -> "PositArray":
     """alpha * x + y with one rounding (BLAS axpy); one stream pass on the KV260."""
     return fma(x, alpha, y)
@@ -214,8 +226,6 @@ def zeros(shape, config: PositConfig = P32) -> "PositArray":
 
 _LATER = {
     "prod": "no exact posit product reduction planned", "cumsum": "not planned (one quire per prefix)",
-    "exp": "stage 7",
-    "log": "stage 7", "sin": "stage 7", "cos": "stage 7", "tanh": "stage 7",
 }
 
 
@@ -324,6 +334,12 @@ class PositArray:
         if dt == np.float64:
             return self.to_float()
         raise TypeError(f"PositArray.astype({dt}): float32 or float64 (bits: .bits)")
+
+    def _func(self, name: str) -> "PositArray":
+        be = get_backend(self.config)
+        fn = getattr(be, "func", None) or _sw.setdefault(self.config, PositSw(self.config)).func
+        flat = self.bits.reshape(-1)
+        return PositArray._wrap(np.asarray(fn(name, flat)).reshape(self.shape), self.config)
 
     def sqrt(self) -> "PositArray":
         """Correctly rounded square root; negative -> NaR."""
@@ -550,6 +566,12 @@ class PositArray:
         np.less: "lt", np.less_equal: "le", np.greater: "gt", np.greater_equal: "ge",
         np.equal: "eq", np.not_equal: "ne", np.maximum: "maximum", np.minimum: "minimum",
         np.isnan: "isnar", np.sqrt: "sqrt", np.matmul: "matmul",
+        # stage 7: elementary functions (positnp.funcs)
+        np.exp: "f:exp", np.exp2: "f:exp2", np.expm1: "f:expm1", np.log: "f:log", np.log2: "f:log2",
+        np.log10: "f:log10", np.log1p: "f:log1p", np.sin: "f:sin", np.cos: "f:cos", np.tan: "f:tan",
+        np.arcsin: "f:arcsin", np.arccos: "f:arccos", np.arctan: "f:arctan", np.sinh: "f:sinh",
+        np.cosh: "f:cosh", np.tanh: "f:tanh", np.arcsinh: "f:arcsinh", np.arccosh: "f:arccosh",
+        np.arctanh: "f:arctanh", np.cbrt: "f:cbrt",
     }
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -567,6 +589,8 @@ class PositArray:
             return a._binary(what, args[1])
         if what == "matmul":
             return matmul(a, args[1])
+        if what.startswith("f:"):
+            return a._func(what[2:])
         if what == "square":
             return a._binary("mul", a)
         if what == "neg":

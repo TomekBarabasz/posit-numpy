@@ -329,6 +329,12 @@ class PositVecHw(PositAluHw):
         self.gemv_max_k = gcfg & 0xFFFF
         # 5.2: P columns of B per pass of A (each with its own pair of quires): P multiply-adds per clock
         self.gemv_cols = max(1, gcfg >> 16 & 0xFF) if self.gemv_max_k and self.version >= 0x0502 else 1
+        # 5.3: functions from a table (posit8 / posit16 engines): index bits and lookups per clock
+        tcfg = self.read(regs.TABLE_CFG) if self.master and self.version >= 0x0503 and \
+            self.op_mask >> regs.OP_TABLE & 1 else 0
+        self.table_bits = tcfg & 0xFF
+        self.table_rate = tcfg >> 8 & 0xFF
+        self._table: Optional[str] = None          # function whose table the engine holds
         self.in_dtype = self.IN_DTYPE[n]
         self.out_dtype = self.OUT_DTYPE[n]
         self.in_bytes = 2 * n // 8
@@ -962,6 +968,61 @@ class PositVecHw(PositAluHw):
         timing["device"] = a_dev is not None
         self.last_timing = timing
         return out
+
+    # ---- 5.3: elementary functions from a table ------------------------------------------------------
+
+    def has_table(self) -> bool:
+        """The engine looks posit<n> functions up in its own table (OP_TABLE)."""
+        return self.table_bits == self.config.n
+
+    def func(self, name: str, a) -> np.ndarray:
+        """f(a) on raw bits (positnp.funcs: exp, log, sin, tanh, sigmoid, ...), shape of a.
+
+        Engines with a table (posit8 / posit16, 5.3): the table of `name` is loaded once (2**n elements,
+        kept until another function is used) and the lookup runs like any array op, L elements per
+        clock up to 2 * copies; device arrays stay on the device. Otherwise positnp.funcs in software
+        (stats()["fallback"]).
+        """
+        from . import funcs
+        if not self.has_table():
+            self._fallback += int(np.size(a))
+            return funcs.evaluate(self.config, name, self._bits(a)).astype(self.out_dtype).reshape(np.shape(a))
+        self._load_table(name)
+        return self._mem(regs.OP_TABLE, a, None, 0)
+
+    def _load_table(self, name: str) -> None:
+        if self._table == name:
+            return
+        from . import funcs
+        t = funcs.table(self.config, name)
+        self._table = None
+        dev = self.heap.empty(t.size, self.out_dtype) if self.heap is not None else None
+        if dev is not None:
+            dev[:] = t
+            off = self.heap.offset_of(dev)
+        else:
+            off = 0
+            self.buf.view(self.out_dtype, 0, t.size)[:] = t      # staging (the engine is idle)
+        self.buf.sync_for_device(off, t.nbytes, 1)
+        self.write(regs.OP, regs.OP_TABLE)
+        self.write(regs.TABLE_CTRL, 1 << regs.TABLE_CTRL_LOAD)
+        try:
+            self._mem_cmd(t.size, [off, 0, 0], None, False, False)
+        finally:
+            self.write(regs.TABLE_CTRL, 0)
+        del dev
+        self._table = name
+
+    def time_func(self, name: str = "exp", size: int = 1 << 20, device: bool = False) -> float:
+        """Elements per second of func(name) on `size` random elements (table load excluded)."""
+        rnd = np.random.default_rng(0)
+        a = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
+        if device:
+            a = self.to_device(a)
+        self.func(name, a[:1])                                  # table loaded outside the timing
+        t0 = time.perf_counter()
+        self.func(name, a)
+        return size / (time.perf_counter() - t0)
 
     def _matmul_dots(self, A, B, out) -> np.ndarray:
         """C[i, j] as one quire dot each (no gemv in the bitstream, K > gemv_max_k, or no device memory)."""

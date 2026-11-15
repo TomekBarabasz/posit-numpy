@@ -27,7 +27,8 @@ class FakeVecMmio(FakeAluMmio):
 
     def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1,
                  stage5: bool = True, k: int = 4, units: int = 1, mem: Optional[FakeUDmaBuf] = None, lanes: int = 1,
-                 lazy_mem: bool = False, gemv_k: Optional[int] = None, gemv_cols: int = 4):
+                 lazy_mem: bool = False, gemv_k: Optional[int] = None, gemv_cols: int = 4,
+                 table: Optional[bool] = None):
         super().__init__(config, ops, busy_reads)
         self.engine_cfg = lanes << 16 | units << 8 | k
         # stage 6: with `mem` the engine has its own AXI4 master and works on that buffer (MEM_* registers)
@@ -43,6 +44,11 @@ class FakeVecMmio(FakeAluMmio):
         self.regs[regs.MEM_WLEN] = 0
         self.regs[regs.GEMV_K] = 0
         self.regs[regs.GEMV_COLS] = 1
+        # 5.3: table of 2**n entries (posit8 / posit16 with the master)
+        self.table = (mem is not None and config.n <= 16) if table is None else table
+        self.tab = np.zeros(1 << config.n if self.table else 1, np.uint64)
+        self.regs[regs.TABLE_CTRL] = 0
+        self.table_loads = 0
         # lazy_mem: the command runs only at the first MEM_STATUS read after the start - the latest
         # moment real hardware could read its input - so a driver that touches a half of the buffer
         # still in use (or starts a command before the previous one finished) gets wrong results
@@ -69,8 +75,14 @@ class FakeVecMmio(FakeAluMmio):
             if self.gemv_k:
                 master |= 1 << regs.CONFIG_HAS_GEMV
                 s5 |= 1 << regs.OP_XLOAD | 1 << regs.OP_GEMV
+            if self.table:
+                s5 |= 1 << regs.OP_TABLE
             return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | master | \
                 (reduce_mask | s5) << 16
+        if offset == regs.TABLE_CFG:
+            return (2 << 8 | self.config.n) if self.table else 0
+        if offset == regs.TABLE_CTRL:
+            return self.regs[offset]
         if offset == regs.GEMV_CFG:
             return self.gemv_cols << 16 | self.gemv_k if self.gemv_k else 0
         if offset in (regs.MEM_WLEN, regs.GEMV_K, regs.GEMV_COLS):
@@ -108,6 +120,9 @@ class FakeVecMmio(FakeAluMmio):
         if offset in (regs.MEM_LEN, regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C, regs.MEM_DST,
                       regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG):
             self.regs[offset] = value & 0xFFFFFFFF
+            return
+        if offset == regs.TABLE_CTRL and self.table:
+            self.regs[offset] = value & 1
             return
         if offset in (regs.MEM_WLEN, regs.GEMV_K, regs.GEMV_COLS) and self.gemv_k:
             mask = {regs.MEM_WLEN: 0xFFFFFFFF, regs.GEMV_K: 2 * self.gemv_k - 1, regs.GEMV_COLS: 0x1F}[offset]
@@ -150,8 +165,10 @@ class FakeVecMmio(FakeAluMmio):
         op = r[regs.OP]
         gemv = bool(self.gemv_k) and op == regs.OP_GEMV
         xload = bool(self.gemv_k) and op == regs.OP_XLOAD
+        tload = self.table and op == regs.OP_TABLE and bool(r[regs.TABLE_CTRL] & 1)
+        lookup = self.table and op == regs.OP_TABLE and not tload
         use = [True, bool(cfg >> regs.MEM_CFG_READ_B & 1), bool(cfg >> regs.MEM_CFG_READ_C & 1)]
-        write = bool(cfg >> regs.MEM_CFG_WRITE & 1) and not xload
+        write = bool(cfg >> regs.MEM_CFG_WRITE & 1) and not xload and not tload
         srcs = [r[regs.MEM_SRC_A], r[regs.MEM_SRC_B], r[regs.MEM_SRC_C]]
         nbytes = -(-length * by // 16) * 16
         cols = r[regs.GEMV_COLS]
@@ -163,7 +180,7 @@ class FakeVecMmio(FakeAluMmio):
         k = r[regs.GEMV_K]
         bad_k = k == 0 or k > self.gemv_k or cols == 0 or cols > self.gemv_cols
         bad_shape = (gemv and (bad_k or r[regs.MEM_WLEN] * k != length or wlen > 0xFFFFFFFF)) or \
-            (xload and (bad_k or k * cols != length))
+            (xload and (bad_k or k * cols != length)) or (tload and length != self.tab.size)
         self.mem_log.append((length, srcs, r[regs.MEM_DST], cfg))
         st = 1 << regs.MEM_ST_DONE | bad_range << regs.MEM_ST_ERR_RANGE | bad_align << regs.MEM_ST_ERR_ALIGN | \
             bad_shape << regs.MEM_ST_ERR_SHAPE
@@ -174,7 +191,14 @@ class FakeVecMmio(FakeAluMmio):
         view = lambda a: np.frombuffer(self.mem.memory, dt, length, a - self.mem.phys_addr)   # noqa: E731
         a = view(srcs[0]).astype(np.uint64)
         b = view(srcs[1]).astype(np.uint64) if use[1] else np.zeros(length, np.uint64)
-        if xload:
+        if tload:
+            self.tab[:] = a
+            self.table_loads += 1
+        elif lookup:
+            self.counters["elements"] += length
+            if write:
+                view(r[regs.MEM_DST])[:] = self.tab[a.astype(np.int64)].astype(dt)
+        elif xload:
             self.xbuf[:cols, :k] = a.reshape(cols, k)
         elif gemv:
             xs = [self.xbuf[cc, :k].tolist() for cc in range(cols)]
