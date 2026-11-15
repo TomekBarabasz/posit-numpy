@@ -148,6 +148,22 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
 - Hold −0,18 ns (1 670 końcówek) to znów wejścia `m_axi_rdata` → FIFO odczytu w LUTRAM: artefakt OOC (zero input delay),
   w bitstreamie (build.tcl) timing jest domknięty.
 
+### Funkcje z tablicy: `vec_p16_mem_L4_table` (2026-11-15)
+
+`PositVecAxi` 5.3 posit16 z masterem, 4 tory elementowe, tablica funkcji 65 536 × 16 b w 2 kopiach (4 odczyty na takt), bez gemv.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p16_mem_L4_table` | synth | 9 440 | 4 752 | 403 | 5 | 60 | 2,763 | 138,2 |
+| `vec_p16_mem_L4_table` | impl | 9 331 | 4 752 | 403 | 5 | 60 | 2,326 | 130,3 |
+
+- Tablica to prawie wyłącznie BRAM: 60 BRAM36 (30 na kopię, 1 Mb każda) z 144 w xck26; logiki jest mało
+  (adresy, porcje, rejestr grupy wyników), cały silnik posit16 ×4 ma 9 331 LUT.
+- Ścieżka krytyczna to dalej dodawanie ALU (21 poziomów), 130,3 MHz, zapas 2,3 ns; odczyt BRAM (min. okres 1,96 ns) nie ogranicza.
+- Hold −0,18 ns na `m_axi_rdata` → FIFO w LUTRAM: ten sam artefakt OOC co wyżej.
+- W bitstreamie z trzema silnikami tablica posit8 (4 × 256 × 8 b) idzie do LUTRAM; więcej kopii posit16 niż 2
+  (np. 4 przy L = 8) zajęłoby 120 BRAM36 — wtedy lepiej tablice w URAM z rejestrem wyjściowym.
+
 ### Tory wielotaktowe: `vec_p32_u4` (2026-11-14)
 
 `PositVecAxi` posit32 jak `vec_p32`, ale z 4 torami div / sqrt / FMA (`slowUnits = 4`). Vivado 2026.1, 100 MHz, `-impl`.

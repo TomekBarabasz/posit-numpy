@@ -328,6 +328,7 @@ na 4 194 304 elementach, M elementów / s:
 - Pamięć urządzenia: 83 % (posit16) i 81 % (posit8) teoretycznych 400 / 800 M/s przy 100 MHz; reszta to synchronizacja
   cache i polecenie. Każda funkcja kosztuje tyle samo — `sin`, `log` czy `sigmoid` jak `exp`.
 - matmul na tym bitstreamie bez zmian (386,6 / 388,0 / 388,6 M MAC/s): tablica nie zabiera zegara.
+- OOC (`vec_p16_mem_L4_table`): 9 331 LUT, 60 BRAM36 (2 kopie po 30), 130,3 MHz — tablica kosztuje BRAM, nie logikę.
 
 ## Pamięć urządzenia: tablice bez kopii
 
