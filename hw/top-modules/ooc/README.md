@@ -16,6 +16,7 @@ Etap 0: jednostki posit-core w posit⟨16,2⟩ i posit⟨32,2⟩ do syntezy poza
 | `vec_p32_mem_L2/` | to samo z 2 torami elementowymi (2 elementy / takt) |
 | `vec_p32_mem_L2_gemv/` | etap 7a: L2 z gemv (bufor x 4096 elementów, drugi quire, kolejki wyników) |
 | `vec_p32_mem_L2_gemv4/` | 5.2: L2 z gemv na 4 kolumny naraz (4 bufory x, 8 quire) — koszt kolumn |
+| `vec_p16_mem_L4_table/` | 5.3: posit16 ×4 z tablicą funkcji 65 536 × 16 b w 2 kopiach (4 odczyty na takt), bez gemv |
 
 Każdy wariant potoku jest w osobnym katalogu, bo nazwa modułu (`PositAdd_16_2`) nie zawiera potoku.
 
@@ -146,6 +147,22 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
 - Ścieżka krytyczna bez zmian — dodawanie ALU toru 1 (24 poziomy): 104,8 → 103,6 MHz, zapas 0,35 ns; gemv jej nie dotyka.
 - Hold −0,18 ns (1 670 końcówek) to znów wejścia `m_axi_rdata` → FIFO odczytu w LUTRAM: artefakt OOC (zero input delay),
   w bitstreamie (build.tcl) timing jest domknięty.
+
+### Funkcje z tablicy: `vec_p16_mem_L4_table` (2026-11-15)
+
+`PositVecAxi` 5.3 posit16 z masterem, 4 tory elementowe, tablica funkcji 65 536 × 16 b w 2 kopiach (4 odczyty na takt), bez gemv.
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p16_mem_L4_table` | synth | 9 440 | 4 752 | 403 | 5 | 60 | 2,763 | 138,2 |
+| `vec_p16_mem_L4_table` | impl | 9 331 | 4 752 | 403 | 5 | 60 | 2,326 | 130,3 |
+
+- Tablica to prawie wyłącznie BRAM: 60 BRAM36 (30 na kopię, 1 Mb każda) z 144 w xck26; logiki jest mało
+  (adresy, porcje, rejestr grupy wyników), cały silnik posit16 ×4 ma 9 331 LUT.
+- Ścieżka krytyczna to dalej dodawanie ALU (21 poziomów), 130,3 MHz, zapas 2,3 ns; odczyt BRAM (min. okres 1,96 ns) nie ogranicza.
+- Hold −0,18 ns na `m_axi_rdata` → FIFO w LUTRAM: ten sam artefakt OOC co wyżej.
+- W bitstreamie z trzema silnikami tablica posit8 (4 × 256 × 8 b) idzie do LUTRAM; więcej kopii posit16 niż 2
+  (np. 4 przy L = 8) zajęłoby 120 BRAM36 — wtedy lepiej tablice w URAM z rejestrem wyjściowym.
 
 ### Tory wielotaktowe: `vec_p32_u4` (2026-11-14)
 

@@ -23,6 +23,9 @@ import posit.kv260._
 //  Etap 7a: z masterem tez gemv (OP_XLOAD / OP_GEMV, bufor x na --gemv-k elementow, domyslnie 4096;
 //  --gemv-k 0: bez gemv - bez drugiego quire i bufora). Wersja 5.2: --gemv-cols P (domyslnie 4) kolumn B naraz,
 //  kazda z wlasna para quire i buforem x - P mnozen z dodawaniem na takt (koszt: 2 P quire).
+//  Wersja 5.3: silniki posit8 / posit16 z masterem maja tablice funkcji (OP_TABLE, exp / log / sin ...
+//  z positnp.funcs) w --table-copies C kopiach dwuportowej BRAM (domyslnie max(1, L / 2): 2 C = L odczytow
+//  na takt; posit16: 32 BRAM36 na kopie); --table-copies 0: bez tablicy.
 //
 //  Wynik: hw/gen/p<n>/PositVecAxi_p<n>.v dla kazdego silnika; dalej vivado/build.tcl -engines "32 16 8"
 //  (z --dma: build.tcl -io dma).
@@ -33,6 +36,7 @@ object VecKv260 {
   var master = true      // etap 6: master AXI4; --dma przelacza na AXI4-Stream + AXI DMA
   var gemvK  = 4096      // etap 7a: pojemnosc bufora x (0: bez gemv)
   var gemvP  = 4         // 5.2: kolumny naraz
+  var tableC = -1        // 5.3: kopie tablicy (-1: max(1, L / 2) dla n <= 16)
 
   val lanes = scala.collection.mutable.Map[Int, Int]()     // n -> L z argumentow
 
@@ -52,29 +56,37 @@ object VecKv260 {
 
   def topName(n : Int) : String = s"PositVecAxi_p$n"
 
+  /** Kopie tablicy funkcji silnika posit<n>: tylko z masterem i n <= 16. */
+  def tableCopies(n : Int) : Int = {
+    val l = lanes.getOrElse(n, 1)
+    if (!master || n > 16) 0 else if (tableC >= 0) tableC min ((l + 1) / 2) else ((l / 2) max 1)
+  }
+
   def generate(cfg : PositAluConfig) : String = {
     val n   = cfg.c.n
     require(Seq(8, 16, 32).contains(n), s"n = $n: AXI DMA chce tdata w pelnych bajtach (8, 16, 32)")
     val rep = Kv260.spinal.copy(targetDirectory = s"hw/gen/p$n", globalPrefix = s"p${n}_")
       .generateVerilog(new PositVecAxi(cfg, withMaster = master,
         memCfg = Some(MemMoverConfig(n, lanes = lanes.getOrElse(n, 1))),
-        withGemv = master && gemvK > 0, gemvMaxK = gemvK max 2, gemvCols = gemvP).setDefinitionName(topName(n)))
+        withGemv = master && gemvK > 0, gemvMaxK = gemvK max 2, gemvCols = gemvP,
+        tableCopies = tableCopies(n)).setDefinitionName(topName(n)))
     require(master || lanes.getOrElse(n, 1) == 1, "L > 1 tylko z masterem AXI4 (bez --dma)")
     val gemv  = master && gemvK > 0
     val ports = (if (master) "m_axi 128 b, irq" else s"s_axis ${2 * n} b, m_axis $n b") + s", L=${lanes.getOrElse(n, 1)}" +
-                (if (gemv) s", gemv K <= $gemvK x $gemvP kolumn" else "")
-    println(s"${rep.toplevelName}: $cfg, CONFIG = 0x${PositVecRegs.config(cfg, master, gemv).toHexString}, " +
+                (if (gemv) s", gemv K <= $gemvK x $gemvP kolumn" else "") +
+                (if (tableCopies(n) > 0) s", tablica 2^$n x ${tableCopies(n)}" else "")
+    println(s"${rep.toplevelName}: $cfg, CONFIG = 0x${PositVecRegs.config(cfg, master, gemv, tableCopies(n) > 0).toHexString}, " +
             s"$ports -> hw/gen/p$n/${rep.toplevelName}.v")
     rep.toplevelName
   }
 
   def main(args : Array[String]) : Unit = {
     master = !args.contains("--dma")
-    val opts = Seq("--gemv-k", "--gemv-cols")
+    val opts = Seq("--gemv-k", "--gemv-cols", "--table-copies")
     val vals = opts.map(o => args.indexOf(o)).filter(_ >= 0).map(_ + 1).toSet
     for ((o, i) <- opts.map(o => (o, args.indexOf(o))) if i >= 0) {
       val v = args(i + 1).toInt
-      if (o == "--gemv-k") gemvK = v else gemvP = v
+      o match { case "--gemv-k" => gemvK = v; case "--gemv-cols" => gemvP = v; case _ => tableC = v }
     }
     val specs = args.toSeq.zipWithIndex.collect { case (a, i) if a != "--dma" && !opts.contains(a) && !vals.contains(i) => a }
     val cfgs = (if (specs.isEmpty) Seq("32") else specs).map(parse)

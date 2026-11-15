@@ -25,7 +25,7 @@ object PositVecMemPlan {
   val plan : Seq[Testpoint] = Seq(
     Testpoint("mem_regs", Stage.V1,
       "Wersja 5.0, CONFIG.has_master, rejestry MEM_*",
-      checking = Seq("ID_VERSION == 0x50530502", "CONFIG bit 14 i maska z FMA3 (bit 12)",
+      checking = Seq("ID_VERSION == 0x50530503", "CONFIG bit 14 i maska z FMA3 (bit 12)",
                      "MEM_*: odczyt == zapis, po resecie pusty zakres [0, 0)")),
 
     Testpoint("mem_elementwise", Stage.V1,
@@ -88,7 +88,20 @@ object PositVecMemPlan {
     Testpoint("mem_gemv_throughput", Stage.V2,
       "gemv 64 x 64 posit32 bez przerw w pamieci, P = 1 i P = 4 kolumny",
       checking = Seq("MEM_CYCLES <= 1,1 * M * K + 200 (1 element A / takt, zaokraglenie wiersza w cieniu nastepnego)",
-                     "P = 4: 4 kolumny w tym samym czasie (4 MAC / takt)"))
+                     "P = 4: 4 kolumny w tym samym czasie (4 MAC / takt)")),
+
+    Testpoint("mem_table", Stage.V1,
+      "5.3: y = T[a] z tablicy 2^n (OP_TABLE, TABLE_CTRL.load), posit16 x1 / x4, posit8 x8, 1 .. L / 2 kopii",
+      stimulus = Seq("losowa tablica, potem druga (przeladowanie)", "dlugosci 1 .. 2L + 1, 97 i losowe",
+                     "przeplot z add (zwykla sciezka po tablicy)"),
+      checking = Seq("wynik == T[a] bit w bit, bajty za wynikiem nietkniete, CNT_ELEMENTS == len",
+                     "TABLE_CFG == 2 C << 8 | n, CONFIG: bit OP 15, wersja 5.3",
+                     "ladowanie z MEM_LEN != 2^n: err_shape, bez transakcji",
+                     "przepustowosc: L elementow na max(1, L / 2C) taktow")),
+
+    Testpoint("mem_table_absent", Stage.V1,
+      "Silnik bez tablicy",
+      checking = Seq("TABLE_CFG == 0, bit OP 15 w CONFIG == 0"))
   )
 }
 
@@ -110,6 +123,10 @@ class PositVecMemTestplan extends TestplanSuite {
     SimEnv(Conventions.spinal, s"vecmem_gemv_${c.n}_L${l}_P$cols").compile(
       new PositVecAxi(cfgFor(c, 1), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l)),
                       withGemv = true, gemvMaxK = GEMV_MAXK, gemvCols = cols))
+  def tabled(c : PositConfig, l : Int, copies : Int) =
+    SimEnv(Conventions.spinal, s"vecmem_table_${c.n}_L${l}_C$copies").compile(
+      new PositVecAxi(cfgFor(c, 1), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l)),
+                      tableCopies = copies))
   def laned(c : PositConfig, l : Int) =
     SimEnv(Conventions.spinal, s"vecmem_${c.n}_L$l").compile(
       new PositVecAxi(cfgFor(c, 2), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l))))
@@ -202,7 +219,7 @@ class PositVecMemTestplan extends TestplanSuite {
 
   testpoint("mem_regs") {
     sim(m32, "mem_regs") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530502L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == 0x50530503L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
       val cfg = e.rd(CONFIG)
       assert(((cfg >> CONFIG_HAS_MASTER) & 1) == 1 && ((cfg >> (16 + OP_FMA3)) & 1) == 1, f"CONFIG 0x$cfg%x")
       for ((r, v) <- Seq(MEM_LEN -> 123L, MEM_SRC_A -> 0x1230L, MEM_SRC_B -> 0x4560L, MEM_SRC_C -> 0x7890L,
@@ -513,6 +530,74 @@ class PositVecMemTestplan extends TestplanSuite {
       val cyc = e.rd(MEM_CYCLES)
       assert(cyc <= 1.1 * m * k + 200, s"gemv ${m}x$k x $pc: $cyc taktow")
       info(f"gemv posit32 ${m}x$k, $pc kolumn: $cyc taktow (${m * k.toDouble * pc / cyc}%.3f MAC / takt)")
+    }
+  }
+
+  // ---- 5.3: funkcje z tablicy -----------------------------------------------------------------
+
+  for ((c, l, copies) <- Seq((p16, 1, 1), (p16, 4, 1), (p16, 4, 2), (p8, 8, 4), (p8, 8, 1), (p8, 2, 1))) {
+    testpoint("mem_table", s"p${c.n}_L${l}_C$copies") {
+      sim(tabled(c, l, copies), s"mem_table_${c.n}_${l}_$copies") { e =>
+        val size = 1 << c.n
+        val cfg = e.rd(CONFIG)
+        assert(((cfg >> (16 + OP_TABLE)) & 1) == 1, f"CONFIG 0x$cfg%x")
+        assert(e.rd(TABLE_CFG) == ((2L * copies) << 8 | c.n), f"TABLE_CFG 0x${e.rd(TABLE_CFG)}%x")
+        val tabAddr = BASE + 0x80000
+        def load(t : Seq[BigInt]) : Unit = {
+          e.put(tabAddr, t)
+          e.wr(TABLE_CTRL, 1 << TABLE_CTRL_LOAD)
+          val s = e.run(OP_TABLE, size, tabAddr)
+          assert((s & 0x3c) == 0, f"ladowanie tablicy: MEM_STATUS 0x$s%x")
+          e.wr(TABLE_CTRL, 0)
+        }
+        // odrzucenie: zla dlugosc ladowania
+        e.wr(TABLE_CTRL, 1 << TABLE_CTRL_LOAD)
+        val (ar0, aw0) = (e.mem.arCount, e.mem.awCount)
+        val bad = e.run(OP_TABLE, size - 1, tabAddr)
+        assert(((bad >> MEM_ST_ERR_SHAPE) & 1) == 1 && e.mem.arCount == ar0 && e.mem.awCount == aw0, f"MEM_STATUS 0x$bad%x")
+        e.wr(TABLE_CTRL, 0)
+
+        for (round <- 0 until 2) {
+          val t = e.rand(size)
+          load(t)
+          val lens = (1 to 2 * l + 1) ++ Seq(97, 1 + e.rnd.nextInt(3000))
+          for (len <- lens) {
+            val (a, b, dst) = (e.addr(0, len), e.addr(1, len), e.addr(3, len))
+            val xs = e.rand(len)
+            e.put(a, xs)
+            val guard = Seq.fill(32)(BigInt(0x5a))
+            mem(e).writeWords(dst + e.bytes.toLong * len, 1, guard)
+            e.wr(CTRL, 1 << CTRL_CLEAR_COUNTERS)
+            val s = e.run(OP_TABLE, len, a, None, None, Some(dst))
+            assert((s & 0x3c) == 0, f"tablica len=$len: MEM_STATUS 0x$s%x")
+            assertSeq(s"T[a] L=$l C=$copies len=$len (tablica $round)", e.get(dst, len), xs.map(x => t(x.toInt)))
+            assert(mem(e).readWords(dst + e.bytes.toLong * len, 1, 32) == guard, s"len=$len: zapis za koncem")
+            assert(e.rd(CNT_ELEMENTS) == len, s"len=$len: CNT_ELEMENTS ${e.rd(CNT_ELEMENTS)}")
+            if (len == 97) {                                   // zwykla sciezka po tablicy
+              val ys = e.rand(len)
+              e.put(b, ys)
+              assert((e.run(PositAluOp.code(PositOp.Add), len, a, Some(b), None, Some(dst)) & 0x3c) == 0)
+              assertSeq(s"add po tablicy len=$len", e.get(dst, len), xs.zip(ys).map { case (x, y) => PositRef(c, PositOp.Add, x, y) })
+            }
+          }
+        }
+        e.mem.stall = 0.0
+        e.mem.maxDelay = 20
+        val len = 4096
+        val xs = e.rand(len)
+        e.put(BASE, xs)
+        e.run(OP_TABLE, len, BASE, None, None, Some(BASE + 0x20000))
+        val cyc = e.rd(MEM_CYCLES)
+        val perGroup = math.max(1, (l + 2 * copies - 1) / (2 * copies))
+        assert(cyc <= 1.1 * len / l * perGroup + 200, s"$len elementow, L=$l, C=$copies: $cyc taktow")
+        info(f"tablica posit${c.n}, L=$l, C=$copies: $len elementow w $cyc taktach (${len.toDouble / cyc}%.2f / takt)")
+      }
+    }
+  }
+
+  testpoint("mem_table_absent") {
+    sim(m16, "mem_table_absent") { e =>
+      assert(e.rd(TABLE_CFG) == 0 && ((e.rd(CONFIG) >> (16 + OP_TABLE)) & 1) == 0)
     }
   }
 }

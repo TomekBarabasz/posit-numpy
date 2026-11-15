@@ -374,3 +374,49 @@ def test_positarray_matmul_on_fake():
         assert (A @ x).shape == (6,) and (x @ B).shape == (3,)
         assert (A.to_device() @ B).equal_bits(want)
     assert (A @ x).equal_bits(pn.matmul(A, x))
+
+
+# ---- 5.3: functions from a table (OP_TABLE) ----------------------------------------------------------
+
+@pytest.mark.parametrize("n", [8, 16])
+def test_func_on_table_engine(n):
+    from positnp import funcs
+    mem = FakeUDmaBuf(1 << 20)
+    vec = FakeVecMmio(PositConfig(n), mem=mem, lazy_mem=True)
+    hw = PositVecHw(vec, None, mem)
+    assert hw.has_table() and hw.table_bits == n and hw.table_rate == 2
+    rnd = np.random.default_rng(n)
+    a = rnd.integers(0, 1 << n, 20_001)
+    for name in ("exp", "sin", "exp", "sigmoid"):
+        assert np.array_equal(hw.func(name, a), funcs.evaluate(hw.config, name, a)), name
+    assert vec.table_loads == 4 and hw._table == "sigmoid"            # exp, sin, exp again, sigmoid
+    loads = vec.table_loads
+    hw.func("sigmoid", a[:10])
+    assert vec.table_loads == loads                                    # same function: no reload
+    assert hw.stats()["fallback"] == 0
+    d = hw.to_device(a)
+    r = hw.func("tanh", d)                                             # device in -> device out
+    assert hw.on_device(r) and np.array_equal(r, funcs.evaluate(hw.config, "tanh", a))
+    assert vec.regs[regs.TABLE_CTRL] == 0
+
+
+def test_func_without_table_falls_back():
+    from positnp import funcs
+    hw, vec, mem = make_master(32)
+    assert not hw.has_table()
+    a = np.random.default_rng(1).integers(0, 1 << 32, 1000)
+    assert np.array_equal(hw.func("log", a), funcs.evaluate(hw.config, "log", a))
+    assert hw.stats()["fallback"] == 1000
+
+
+def test_positarray_func_on_fake():
+    import positnp as pn
+    mem = FakeUDmaBuf(1 << 20)
+    vec = FakeVecMmio(PositConfig(16), mem=mem)
+    hw = PositVecHw(vec, None, mem)
+    x = pn.array(np.linspace(-4, 4, 1001).reshape(7, 143), pn.P16)
+    want = np.exp(x)
+    with pn.using(hw):
+        got = np.exp(x)
+        assert got.shape == x.shape and got.equal_bits(want) and vec.table_loads == 1
+        assert np.exp(x.to_device()).on_device
