@@ -362,10 +362,19 @@ dekoder -> prepare -+                                                           
    (x * x - x / 3).to_float()
    ```
 
+## Wentylator
+
+Sygnał `fan_en_b` wentylatora KV260 (pin A12) idzie z PS przez PL: w fabrycznej aplikacji wyjście TTC0 (EMIO, bit 2)
+jest z nim połączone, a Linux steruje obrotami przez `pwm-fan`. Bitstream bez tego połączenia zostawia pin niesterowany
+i wentylator kręci się na maksa. `build.tcl` (vec i alu) dokłada je domyślnie (`common/vivado/kv260_fan.tcl`:
+TTC0 z wyjściem fali na EMIO, `emio_ttc0_wave_o[2]` → port `fan_en_b`, ograniczenia pinu A12 LVCMOS33);
+`-fan 0` wyłącza. Krzywa obrotów zostaje po stronie Linuksa, jak w fabrycznej aplikacji.
+
 ## build.tcl
 
 | opcja `-tclargs` | domyślnie | |
 | --- | --- | --- |
+| `-fan 0\|1` | `1` | wentylator: PWM z TTC0 przez EMIO na pin `fan_en_b` (bez tego po wgraniu kręci się na maksa) |
 | `-io master\|dma` | `master` | etap 6: master AXI4 silnika (bez AXI DMA, przerwanie) albo stara ścieżka z AXI DMA |
 | `-engines "<n> ..."` | `32` | silniki: 8, 16, 32, każdy co najwyżej raz (`tdata` AXI DMA w pełnych bajtach); `-n <n>` = jeden |
 | `-name <nazwa>` | `posit<n>[_<n>…]_mem` (`_vec` z `-io dma`) | nazwa aplikacji dla xmutil |
