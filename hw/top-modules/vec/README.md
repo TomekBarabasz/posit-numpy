@@ -255,14 +255,30 @@ OP_GEMV:  A[i, j] --+--> x_0[j] --> quire (bank i mod 2, kolumna 0) --> kolejka 
   `err_shape` także dla XLOAD `MEM_LEN ≠ K · cols` i cols poza 1..P;
 - element wchodzi do banku tylko razem do wszystkich aktywnych kolumn (każda gotowa i z miejscem w kolejce),
   więc kolumny idą krok w krok; scalanie wyników: wiersz po wierszu, w wierszu kolumny po kolei;
-- koszt: 2 P quire i P buforów x (posit32, P = 4: 8 quire, 16 BRAM36); `VecKv260 --gemv-cols P`, domyślnie 4;
-  OOC: `vec_p32_mem_L2_gemv4`;
+- koszt: 2 P quire i P buforów x; posit32, P = 4 (OOC `vec_p32_mem_L2_gemv4`): 35 119 LUT, 44 DSP, bufory x w URAM,
+  103,6 MHz — ok. 2 900 LUT i 4 DSP na quire posit32; `VecKv260 --gemv-cols P`, domyślnie 4;
 - Python: `matmul` dzieli B na grupy po P kolumn (Bᵀ grupami w pamięci urządzenia, C grupami wierszy),
   jedna para XLOAD + GEMV na grupę; `hw.gemv_cols`.
 
 Symulacja: wszystkie kształty z `mem_gemv` dla P = 4 (cols = 4, 1, 3, 2) na posit32 ×1 / ×2, posit16 ×4,
 posit8 ×8 bit w bit z `QuireRef`; **64 × 64 posit32 na 4 kolumny: 4 160 taktów = 3,94 MAC / takt**
-(jedna kolumna: 4 141 taktów, 0,99). Na płytce oczekiwane ok. 390 M MAC/s na silnik.
+(jedna kolumna: 4 141 taktów, 0,99).
+
+**Na płytce (2026-11-15, `posit32_16_8_mem`, P = 4 we wszystkich trzech silnikach)**, M MAC / s
+(w nawiasie: P = 1, wersja 5.1):
+
+| | posit32 | posit16 | posit8 | MAC / takt silnika |
+| --- | ---: | ---: | ---: | ---: |
+| 256×256 @ 256×16, A kopiowana | 250,9 (81,9) | 258,7 (82,0) | 262,7 (82,9) | 3,93 |
+| 256×256 @ 256×16, A w pamięci urządzenia | 267,8 (83,8) | 274,7 (84,0) | 277,6 (84,1) | 3,93 |
+| 1024×1024 @ 1024×8, A w pamięci urządzenia | 370,0 (97,6) | 373,5 (97,8) | 375,0 (98,0) | 3,98 |
+| 1024×1024 @ 1024×64, A w pamięci urządzenia | **386,8** | **387,9** | **388,6** | 3,98 |
+
+- 4 kolumny dają dokładnie 4 × przepustowość: silnik 3,984 MAC / takt z 4 możliwych, przy 100 MHz ok. 390 M MAC/s
+  na silnik; 1024 × 1024 · 1024 × 64 (67 M MAC) w 173 ms, z tego 170 ms pracy silnika.
+- Przy małych macierzach znowu waży stały koszt poleceń (XLOAD + GEMV na grupę kolumn, synchronizacja cache).
+- Dalej: więcej kolumn (P = 8: ok. +20 000 LUT dla posit32, zmieści się) albo L elementów A na takt
+  (wymaga L quire na kolumnę).
 
 ## Pamięć urządzenia: tablice bez kopii
 
