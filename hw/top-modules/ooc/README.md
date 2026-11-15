@@ -111,6 +111,23 @@ Vivado 2026.1, 100 MHz, `-impl -only "vec_*/*"`. ALU, ścieżka strumieniowa i q
   ok. 1 000 LUT, jeśli kiedyś zabraknie.
 - Ścieżka krytyczna bez zmian: dodawanie ALU (rejestr polecenia → kolejka szybkich wyników), 113,5 MHz; master jej nie wydłuża.
 
+### Szerszy silnik: `vec_p32_mem_L2` (2026-11-15)
+
+`PositVecAxi` 5.0 posit32 z masterem i 2 torami elementowymi (2 × `PositStreamAlu`, 1 tor div / sqrt / FMA w każdym).
+
+| wariant | etap | LUT | FF | CARRY8 | DSP | BRAM | WNS ns | Fmax MHz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vec_p32_mem_L2` | synth | 12 016 | 5 867 | 495 | 12 | 0 | 1,981 | 124,7 |
+| `vec_p32_mem_L2` | impl | 11 842 | 5 867 | 495 | 12 | 0 | 0,454 | 104,8 |
+
+- Drugi tor kosztuje ok. +3 440 LUT, +980 FF i +4 DSP (mnożarki ALU i FMA drugiego toru) względem `vec_p32_mem`.
+- Ścieżka krytyczna ta sama co zawsze — dodawanie ALU (rejestr polecenia → kolejka szybkich wyników, 25 poziomów),
+  tylko z dłuższym routingiem (57 % opóźnienia): 113,5 → 104,8 MHz. Zapas przy 100 MHz 0,45 ns — wystarcza,
+  ale przy dalszym poszerzaniu albo wyższym zegarze trzeba będzie dodać rejestr w środku sumatora
+  (np. po wyrównaniu, jak w FMA).
+- Hold −0,18 ns na wejściach `m_axi_rdata` → FIFO w LUTRAM: ten sam artefakt OOC co przy `s_axi` (wejścia z zerowym
+  opóźnieniem prosto do przerzutników); w układzie steruje nimi rejestr smartconnecta.
+
 ### Tory wielotaktowe: `vec_p32_u4` (2026-11-14)
 
 `PositVecAxi` posit32 jak `vec_p32`, ale z 4 torami div / sqrt / FMA (`slowUnits = 4`). Vivado 2026.1, 100 MHz, `-impl`.

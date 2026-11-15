@@ -270,7 +270,8 @@ posit8 ×8)**: `test_board_vec.py` przechodzi w całości. M elementów / s, 4 1
 - Porcje: przy szerszym silniku stały koszt porcji (synchronizacja ok. 50 µs, polecenie) waży więcej; domyślnie
   8 porcji po co najmniej 1 MB (było 16 po 256 KB).
 
-OOC: `top-modules/ooc` wariant `vec_p32_mem_L2`.
+OOC (`vec_p32_mem_L2`): 11 842 LUT, 5 867 FF, 12 DSP, 104,8 MHz po routingu (z jednym torem 8 405 LUT, 113,5 MHz) —
+drugi tor to ok. +3 400 LUT i +4 DSP; ścieżka krytyczna ta sama (dodawanie ALU), zapas przy 100 MHz 0,45 ns.
 
 ## Kilka silników w jednym bitstreamie
 
