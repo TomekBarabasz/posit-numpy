@@ -222,8 +222,31 @@ bit w bit dla długości 1 … 2L + 1 i losowych, redukcje, WSTRB, CNT_ELEMENTS;
 | takty | 2 124 | 1 083 | 588 |
 | elementy / takt | 1,93 | 3,78 | 6,97 |
 
-Na płytce dojdzie ograniczenie po stronie procesora (kopie ok. 28 ms na 4 M elementów posit32 przy silniku 21 ms) —
-do zmierzenia; OOC: `top-modules/ooc` wariant `vec_p32_mem_L2`.
+**Na płytce (2026-11-15, `posit32_16_8_mem`: posit32 ×2 tory i 4 tory div / sqrt / FMA, posit16 ×4 i 2 tory,
+posit8 ×8)**: `test_board_vec.py` przechodzi w całości. M elementów / s, 4 194 304 elementy, podwójny bufor
+(w nawiasie: jeden tor elementowy, podwójny bufor):
+
+| | posit32 ×2 | posit16 ×4 | posit8 ×8 | NumPy float32 |
+| --- | ---: | ---: | ---: | ---: |
+| add (porcja 1–4 MB) | **121,3** (92,0) | **228,8** (94,0) | **399,8** (95,8) | 244 / 287 / 338 |
+| div | 75,0 | 124,0 | 184,1 | |
+| sqrt | 76,2 | 125,7 | 186,2 | 225 |
+| FMA / AXPY | 115,6 / 116,4 | 206,4 / 207,6 | 238,1 / 238,0 | |
+| FMA3 (trzy tablice) | 71,7 | 139,2 | 234,5 | |
+| F2P / P2F | 166,8 / 166,6 | | | |
+| quire dot | 93,5 | | 96,1 | 240 |
+
+- Silnik liczy dokładnie tyle, ile wynika z konfiguracji: add 0,53 / 0,27 / 0,13 taktu na element,
+  div 1,25 / 0,75 / 0,50 (10 / 6 / 4 takty przez L · slowUnits), FMA posit8 0,38 (3 takty / 8 torów).
+- **posit8 add jest szybsze niż NumPy float32 na A53**; posit16 osiąga ok. 80 %.
+- posit32 add: silnik czeka już tylko ok. 1 ms, cały czas to kopie (ok. 27 ms z 35) — dalej tylko bez kopii
+  (bity `PositArray` od razu w buforze u-dma-buf).
+- FMA3 posit32 0,8 taktu / element: trzy tablice po 8 B na takt przekraczają 16 B / takt szyny HP.
+- quire (1 element / takt) jest teraz najwolniejszą ścieżką: ok. 95 M / s dla wszystkich formatów.
+- Porcje: przy szerszym silniku stały koszt porcji (synchronizacja ok. 50 µs, polecenie) waży więcej; domyślnie
+  8 porcji po co najmniej 1 MB (było 16 po 256 KB).
+
+OOC: `top-modules/ooc` wariant `vec_p32_mem_L2`.
 
 ## Kilka silników w jednym bitstreamie
 
