@@ -313,6 +313,22 @@ odrzucenie złej długości ładowania. Przepustowość (4096 elementów):
 | --- | ---: | ---: | ---: | ---: | ---: |
 | elementy / takt | 0,99 | 1,97 | 3,86 | 7,54 | 1,98 |
 
+**Na płytce (2026-11-15, `posit32_16_8_mem` 5.3: posit16 ×4 z 2 kopiami tablicy, posit8 ×8 z 4 kopiami)**, `exp`
+na 4 194 304 elementach, M elementów / s:
+
+| | posit16 (4 odczyty / takt) | posit8 (8 odczytów / takt) |
+| --- | ---: | ---: |
+| silnik, z kopiami | 222,8 | 498,2 |
+| silnik, pamięć urządzenia | **331,9** | **647,8** |
+| NumPy: ten sam odczyt tablicy `T[a]` na A53 | 33,3 | 56,2 |
+| NumPy float32 `np.exp` na A53 | 23,3 | 23,4 |
+
+- Silnik jest 10–12 × szybszy niż ten sam odczyt tablicy w NumPy (128 KB tablicy posit16 nie mieści się w L1, każdy
+  element to losowy dostęp) i 14–28 × szybszy niż float32 `np.exp`, a wynik jest poprawnie zaokrąglony.
+- Pamięć urządzenia: 83 % (posit16) i 81 % (posit8) teoretycznych 400 / 800 M/s przy 100 MHz; reszta to synchronizacja
+  cache i polecenie. Każda funkcja kosztuje tyle samo — `sin`, `log` czy `sigmoid` jak `exp`.
+- matmul na tym bitstreamie bez zmian (386,6 / 388,0 / 388,6 M MAC/s): tablica nie zabiera zegara.
+
 ## Pamięć urządzenia: tablice bez kopii
 
 Przy szerszym silniku posit32 ogranicza już tylko procesor (kopie do i z bufora). Bufor u-dma-buf silnika z masterem
