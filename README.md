@@ -12,7 +12,11 @@ hw/                     sbt, SpinalHDL 1.15.0 (z lib/sbt/HwBuild.scala)
   posit-kv260/          pakiet posit.kv260   AXI, opakowania IP, generatory RTL
   top-modules/<id>/     pakiet posit.top.<id> top-levele do Vivado (sbt: top-<id>)
 sw/                     bindingi Pythona (positnp): ref.py, regs.py, backend_hw.py
+sw/examples/            przykłady od podstaw do gemm / FIR / FFT i porównań z floatami (bez płytki)
 ```
+
+**Zacznij od przykładów:** [`sw/examples/README.md`](sw/examples/README.md) (English) — wszystkie działają na zwykłym
+PC (`cd sw && pip install -e . && python3 examples/00_hello_posit.py`), z `--hw` na KV260.
 
 Stan:
 - etap 1 (ALU za AXI4-Lite, wywołanie z Pythona): sprawdzony na płytce — `hw/top-modules/alu/README.md`;
