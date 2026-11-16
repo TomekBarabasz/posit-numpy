@@ -44,6 +44,7 @@ class FakeVecMmio(FakeAluMmio):
         self.regs[regs.MEM_WLEN] = 0
         self.regs[regs.GEMV_K] = 0
         self.regs[regs.GEMV_COLS] = 1
+        self.regs[regs.GEMV_MODE] = 0
         # 5.3: table of 2**n entries (posit8 / posit16 with the master)
         self.table = (mem is not None and config.n <= 16) if table is None else table
         self.tab = np.zeros(1 << config.n if self.table else 1, np.uint64)
@@ -85,7 +86,7 @@ class FakeVecMmio(FakeAluMmio):
             return self.regs[offset]
         if offset == regs.GEMV_CFG:
             return self.gemv_cols << 16 | self.gemv_k if self.gemv_k else 0
-        if offset in (regs.MEM_WLEN, regs.GEMV_K, regs.GEMV_COLS):
+        if offset in (regs.MEM_WLEN, regs.GEMV_K, regs.GEMV_COLS, regs.GEMV_MODE):
             return self.regs[offset]
         if offset == regs.CNT_ELEMENTS:
             self.log.append(("r", offset))
@@ -124,8 +125,9 @@ class FakeVecMmio(FakeAluMmio):
         if offset == regs.TABLE_CTRL and self.table:
             self.regs[offset] = value & 1
             return
-        if offset in (regs.MEM_WLEN, regs.GEMV_K, regs.GEMV_COLS) and self.gemv_k:
-            mask = {regs.MEM_WLEN: 0xFFFFFFFF, regs.GEMV_K: 2 * self.gemv_k - 1, regs.GEMV_COLS: 0x1F}[offset]
+        if offset in (regs.MEM_WLEN, regs.GEMV_K, regs.GEMV_COLS, regs.GEMV_MODE) and self.gemv_k:
+            mask = {regs.MEM_WLEN: 0xFFFFFFFF, regs.GEMV_K: 2 * self.gemv_k - 1, regs.GEMV_COLS: 0x1F,
+                    regs.GEMV_MODE: 1}[offset]
             self.regs[offset] = value & mask
             return
         if offset == regs.CTRL and value >> regs.CTRL_MEM_START & 1 and self.mem is not None:
@@ -179,7 +181,10 @@ class FakeVecMmio(FakeAluMmio):
         bad_align = any(a % 16 for a, u in zip(srcs, use) if u) or (write and r[regs.MEM_DST] % 16)
         k = r[regs.GEMV_K]
         bad_k = k == 0 or k > self.gemv_k or cols == 0 or cols > self.gemv_cols
-        bad_shape = (gemv and (bad_k or r[regs.MEM_WLEN] * k != length or wlen > 0xFFFFFFFF)) or \
+        window = gemv and bool(r[regs.GEMV_MODE] & 1)
+        rows_m = r[regs.MEM_WLEN]
+        bad_len = ((rows_m - 1) * cols + k != length or rows_m == 0 or cols > k) if window else rows_m * k != length
+        bad_shape = (gemv and (bad_k or bad_len or wlen > 0xFFFFFFFF)) or \
             (xload and (bad_k or k * cols != length)) or (tload and length != self.tab.size)
         self.mem_log.append((length, srcs, r[regs.MEM_DST], cfg))
         st = 1 << regs.MEM_ST_DONE | bad_range << regs.MEM_ST_ERR_RANGE | bad_align << regs.MEM_ST_ERR_ALIGN | \
@@ -202,11 +207,21 @@ class FakeVecMmio(FakeAluMmio):
             self.xbuf[:cols, :k] = a.reshape(cols, k)
         elif gemv:
             xs = [self.xbuf[cc, :k].tolist() for cc in range(cols)]
-            rows = a.reshape(r[regs.MEM_WLEN], k).tolist()
+            if window:                                       # row i = a[i * cols .. + K); column p: m in [p, p + T)
+                t = k - cols + 1
+                al = a.tolist()
+                rows = [al[i * cols:i * cols + k] for i in range(rows_m)]
+                xs = None
+            else:
+                rows = a.reshape(rows_m, k).tolist()
             y = []
             for row in rows:
-                for x in xs:
-                    q, nar = ref.quire_accumulate(self.config, "dot", row, x, 0, False)
+                for p in range(cols):
+                    if xs is None:
+                        rr, x = row[p:p + t], self.xbuf[p, p:p + t].tolist()
+                    else:
+                        rr, x = row, xs[p]
+                    q, nar = ref.quire_accumulate(self.config, "dot", rr, x, 0, False)
                     v, f = ref.quire_round(self.config, q, nar)
                     y.append(v)
                     for kk in ("nar", "sat", "inexact"):

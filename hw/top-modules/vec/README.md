@@ -280,6 +280,47 @@ posit8 ×8 bit w bit z `QuireRef`; **64 × 64 posit32 na 4 kolumny: 4 160 taktó
 - Dalej: więcej kolumn (P = 8: ok. +20 000 LUT dla posit32, zmieści się) albo L elementów A na takt
   (wymaga L quire na kolumnę).
 
+## FIR / splot: GEMV z oknem (wersja 5.4)
+
+y[i] = Σⱼ x[i + j] · h[j] to gemv, w którym wiersz A jest oknem sygnału: wiersz r = x[r·P .. r·P + K), K = T + P − 1,
+a kolumna p ma odczepy przesunięte o p (bufor x_p[m] = h[m − p]) — jeden wiersz daje P kolejnych wyjść.
+Nowe jest tylko okno: sygnał idzie z pamięci raz, do bufora kołowego, a nakładające się wiersze czyta silnik.
+
+```
+OP_XLOAD (cols · K):  x_p[m] = h[m − p] (zera poza)  -->  bufory x_0 .. x_{P-1}
+OP_GEMV, GEMV_MODE.window (MEM_LEN = (M − 1) · cols + K):
+   m_axi R --> x po kolei --> bufor kołowy (2 maxK)          zapis czeka, gdy nadpisałby element >= rowStart
+   wiersz r: element rowStart + m (gdy już zapisany) --+--> quire kolumny 0 (tylko m w [0, T))   --> y[r·P]
+                                                       +--> quire kolumny 1 (tylko m w [1, 1 + T)) --> y[r·P + 1] ...
+```
+
+- kolumna liczy tylko elementy w zakresie swoich odczepów, resztę wiersza dostaje jako 0: zera w buforze x wciągałyby
+  inaczej NaR z sąsiednich wyjść (0 · NaR = NaR) — wyszło na posit8 z rozkładem `stress`;
+- rejestr `GEMV_MODE` (0xE0) bit 0 window, wersja 5.4; `err_shape` dla `MEM_LEN ≠ (M − 1)·cols + K`, M = 0, cols > K;
+  koszt: bufor kołowy 2 · maxK × n (posit32: 256 Kb), reszta to gemv z 5.2;
+- przepustowość: P · T MAC na K = T + P − 1 taktów — przy T ≫ P prawie P MAC / takt, czyli P / K wyjść na takt;
+- Python: `np.convolve`, `np.correlate` (tryby full / same / valid jak w NumPy), `pn.convolve`, `pn.correlate`,
+  `hw.correlate(x, h)`, `hw.time_correlate`; NaR w odczepach Python wstawia jako 0 i ustawia NaR dokładnie
+  w wyjściach, w których ten odczep jest składnikiem sumy (jak `nan` w NumPy); odczepy dłuższe niż maxK − P + 1:
+  PositSw.
+
+Symulacja (`PositVecMemTestplan.mem_fir`): posit32 ×1 (P = 1) i ×2, posit16 ×4, posit8 ×8 (P = 4); T od 1 do
+maxK − P + 1, cols 1 … P, sygnał wielokrotnie dłuższy niż bufor kołowy; każde wyjście bit w bit z `QuireRef`, sygnał
+czytany raz (liczba słów R), odrzucenia kształtu. 61 odczepów posit32, P = 4: 256 wyjść w 4 156 taktach — **3,76 MAC / takt**.
+
+**Na płytce (2026-11-16, `posit32_16_8_mem` 5.4, P = 4)**, 1 048 576 próbek, M wyjść / s (w nawiasie M MAC / s):
+
+| odczepy | posit32 | posit16 | posit8 | MAC / takt silnika (teoria 4T / (T + 3)) | NumPy float32 `np.convolve` |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 17,53 (281) | 19,62 (314) | 20,16 (323) | 3,37 (3,37) | 5,71 |
+| 64 | 5,77 (369) | 5,85 (374) | 5,90 (378) | 3,82 (3,82) | 2,76 |
+| 256 | 1,53 (392) | 1,54 (393) | 1,54 (394) | 3,95 (3,95) | 0,93 |
+
+- Silnik robi dokładnie tyle, ile wynika z okna: P · T MAC na T + P − 1 taktów; strata to tylko P − 1 taktów na wiersz.
+- 1,7–3,5 × szybciej niż float32 `np.convolve` na A53 (metoda bezpośrednia), a każde wyjście jest dokładne w quire.
+- Przy krótkich filtrach (16 odczepów) waży już Python i kopia sygnału (posit32 281 z 337 M MAC/s silnika); szybciej dla
+  krótkich T dałoby więcej kolumn (P = 8: 8 · 16 / 23 = 5,6 MAC / takt).
+
 ## Funkcje elementarne z tablicy (wersja 5.3)
 
 posit16 ma 65 536 wartości, posit8 — 256: każdą funkcję jednej zmiennej da się stablicować w całości, poprawnie

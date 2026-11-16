@@ -25,7 +25,7 @@ object PositVecMemPlan {
   val plan : Seq[Testpoint] = Seq(
     Testpoint("mem_regs", Stage.V1,
       "Wersja 5.0, CONFIG.has_master, rejestry MEM_*",
-      checking = Seq("ID_VERSION == 0x50530503", "CONFIG bit 14 i maska z FMA3 (bit 12)",
+      checking = Seq("ID_VERSION == 0x50530504", "CONFIG bit 14 i maska z FMA3 (bit 12)",
                      "MEM_*: odczyt == zapis, po resecie pusty zakres [0, 0)")),
 
     Testpoint("mem_elementwise", Stage.V1,
@@ -98,6 +98,16 @@ object PositVecMemPlan {
                      "TABLE_CFG == 2 C << 8 | n, CONFIG: bit OP 15, wersja 5.3",
                      "ladowanie z MEM_LEN != 2^n: err_shape, bez transakcji",
                      "przepustowosc: L elementow na max(1, L / 2C) taktow")),
+
+    Testpoint("mem_fir", Stage.V1,
+      "5.4: FIR y[i] = sum_j x[i + j] h[j] przez GEMV z oknem (GEMV_MODE.window), posit32 x1 / x2, posit16 x4, posit8 x8",
+      stimulus = Seq("T odczepow 1 .. maxK - cols + 1, cols 1 .. P, M wierszy (cols wyjsc kazdy)",
+                     "sygnal kilka razy dluzszy niz bufor kolowy (zawijanie, czekanie zapisu)",
+                     "elementy z rozkladu stress, losowe opoznienia pamieci"),
+      checking = Seq("y == QuireRef.round(sum_j x[i + j] h[j]) bit w bit dla kazdego wyjscia",
+                     "sygnal czytany raz (slowa R == ceil(MEM_LEN / slowo))", "bajty za y nietkniete",
+                     "MEM_LEN != (M - 1) * cols + K, M = 0, cols > K: err_shape",
+                     "przepustowosc: M wierszy po K taktow (cols * T MAC na wiersz)")),
 
     Testpoint("mem_table_absent", Stage.V1,
       "Silnik bez tablicy",
@@ -219,7 +229,7 @@ class PositVecMemTestplan extends TestplanSuite {
 
   testpoint("mem_regs") {
     sim(m32, "mem_regs") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530503L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == 0x50530504L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
       val cfg = e.rd(CONFIG)
       assert(((cfg >> CONFIG_HAS_MASTER) & 1) == 1 && ((cfg >> (16 + OP_FMA3)) & 1) == 1, f"CONFIG 0x$cfg%x")
       for ((r, v) <- Seq(MEM_LEN -> 123L, MEM_SRC_A -> 0x1230L, MEM_SRC_B -> 0x4560L, MEM_SRC_C -> 0x7890L,
@@ -598,6 +608,86 @@ class PositVecMemTestplan extends TestplanSuite {
   testpoint("mem_table_absent") {
     sim(m16, "mem_table_absent") { e =>
       assert(e.rd(TABLE_CFG) == 0 && ((e.rd(CONFIG) >> (16 + OP_TABLE)) & 1) == 0)
+    }
+  }
+
+  // ---- 5.4: FIR przez GEMV z oknem --------------------------------------------------------------
+
+  /** Bufory x dla FIR: kolumna p = odczepy przesuniete o p (h[m - p], zera poza), K = T + cols - 1. */
+  def firTaps(h : Seq[BigInt], cols : Int) : Seq[BigInt] = {
+    val k = h.size + cols - 1
+    for (p <- 0 until cols; m <- 0 until k) yield if (m - p >= 0 && m - p < h.size) h(m - p) else BigInt(0)
+  }
+  def firRef(c : PositConfig, x : Seq[BigInt], h : Seq[BigInt], n : Int) : Seq[BigInt] =
+    (0 until n).map { i =>
+      val (q, nar) = QuireRef.accumulate(c, h.indices.iterator.map(j => (x(i + j), Some(h(j)))))
+      QuireRef.round(c, q, nar)._1
+    }
+
+  for ((c, l, pc) <- Seq((p32, 1, 1), (p32, 2, 4), (p16, 4, 4), (p8, 8, 4))) {
+    testpoint("mem_fir", s"p${c.n}_L${l}_P$pc") {
+      sim(gemvd(c, l, pc), s"mem_fir_${c.n}_${l}_$pc") { e =>
+        assert(e.rd(GEMV_MODE) == 0, "GEMV_MODE po resecie")
+        val shapes = Seq((1, 1, 1), (1, pc, 5), (3, pc, 7), (5, 2 min pc, 33), (17, pc, 10),
+                         (GEMV_MAXK - pc + 1, pc, 6), (10, pc, 200), (40, 3 min pc, 20)) ++
+          Seq.fill(2)((1 + e.rnd.nextInt(GEMV_MAXK - pc + 1), 1 + e.rnd.nextInt(pc), 1 + e.rnd.nextInt(60)))
+        for ((t, cols, m) <- shapes) {
+          val k = t + cols - 1
+          val nx = (m - 1) * cols + k
+          val (xa, ha, ya) = (e.addr(0, nx), e.addr(1, k * cols), e.addr(2, m * cols))
+          val xs = stress(c, nx, e.rnd).toSeq.map(_._1)
+          val hs = stress(c, t, e.rnd).toSeq.map(_._2)
+          e.put(xa, xs); e.put(ha, firTaps(hs, cols))
+          val guard = Seq.fill(32)(BigInt(0x5a))
+          val ny = m * cols
+          mem(e).writeWords(ya + e.bytes.toLong * ny, 1, guard)
+          e.wr(GEMV_K, k); e.wr(GEMV_COLS, cols); e.wr(MEM_WLEN, m)
+          assert((e.run(OP_XLOAD, k.toLong * cols, ha) & 0x3c) == 0)
+          e.wr(GEMV_MODE, 1 << GEMV_MODE_WINDOW)
+          val r0 = e.mem.rBeats
+          val s = e.run(OP_GEMV, nx, xa, None, None, Some(ya))
+          val rb = e.mem.rBeats - r0
+          e.wr(GEMV_MODE, 0)
+          assert((s & 0x3c) == 0, f"fir T=$t cols=$cols M=$m: MEM_STATUS 0x$s%x")
+          assertSeq(s"fir L=$l P=$pc T=$t cols=$cols M=$m", e.get(ya, ny), firRef(c, xs, hs, ny))
+          assert(mem(e).readWords(ya + e.bytes.toLong * ny, 1, 32) == guard, s"fir T=$t: zapis za y")
+          val perBeat = 16 / e.bytes
+          assert(rb <= (nx + perBeat - 1) / perBeat + 1, s"fir T=$t: $rb slow R na $nx elementow (sygnal czytany raz)")
+        }
+        // odrzucenia
+        e.wr(GEMV_MODE, 1 << GEMV_MODE_WINDOW)
+        def bad(label : String, k : Long, cols : Long, m : Long, len : Long) : Unit = {
+          e.wr(GEMV_K, k); e.wr(GEMV_COLS, cols); e.wr(MEM_WLEN, m)
+          val st = e.run(OP_GEMV, len, BASE, None, None, Some(BASE + 0x10000))
+          assert(((st >> MEM_ST_ERR_SHAPE) & 1) == 1 && (st & 1) == 0, f"$label: MEM_STATUS 0x$st%x")
+        }
+        bad("len", 8, 1, 4, 12)                       // (4 - 1) * 1 + 8 = 11
+        bad("M = 0", 8, 1, 0, 7)
+        if (pc > 1) bad("cols > K", 1, 2, 4, 7)
+        e.wr(GEMV_MODE, 0)
+      }
+    }
+  }
+
+  testpoint("mem_fir", "throughput_P4") {
+    sim(gemvd(p32, 1, 4), "mem_fir_throughput") { e =>
+      e.mem.stall = 0.0
+      e.mem.maxDelay = 20
+      val (t, cols, m) = (GEMV_MAXK - 3, 4, 64)
+      val k = t + cols - 1
+      val nx = (m - 1) * cols + k
+      val xs = e.rand(nx); val hs = e.rand(t)
+      e.put(BASE, xs); e.put(BASE + 0x10000, firTaps(hs, cols))
+      e.wr(GEMV_K, k); e.wr(GEMV_COLS, cols); e.wr(MEM_WLEN, m)
+      e.run(OP_XLOAD, k.toLong * cols, BASE + 0x10000)
+      e.wr(GEMV_MODE, 1 << GEMV_MODE_WINDOW)
+      e.run(OP_GEMV, nx, BASE, None, None, Some(BASE + 0x20000))
+      e.wr(GEMV_MODE, 0)
+      assertSeq("fir 61 odczepow", e.get(BASE + 0x20000, m * cols), firRef(e.c, xs, hs, m * cols))
+      val cyc = e.rd(MEM_CYCLES)
+      assert(cyc <= 1.1 * m * k + 200, s"fir: $cyc taktow")
+      info(f"FIR posit32, $t odczepow, $cols wyjsc na wiersz: ${m * cols} wyjsc w $cyc taktach " +
+           f"(${m * cols * t.toDouble / cyc}%.2f MAC / takt, ${m * cols.toDouble / cyc}%.3f wyjscia / takt)")
     }
   }
 }

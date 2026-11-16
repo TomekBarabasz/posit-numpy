@@ -1024,6 +1024,100 @@ class PositVecHw(PositAluHw):
         self.func(name, a)
         return size / (time.perf_counter() - t0)
 
+    # ---- 5.4: FIR / correlation: GEMV with a window over the signal ------------------------------------
+
+    def correlate(self, x, h) -> np.ndarray:
+        """y[i] = sum_j x[i + j] h[j] (len(x) - len(h) + 1 outputs), each exact in the quire, rounded once.
+
+        On 5.4 engines with gemv: the signal is read once into the engine's ring buffer and every row of
+        K = T + cols - 1 elements gives `cols` outputs: column p holds the taps shifted by p
+        (OP_XLOAD) and counts only its own taps (GEMV_MODE.window), so cols * T multiply-adds per K
+        clocks. Taps longer than gemv_max_k - cols + 1, or no window in the bitstream: PositSw.
+        """
+        xv, hv = self._bits(x), self._bits(h)
+        T, N = hv.size, xv.size
+        ny = N - T + 1
+        if T == 0 or ny <= 0:
+            return np.zeros(max(ny, 0), self.out_dtype)
+        cols = min(self.gemv_cols, max(1, self.gemv_max_k - T + 1), ny)
+        if not self.gemv_max_k or self.version < 0x0504 or T + cols - 1 > self.gemv_max_k or self.heap is None:
+            self._fallback += ny
+            return self._sw.correlate(xv, hv).astype(self.out_dtype)
+        t_start = time.perf_counter()
+        timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
+        by = self.out_bytes
+        K = T + cols - 1
+        M = -(-ny // cols)                                     # rows of cols outputs
+        taps = np.zeros((cols, K), self.out_dtype)             # column p: h shifted by p
+        for p in range(cols):
+            taps[p, p:p + T] = hv
+        rows = min(M, max(1, (0xFFFF0000 - K) // cols))        # MEM_LEN is 32 bits
+        while True:                                            # largest block of rows the heap can hold
+            tb = self.heap.empty(cols * K, self.out_dtype)
+            xb = self.heap.empty(rows * cols + T - 1, self.out_dtype)
+            yb = self.heap.empty(rows * cols, self.out_dtype)
+            if tb is not None and xb is not None and yb is not None:
+                break
+            del tb, xb, yb
+            if rows == 1:
+                self._fallback += ny
+                return self._sw.correlate(xv, hv).astype(self.out_dtype)
+            rows = -(-rows // 2)
+        off_t, off_x, off_y = (self.heap.offset_of(v) for v in (tb, xb, yb))
+        tb[:] = taps.ravel()
+        self.buf.sync_for_device(off_t, tb.nbytes, 1)
+        out = np.empty(ny, self.out_dtype)
+        cycles = 0
+        self.write(regs.GEMV_K, K)
+        self.write(regs.GEMV_COLS, cols)
+        self.write(regs.MEM_WLEN, 1)
+        self.write(regs.GEMV_MODE, 0)
+        self.write(regs.OP, regs.OP_XLOAD)
+        cycles += self._mem_cmd(cols * K, [off_t, 0, 0], None, False, False)
+        try:
+            for r0 in range(0, M, rows):
+                nr = min(rows, M - r0)
+                i0 = r0 * cols                                 # first output of the block
+                nx = (nr - 1) * cols + K                       # signal elements of the block
+                t = time.perf_counter()
+                seg = xv[i0:i0 + nx]
+                xb[:seg.size] = seg
+                xb[seg.size:nx] = 0                            # past the end: outputs dropped below
+                timing["pack"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.buf.sync_for_device(off_x, nx * by, 1)
+                self.buf.sync_for_device(off_y, nr * cols * by, 0)
+                timing["sync_device"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.write(regs.MEM_WLEN, nr)
+                self.write(regs.GEMV_MODE, 1 << regs.GEMV_MODE_WINDOW)
+                self.write(regs.OP, regs.OP_GEMV)
+                cycles += self._mem_cmd(nx, [off_x, 0, 0], off_y, False, False)
+                timing["dma"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.buf.sync_for_cpu(off_y, nr * cols * by, 2)
+                timing["sync_cpu"] += time.perf_counter() - t
+                t = time.perf_counter()
+                k = min(nr * cols, ny - i0)
+                out[i0:i0 + k] = yb[:k]
+                timing["copy_out"] += time.perf_counter() - t
+        finally:
+            self.write(regs.GEMV_MODE, 0)
+        del tb, xb, yb
+        timing["total"] = time.perf_counter() - t_start
+        timing["engine_cycles"] = cycles
+        self.last_timing = timing
+        return out
+
+    def time_correlate(self, size: int = 1 << 20, taps: int = 64) -> float:
+        """Outputs per second of correlate on `size` random samples and `taps` random taps."""
+        rnd = np.random.default_rng(0)
+        x = rnd.integers(0, 1 << self.config.n, size, dtype=np.int64).astype(self.out_dtype)
+        h = rnd.integers(0, 1 << self.config.n, taps, dtype=np.int64).astype(self.out_dtype)
+        t0 = time.perf_counter()
+        self.correlate(x, h)
+        return (size - taps + 1) / (time.perf_counter() - t0)
+
     def _matmul_dots(self, A, B, out) -> np.ndarray:
         """C[i, j] as one quire dot each (no gemv in the bitstream, K > gemv_max_k, or no device memory)."""
         M, K = A.shape
