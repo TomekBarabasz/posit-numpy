@@ -304,6 +304,10 @@ motylek: P_p = w_p · y_p (4 mul + 2 add / sub), s0 = P0 + P2, d0 = P0 − P2, s
   `MEM_LEN = 3N / 2`; `err_shape` dla złej długości, S < 2, S > maxS, B = 0; w trybie FFT inne ścieżki stoją;
 - koszt (posit32, maxS = 6): 12 mul + 22 add ≈ 27 tys. LUT i 48 DSP, banki 4 × 2 × 1024 × 32 b, twiddle 3 kopie
   (do 3N/4) — OOC: `vec_p32_mem_L2_fft6`; `VecKv260 --fft 6` (posit16 i posit32) albo `--fft 6:32` (tylko posit32);
+- **miejsce**: trzy silniki z gemv × 4 (8 quire w każdym), tablicami i rdzeniem FFT posit32 się nie mieszczą
+  (2026-11-16: placer chciał 10 925 CLB z 9 894 dostępnych); mieści się np.
+  `VecKv260 --fft 6:32 --gemv-cols 32=2,16=2,8=0 32:2:4:4:2 16:2:4:2:4 8:2:4:1:8` (gemv na 2 kolumny w posit32 / posit16,
+  posit8 bez gemv — ok. 23 tys. LUT mniej); `--gemv-cols` przyjmuje też jedną liczbę dla wszystkich silników;
 - Python: `pn.fft.fft` (method `"auto"`) używa rdzenia, gdy jest w bitstreamie i N = 4^S ≤ 4^maxS, inaczej bloków DFT;
   `method="core"` liczy ten sam algorytm w programie (`PositSw.fft_core` = model, bit w bit), `"blocks"`, `"exact"`;
   tablica twiddli ładowana raz na N.
