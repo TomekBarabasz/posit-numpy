@@ -40,7 +40,8 @@ Stan:
   czytany raz, P wyjść na wiersz; sprawdzony na płytce — 3,37 / 3,82 / 3,95 MAC na takt dla 16 / 64 / 256 odczepów
   (do 394 M MAC/s), 1,7–3,5 × szybciej niż float32 `np.convolve` na A53;
 - FFT (`pn.fft.fft / ifft / rfft`, `np.fft.fft`): bloki DFT dokładnie w quire przez matmul, twiddle przez FMA3, bez nowego
-  sprzętu — posit32 6–7 × dokładniejszy niż float32 `np.fft`; w symulacji (PC), czeka na płytkę.
+  sprzętu — posit32 6–7 × dokładniejszy niż float32 `np.fft`; sprawdzone na płytce (bit w bit), 13–19 × wolniejsze
+  niż `np.fft` na A53 (np. 18 455 transformat 64-punktowych / s).
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

@@ -304,8 +304,23 @@ Dokładność wobec float64 `np.fft.fft` tych samych wejść (największy błąd
 | 4096 | 3,3e-4 | 6,9e-4 | 5,3e-9 | 3,3e-8 |
 
 posit32 jest 6–7 × dokładniejszy niż float32, posit16 ok. 2 × niż float16 — dzięki dokładnym blokom (jedno zaokrąglenie
-na 64-punktowe DFT zamiast sześciu poziomów motylków). Na płytce działa na bitstreamie 5.2+ (matmul + FMA3):
-`test_board_vec.py -k fft` (bit w bit z PositSw, przepustowość wobec complex64 `np.fft`).
+na 64-punktowe DFT zamiast sześciu poziomów motylków). Na płytce działa na bitstreamie 5.2+ (matmul + FMA3).
+
+**Na płytce (2026-11-16, `posit32_16_8_mem` 5.4)**: `test_fft_matches_sw` bit w bit z PositSw na wszystkich trzech
+silnikach. Transformaty / s (wsad) i błąd względny wobec float64:
+
+| | posit32 | posit16 | posit8 | NumPy complex64 na A53 |
+| --- | ---: | ---: | ---: | ---: |
+| N = 64 × 1024 | 18 455 (4,5e-9) | 19 586 (3,1e-4) | 19 940 (7e-2) | 234 000 – 385 000 |
+| N = 1024 × 64 | 740 (7,1e-9) | 826 (4,5e-4) | 867 (1e-1) | 12 700 – 14 100 |
+| N = 4096 × 16 | 134 (6,9e-9) | 143 (5,2e-4) | 149 (1,1e-1) | 2 000 – 2 400 |
+
+- 13–19 × wolniej niż `np.fft` — FFT z bloków DFT kosztuje 4 · N · ΣNᵢ MAC (N = 64: 16 K MAC na transformatę,
+  1024 transformat = 16,8 M MAC = 43 ms silnika z 55 ms), a `np.fft` robi O(N log N) działań we float SIMD;
+  wartość tej ścieżki to dokładność (posit32 6–7 × lepszy niż float32), nie szybkość.
+- Mniejszy blok (`radix=16`: N = 4096 = 16³, 192 zamiast 512 MAC na wyjście) da ok. 2,5 × mniej pracy silnika kosztem
+  jednego poziomu twiddli (dwa zaokrąglenia więcej); szybciej niż `np.fft` byłby dopiero sprzętowy rdzeń FFT.
+- posit8 (3–4 bity ułamka) nie nadaje się do FFT poza zabawą: błąd 7–11 %.
 
 ## FIR / splot: GEMV z oknem (wersja 5.4)
 
