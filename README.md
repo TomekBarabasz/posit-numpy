@@ -37,7 +37,8 @@ Stan:
   zaokrąglonych tablic w BRAM silnika (OP_TABLE, do L elementów na takt), posit32 z float64 w programie; sprawdzone
   na płytce — `exp` posit16 332 M/s, posit8 648 M/s (NumPy float32 `np.exp` na A53: 23 M/s);
 - FIR / splot (5.4: `np.convolve`, `np.correlate`, dokładnie w quire): gemv z oknem przesuwanym po sygnale — sygnał
-  czytany raz, P wyjść na wiersz; w symulacji 3,76 MAC na takt (61 odczepów, P = 4), czeka na płytkę.
+  czytany raz, P wyjść na wiersz; sprawdzony na płytce — 3,37 / 3,82 / 3,95 MAC na takt dla 16 / 64 / 256 odczepów
+  (do 394 M MAC/s), 1,7–3,5 × szybciej niż float32 `np.convolve` na A53.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

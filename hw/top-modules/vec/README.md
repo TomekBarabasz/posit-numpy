@@ -308,6 +308,19 @@ Symulacja (`PositVecMemTestplan.mem_fir`): posit32 ×1 (P = 1) i ×2, posit16 ×
 maxK − P + 1, cols 1 … P, sygnał wielokrotnie dłuższy niż bufor kołowy; każde wyjście bit w bit z `QuireRef`, sygnał
 czytany raz (liczba słów R), odrzucenia kształtu. 61 odczepów posit32, P = 4: 256 wyjść w 4 156 taktach — **3,76 MAC / takt**.
 
+**Na płytce (2026-11-16, `posit32_16_8_mem` 5.4, P = 4)**, 1 048 576 próbek, M wyjść / s (w nawiasie M MAC / s):
+
+| odczepy | posit32 | posit16 | posit8 | MAC / takt silnika (teoria 4T / (T + 3)) | NumPy float32 `np.convolve` |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 17,53 (281) | 19,62 (314) | 20,16 (323) | 3,37 (3,37) | 5,71 |
+| 64 | 5,77 (369) | 5,85 (374) | 5,90 (378) | 3,82 (3,82) | 2,76 |
+| 256 | 1,53 (392) | 1,54 (393) | 1,54 (394) | 3,95 (3,95) | 0,93 |
+
+- Silnik robi dokładnie tyle, ile wynika z okna: P · T MAC na T + P − 1 taktów; strata to tylko P − 1 taktów na wiersz.
+- 1,7–3,5 × szybciej niż float32 `np.convolve` na A53 (metoda bezpośrednia), a każde wyjście jest dokładne w quire.
+- Przy krótkich filtrach (16 odczepów) waży już Python i kopia sygnału (posit32 281 z 337 M MAC/s silnika); szybciej dla
+  krótkich T dałoby więcej kolumn (P = 8: 8 · 16 / 23 = 5,6 MAC / takt).
+
 ## Funkcje elementarne z tablicy (wersja 5.3)
 
 posit16 ma 65 536 wartości, posit8 — 256: każdą funkcję jednej zmiennej da się stablicować w całości, poprawnie
