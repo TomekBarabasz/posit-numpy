@@ -280,6 +280,75 @@ posit8 ×8 bit w bit z `QuireRef`; **64 × 64 posit32 na 4 kolumny: 4 160 taktó
 - Dalej: więcej kolumn (P = 8: ok. +20 000 LUT dla posit32, zmieści się) albo L elementów A na takt
   (wymaga L quire na kolumnę).
 
+## Sprzętowe FFT radix-4 (wersja 5.5, blok opcjonalny)
+
+`PositFftCore` (`posit-kv260/.../PositFftCore.scala`): partia B transformat N = 4^S (16 … 4^maxS) jednym poleceniem MEM,
+jeden motylek radix-4 na takt, dane w BRAM silnika.
+
+```
+LOAD   grupy po L (L = 1, 2, 4) z movera -> pozycja rev4(n) (odwrócone cyfry w bazie 4)
+COMP   S etapów DIT × N / 4 motylków, między etapami opróżnienie potoku (15 taktów)
+STORE  pozycje 0 .. N − 1 po kolei (porządek naturalny), grupy po L -> zapis
+banki: pozycja i -> bank (suma cyfr i w bazie 4) mod 4, adres i >> 2: 4 wejścia motylka i 4 kolejne pozycje
+       zawsze w 4 różnych bankach (odczyt port A, zapis port B, bez konfliktów)
+twiddle: T[e] = W_N^e, e < 3N/4, 3 kopie (w1, w2, w3 na takt), ładowane z Pythona raz na N
+motylek: P_p = w_p · y_p (4 mul + 2 add / sub), s0 = P0 + P2, d0 = P0 − P2, s1 = P1 + P3, d1 = P1 − P3,
+         X0 = s0 + s1, X2 = s0 − s1, X1 = d0 − i d1, X3 = d0 + i d1 — 12 mul + 22 add, potok 12 taktów
+```
+
+- motylek klasyczny (każde działanie zaokrąglone, `PositOps` z potokiem jak `PositPipeline.full`): pełny fused (jedno
+  zaokrąglenie na wyjście motylka) wymagałby akumulatora szerokości quire na każdej z 8 składowych — za drogie;
+  model (`positnp.fft.fft_core_model`, `fft_fused_model`) pokazał, że klasyczny posit32 dalej ok. 3 × dokładniejszy niż float32;
+- rejestry: `FFT_CTRL` (0xE4) bit 0 fft / bit 1 twiddle, `FFT_CFG` (0xE8) = S, `FFT_INFO` (0xEC) = maxS; dane
+  transformaty: N części rzeczywistych, potem N urojonych (wynik tak samo); `MEM_LEN = 2N · MEM_WLEN`; twiddle
+  `MEM_LEN = 3N / 2`; `err_shape` dla złej długości, S < 2, S > maxS, B = 0; w trybie FFT inne ścieżki stoją;
+- koszt (posit32, maxS = 6): 12 mul + 22 add ≈ 27 tys. LUT i 48 DSP, banki 4 × 2 × 1024 × 32 b, twiddle 3 kopie
+  (do 3N/4) — OOC: `vec_p32_mem_L2_fft6`; `VecKv260 --fft 6` (posit16 i posit32) albo `--fft 6:32` (tylko posit32);
+- **miejsce**: trzy silniki z gemv × 4 (8 quire w każdym), tablicami i rdzeniem FFT posit32 się nie mieszczą
+  (2026-11-16: placer chciał 10 925 CLB z 9 894 dostępnych); mieści się np.
+  `VecKv260 --fft 6:32 --gemv-cols 32=2,16=2,8=0 32:2:4:4:2 16:2:4:2:4 8:2:4:1:8` (gemv na 2 kolumny w posit32 / posit16,
+  posit8 bez gemv — ok. 23 tys. LUT mniej); `--gemv-cols` przyjmuje też jedną liczbę dla wszystkich silników;
+- Python: `pn.fft.fft` (method `"auto"`) używa rdzenia, gdy jest w bitstreamie i N = 4^S ≤ 4^maxS, inaczej bloków DFT;
+  `method="core"` liczy ten sam algorytm w programie (`PositSw.fft_core` = model, bit w bit), `"blocks"`, `"exact"`;
+  tablica twiddli ładowana raz na N.
+
+Dokładność modelu rdzenia wobec float64 `np.fft.fft` (największy błąd / największy moduł):
+
+| N | posit32: rdzeń | fused | bloki DFT | float32 `np.fft` | posit16: rdzeń | bloki DFT |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 6,9e-9 | 3,9e-9 | 3,9e-9 | 2,6e-8 | 3,2e-4 | 3,0e-4 |
+| 1024 | 1,1e-8 | 6,5e-9 | 6,4e-9 | 3,3e-8 | 1,0e-3 | 4,1e-4 |
+| 4096 | 1,3e-8 | 6,5e-9 | 5,4e-9 | 4,1e-8 | 8,4e-4 | 3,8e-4 |
+
+Symulacja (`PositVecMemTestplan.mem_fft`): posit32 ×1 (maxS = 2), ×2 (maxS = 4), posit16 ×4 (maxS = 3); N = 16, 64, 256,
+partie 1 i 3, wejścia z `stress` — wynik bit w bit z radix-4 DIT na `PositRef`; odrzucenia; zwykłe `add` po FFT.
+Takty na transformatę: 2N / L (wczytanie) + S (N / 4 + 15) + 2N / L (zapis), np. posit32 ×2, N = 256: ok. 870.
+Oczekiwane na płytce (100 MHz), transformaty / s:
+
+| N | posit32 ×2 | posit16 ×4 | bloki DFT (zmierzone, posit32) | NumPy complex64 na A53 |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | ~450 000 | ~600 000 | 18 455 | 234 000 |
+| 1024 | ~29 000 | ~42 000 | 740 | 14 100 |
+| 4096 | ~6 900 | ~10 000 | 134 | 2 300 |
+
+Wczytanie i zapis nie zachodzą jeszcze na obliczenia: z podwójnym buforem banków rdzeń byłby ograniczony samym
+liczeniem (N = 1024: 1 355 zamiast 3 400 taktów, ok. 74 000 transformat / s).
+
+**Na płytce (2026-11-16, `--fft 6:32 --gemv-cols 32=2,16=2,8=0`, rdzeń tylko w posit32)**: `test_fft_matches_sw` bit w bit
+z modelem rdzenia (`PositSw.fft_core`). posit32, transformaty / s (czas partii) i błąd względny wobec float64:
+
+| N × partia | rdzeń | bloki DFT (poprzednio) | NumPy complex64 |
+| --- | ---: | ---: | ---: |
+| 64 × 1024 | 152 550 (6,7 ms), 8,6e-9 | 18 823 | 346 570 |
+| 1024 × 64 | 11 665 (5,5 ms), 1,2e-8 | 750 | 13 346 |
+| 4096 × 16 | **2 874** (5,6 ms), 1,6e-8 | 135 | 2 352 |
+
+- 8–21 × szybciej niż bloki DFT; dla N = 4096 szybciej niż `np.fft` na A53, dla N = 1024 prawie tyle samo.
+- Silnik według rachunku taktów to ok. 2,3 ms na partię (np. 1024 × 64: 1024 · 221 taktów), reszta (3–4 ms) to Python:
+  kopie danych do bufora urządzenia i z powrotem, synchronizacja cache i otoczka `pn.fft` (na PC ok. 0,5 ms);
+  `test_fft_throughput` wypisuje teraz rozbicie z `hw.last_timing`.
+- posit16 / posit8 bez rdzenia (bloki DFT przy gemv × 2, posit8 bez gemv: pominięte).
+
 ## FFT z bloków DFT (bez nowego sprzętu)
 
 `pn.fft.fft / ifft / rfft` i `np.fft.fft` na `PositArray` (`sw/positnp/fft.py`) składają FFT z tego, co silnik już ma:

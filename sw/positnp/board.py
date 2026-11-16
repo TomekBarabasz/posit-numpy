@@ -237,6 +237,7 @@ class Board:
                          "k": ec.get("k"), "units": ec.get("units"), "lanes": ec.get("lanes", 1),
                          "gemv_k": getattr(hw, "gemv_max_k", 0), "gemv_cols": getattr(hw, "gemv_cols", 1),
                          "table_rate": getattr(hw, "table_rate", 0) if getattr(hw, "has_table", lambda: False)() else 0,
+                         "fft_max_s": getattr(hw, "fft_max_s", 0),
                          "buffer_mb": hw.buf.size >> 20, "version": f"{hw.version >> 8}.{hw.version & 0xFF}"})
         return rows
 
@@ -253,6 +254,8 @@ class Board:
             gemv = f", matmul (K <= {r['gemv_k']}, {r.get('gemv_cols', 1)} columns/pass)" if r.get("gemv_k") else ""
             if r.get("table_rate"):
                 gemv += f", functions from a table ({r['table_rate']} lookups/clock)"
+            if r.get("fft_max_s"):
+                gemv += f", FFT core (N = 16 .. {4 ** r['fft_max_s']})"
             lines.append(f"  {r['config']:<12} {r['engine']}: {', '.join(r['ops'])}"
                          f"{', quire' if r['quire'] else ''}{gemv}{lanes}, buffer {r['buffer_mb']} MB, v{r['version']}")
         return "\n".join(lines)

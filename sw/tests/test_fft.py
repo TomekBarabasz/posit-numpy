@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import positnp as pn
-from positnp import fft as F, ref
+from positnp import fft as F, ref, regs
 from positnp.backend_hw import PositVecHw
 from positnp.fakes import FakeVecMmio
 from positnp.ref import PositConfig
@@ -86,7 +86,7 @@ def test_special_values():
 
 def test_fft_on_fake_engine_matches_software():
     mem = FakeUDmaBuf(1 << 20)
-    vec = FakeVecMmio(PositConfig(16), mem=mem, gemv_k=4096, gemv_cols=4)
+    vec = FakeVecMmio(PositConfig(16), mem=mem, gemv_k=4096, gemv_cols=4, fft_max_s=0)   # no FFT core: blocks
     hw = PositVecHw(vec, None, mem)
     x = pn.array(np.random.default_rng(3).standard_normal(256), pn.P16)
     want = pn.fft.fft(x)
@@ -96,3 +96,43 @@ def test_fft_on_fake_engine_matches_software():
     assert got.real.equal_bits(want.real) and got.imag.equal_bits(want.imag)
     assert any(cmd[3] >> 2 & 1 for cmd in vec.mem_log)              # gemv / FMA3 ran on the engine
     assert hw.stats()["fallback"] == 0
+
+
+# ---- the hardware FFT core (5.5) --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("c,tol", [(pn.P16, 2e-3), (pn.P32, 3e-8)])
+@pytest.mark.parametrize("N", [16, 64, 256, 1024])
+def test_core_model_accuracy(c, tol, N):
+    rnd = np.random.default_rng(N)
+    z = rnd.standard_normal(N) + 1j * rnd.standard_normal(N)
+    X = F.fft_core_model(z, config=c)
+    x = pn.array(z.real, c).to_float() + 1j * pn.array(z.imag, c).to_float()
+    assert _rel_err(X, np.fft.fft(x)) < tol
+    assert X.real.equal_bits(pn.fft.fft(z, config=c, method="core").real)   # PositSw.fft_core == the model
+
+
+@pytest.mark.parametrize("n", [16, 32])
+def test_core_on_fake_engine(n):
+    c = PositConfig(n)
+    mem = FakeUDmaBuf(1 << 20)
+    vec = FakeVecMmio(c, mem=mem, fft_max_s=5)
+    hw = PositVecHw(vec, None, mem)
+    assert hw.fft_max_s == 5
+    rnd = np.random.default_rng(n)
+    for N, B in ((16, 1), (64, 5), (1024, 2)):
+        x = pn.array(rnd.standard_normal((B, N)), c)
+        want = F.fft_core_model(x)
+        with pn.using(hw):
+            got = pn.fft.fft(x)                                     # auto: the core
+            inv = pn.fft.ifft(got)
+        assert got.real.equal_bits(want.real) and got.imag.equal_bits(want.imag), N
+        assert np.max(np.abs(inv.to_complex() - x.to_float())) < (1e-2 if n == 16 else 1e-7)   # ~2 log4 N + 1 roundings
+    assert vec.fft_tw_loads == 3 and hw.stats()["fallback"] == 0      # one table per N, reused by ifft
+    with pn.using(hw):
+        b = pn.fft.fft(pn.array(rnd.standard_normal(96), c))        # not 4^S: blocks
+        assert b.shape == (96,)
+        big = pn.fft.fft(pn.array(rnd.standard_normal(4096), c))    # 4^6 > 4^5: blocks too
+        assert big.shape == (4096,)
+    assert vec.regs[regs.FFT_CTRL] == 0
+    with pytest.raises(ValueError, match="4\\^S"):
+        pn.fft.fft(pn.array(np.ones(32), c), method="core")

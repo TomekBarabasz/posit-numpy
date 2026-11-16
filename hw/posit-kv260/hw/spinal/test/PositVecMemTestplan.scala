@@ -25,7 +25,7 @@ object PositVecMemPlan {
   val plan : Seq[Testpoint] = Seq(
     Testpoint("mem_regs", Stage.V1,
       "Wersja 5.0, CONFIG.has_master, rejestry MEM_*",
-      checking = Seq("ID_VERSION == 0x50530504", "CONFIG bit 14 i maska z FMA3 (bit 12)",
+      checking = Seq("ID_VERSION == 0x50530505", "CONFIG bit 14 i maska z FMA3 (bit 12)",
                      "MEM_*: odczyt == zapis, po resecie pusty zakres [0, 0)")),
 
     Testpoint("mem_elementwise", Stage.V1,
@@ -109,6 +109,15 @@ object PositVecMemPlan {
                      "MEM_LEN != (M - 1) * cols + K, M = 0, cols > K: err_shape",
                      "przepustowosc: M wierszy po K taktow (cols * T MAC na wiersz)")),
 
+    Testpoint("mem_fft", Stage.V1,
+      "5.5: FFT radix-4 (PositFftCore): partia transformat N = 4^S jednym poleceniem, posit32 x1 / x2, posit16 x4",
+      stimulus = Seq("tablica twiddli (FFT_CTRL.twiddle), potem partie B = 1 .. 3 dla N = 16, 64, 256",
+                     "elementy z rozkladu stress (NaR, zera, skrajne skale), losowe opoznienia pamieci",
+                     "po FFT zwykle add (tryb FFT wylaczony)"),
+      checking = Seq("wynik == radix-4 DIT na PositRef (ta sama kolejnosc dzialan) bit w bit, uklad re / im",
+                     "FFT_INFO == maxS, wersja 5.5", "zly MEM_LEN, S < 2, S > maxS, MEM_WLEN = 0: err_shape",
+                     "takty na transformate ok. 4N / L + S (N / 4 + 15)")),
+
     Testpoint("mem_table_absent", Stage.V1,
       "Silnik bez tablicy",
       checking = Seq("TABLE_CFG == 0, bit OP 15 w CONFIG == 0"))
@@ -137,6 +146,9 @@ class PositVecMemTestplan extends TestplanSuite {
     SimEnv(Conventions.spinal, s"vecmem_table_${c.n}_L${l}_C$copies").compile(
       new PositVecAxi(cfgFor(c, 1), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l)),
                       tableCopies = copies))
+  def fftd(c : PositConfig, l : Int, maxS : Int) =
+    SimEnv(Conventions.spinal, s"vecmem_fft_${c.n}_L${l}_S$maxS").compile(
+      new PositVecAxi(cfgFor(c, 1), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l)), fftMaxS = maxS))
   def laned(c : PositConfig, l : Int) =
     SimEnv(Conventions.spinal, s"vecmem_${c.n}_L$l").compile(
       new PositVecAxi(cfgFor(c, 2), withMaster = true, memCfg = Some(MemMoverConfig(c.n, lanes = l))))
@@ -229,7 +241,7 @@ class PositVecMemTestplan extends TestplanSuite {
 
   testpoint("mem_regs") {
     sim(m32, "mem_regs") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530504L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == 0x50530505L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
       val cfg = e.rd(CONFIG)
       assert(((cfg >> CONFIG_HAS_MASTER) & 1) == 1 && ((cfg >> (16 + OP_FMA3)) & 1) == 1, f"CONFIG 0x$cfg%x")
       for ((r, v) <- Seq(MEM_LEN -> 123L, MEM_SRC_A -> 0x1230L, MEM_SRC_B -> 0x4560L, MEM_SRC_C -> 0x7890L,
@@ -688,6 +700,100 @@ class PositVecMemTestplan extends TestplanSuite {
       assert(cyc <= 1.1 * m * k + 200, s"fir: $cyc taktow")
       info(f"FIR posit32, $t odczepow, $cols wyjsc na wiersz: ${m * cols} wyjsc w $cyc taktach " +
            f"(${m * cols * t.toDouble / cyc}%.2f MAC / takt, ${m * cols.toDouble / cyc}%.3f wyjscia / takt)")
+    }
+  }
+
+  // ---- 5.5: FFT radix-4 -----------------------------------------------------------------------------
+
+  /** Tablica twiddli W_N^e, e < 3N/4 (re, im) - dowolne wartosci daja test bit w bit; tu prawdziwe (przez float32). */
+  def twTable(c : PositConfig, n : Int) : (Seq[BigInt], Seq[BigInt]) = {
+    def p(v : Double) : BigInt = PositRef.fromFloat32(c, BigInt(java.lang.Float.floatToIntBits(v.toFloat).toLong & 0xffffffffL))._1
+    val es = 0 until 3 * n / 4
+    (es.map(e => p(math.cos(2 * math.Pi * e / n))), es.map(e => p(-math.sin(2 * math.Pi * e / n))))
+  }
+
+  /** Radix-4 DIT jak PositFftCore / positnp.fft.fft_core_model, twiddle z tablicy dla N_top. */
+  def fftRef(c : PositConfig, xr : IndexedSeq[BigInt], xi : IndexedSeq[BigInt], nTop : Int,
+             tw : (Seq[BigInt], Seq[BigInt])) : (IndexedSeq[BigInt], IndexedSeq[BigInt]) = {
+    val len = xr.size
+    if (len == 1) return (xr, xi)
+    val m = len / 4
+    val ys = (0 until 4).map(p => fftRef(c, xr.indices.filter(_ % 4 == p).map(xr), xi.indices.filter(_ % 4 == p).map(xi), nTop, tw))
+    def add(a : BigInt, b : BigInt) = PositRef(c, PositOp.Add, a, b)
+    def sub(a : BigInt, b : BigInt) = PositRef(c, PositOp.Sub, a, b)
+    def mul(a : BigInt, b : BigInt) = PositRef(c, PositOp.Mul, a, b)
+    val outR = Array.fill(len)(BigInt(0)); val outI = Array.fill(len)(BigInt(0))
+    for (k <- 0 until m) {
+      val P = (0 until 4).map { p =>
+        val (yr, yi) = (ys(p)._1(k), ys(p)._2(k))
+        if (p == 0) (yr, yi) else {
+          val e = p * k * (nTop / len)
+          val (wr, wi) = (tw._1(e), tw._2(e))
+          (sub(mul(wr, yr), mul(wi, yi)), add(mul(wr, yi), mul(wi, yr)))
+        }
+      }
+      val (s0r, s0i, d0r, d0i) = (add(P(0)._1, P(2)._1), add(P(0)._2, P(2)._2), sub(P(0)._1, P(2)._1), sub(P(0)._2, P(2)._2))
+      val (s1r, s1i, d1r, d1i) = (add(P(1)._1, P(3)._1), add(P(1)._2, P(3)._2), sub(P(1)._1, P(3)._1), sub(P(1)._2, P(3)._2))
+      outR(k) = add(s0r, s1r);         outI(k) = add(s0i, s1i)
+      outR(k + 2 * m) = sub(s0r, s1r); outI(k + 2 * m) = sub(s0i, s1i)
+      outR(k + m) = add(d0r, d1i);     outI(k + m) = sub(d0i, d1r)
+      outR(k + 3 * m) = sub(d0r, d1i); outI(k + 3 * m) = add(d0i, d1r)
+    }
+    (outR.toIndexedSeq, outI.toIndexedSeq)
+  }
+
+  for ((c, l, maxS) <- Seq((p32, 1, 2), (p32, 2, 4), (p16, 4, 3))) {
+    testpoint("mem_fft", s"p${c.n}_L${l}_S$maxS") {
+      sim(fftd(c, l, maxS), s"mem_fft_${c.n}_${l}_$maxS") { e =>
+        assert(e.rd(FFT_INFO) == maxS, s"FFT_INFO ${e.rd(FFT_INFO)}")
+        val (twA, xA, yA) = (BASE + 0x40000, BASE + 0x80000, BASE + 0xC0000)
+        def fftRun(sv : Int, b : Int, xs : Seq[BigInt]) : Long = {
+          e.wr(FFT_CFG, sv); e.wr(MEM_WLEN, b); e.wr(FFT_CTRL, 1 << FFT_CTRL_FFT)
+          val st = e.run(PositAluOp.code(PositOp.Add), xs.size, xA, None, None, Some(yA))
+          e.wr(FFT_CTRL, 0)
+          st
+        }
+        for (sv <- 2 to maxS; b <- Seq(1, 3)) {
+          val nn = 1 << (2 * sv)
+          val tw = twTable(c, nn)
+          e.put(twA, tw._1 ++ tw._2)
+          e.wr(FFT_CFG, sv); e.wr(FFT_CTRL, 1 << FFT_CTRL_TWIDDLE)
+          val st0 = e.run(PositAluOp.code(PositOp.Add), 3 * nn / 2, twA)
+          e.wr(FFT_CTRL, 0)
+          assert((st0 & 0x3c) == 0, f"twiddle N=$nn: MEM_STATUS 0x$st0%x")
+          val xs = stress(c, 2 * nn * b, e.rnd).toSeq.map(_._1)
+          e.put(xA, xs)
+          val guard = Seq.fill(32)(BigInt(0x5a))
+          mem(e).writeWords(yA + e.bytes.toLong * 2 * nn * b, 1, guard)
+          val st = fftRun(sv, b, xs)
+          assert((st & 0x3c) == 0, f"fft N=$nn B=$b: MEM_STATUS 0x$st%x")
+          val got = e.get(yA, 2 * nn * b)
+          for (t <- 0 until b) {
+            val x = xs.slice(2 * nn * t, 2 * nn * (t + 1)).toIndexedSeq
+            val (wr, wi) = fftRef(c, x.take(nn), x.drop(nn), nn, tw)
+            assertSeq(s"fft L=$l N=$nn transformata $t", got.slice(2 * nn * t, 2 * nn * (t + 1)), wr ++ wi)
+          }
+          assert(mem(e).readWords(yA + e.bytes.toLong * 2 * nn * b, 1, 32) == guard, s"fft N=$nn: zapis za koncem")
+          info(f"FFT posit${c.n} L=$l N=$nn x $b: ${e.rd(MEM_CYCLES)} taktow")
+        }
+        // zwykla sciezka po FFT
+        val xs = stress(c, 50, e.rnd).toSeq
+        e.put(BASE, xs.map(_._1)); e.put(BASE + 0x10000, xs.map(_._2))
+        assert((e.run(PositAluOp.code(PositOp.Add), 50, BASE, Some(BASE + 0x10000), None, Some(BASE + 0x20000)) & 0x3c) == 0)
+        assertSeq("add po FFT", e.get(BASE + 0x20000, 50), xs.map { case (u, v) => PositRef(c, PositOp.Add, u, v) })
+        // odrzucenia
+        def bad(label : String, sv : Int, b : Int, len : Int, tw : Boolean) : Unit = {
+          e.wr(FFT_CFG, sv); e.wr(MEM_WLEN, b); e.wr(FFT_CTRL, if (tw) 1 << FFT_CTRL_TWIDDLE else 1 << FFT_CTRL_FFT)
+          val st = e.run(PositAluOp.code(PositOp.Add), len, xA, None, None, if (tw) None else Some(yA))
+          e.wr(FFT_CTRL, 0)
+          assert(((st >> MEM_ST_ERR_SHAPE) & 1) == 1 && (st & 1) == 0, f"$label: MEM_STATUS 0x$st%x")
+        }
+        bad("len", 2, 1, 31, tw = false)
+        bad("B = 0", 2, 0, 32, tw = false)
+        bad("S = 1", 1, 1, 8, tw = false)
+        bad("S > maxS", maxS + 1, 1, 2 << (2 * (maxS + 1)), tw = false)
+        bad("twiddle len", 2, 1, 23, tw = true)
+      }
     }
   }
 }

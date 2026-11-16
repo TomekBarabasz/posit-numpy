@@ -511,10 +511,13 @@ def test_fft_matches_sw(hw, sw):
     rnd = np.random.default_rng(12)
     for N in (8, 64, 1024, 4096):
         x = pn.array(rnd.standard_normal((2, N)), hw.config)
-        want = pn.fft.fft(x)                                       # PositSw (no engine registered for the format here)
-        with pn.using(hw):
-            got = pn.fft.fft(x)
-        assert got.real.equal_bits(want.real) and got.imag.equal_bits(want.imag), N
+        core = getattr(hw, "fft_max_s", 0) and 4 ** ((N.bit_length() - 1) // 2) == N \
+            and 2 <= (N.bit_length() - 1) // 2 <= hw.fft_max_s
+        for method in ("blocks", "core") if core else ("blocks",):     # no core: "core" would be software twice
+            want = pn.fft.fft(x, method=method)                    # PositSw (no engine registered here)
+            with pn.using(hw):
+                got = pn.fft.fft(x, method=method)                 # "core": the engine's FFT core when present
+            assert got.real.equal_bits(want.real) and got.imag.equal_bits(want.imag), (N, method)
 
 
 def test_fft_throughput(hw):
@@ -524,13 +527,24 @@ def test_fft_throughput(hw):
     for N, batch in ((64, 1024), (1024, 64), (4096, 16)):
         x = pn.array(rnd.standard_normal((batch, N)), hw.config)
         with pn.using(hw):
+            pn.fft.fft(x[:1])                                      # twiddle table loaded outside the timing
             t0 = time.perf_counter()
             X = pn.fft.fft(x)
             dt = time.perf_counter() - t0
+        how = "core" if getattr(hw, "fft_max_s", 0) and 4 ** ((N.bit_length() - 1) // 2) == N \
+            and (N.bit_length() - 1) // 2 <= hw.fft_max_s else "blocks"
         z = (rnd.standard_normal((batch, N)) + 1j * rnd.standard_normal((batch, N))).astype(np.complex64)
         t0 = time.perf_counter()
         np.fft.fft(z)
         dn = time.perf_counter() - t0
         err = np.max(np.abs(X.to_complex() - np.fft.fft(x.to_float()))) / np.max(np.abs(np.fft.fft(x.to_float())))
-        print(f"\n{hw.config} fft N={N} x {batch}: {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e} | "
+        eng = ""
+        if how == "core":
+            t = hw.last_timing
+            S = (N.bit_length() - 1) // 2
+            L = (hw.engine_cfg() or {}).get("lanes", 1)
+            model = batch * (4 * N // L + S * (N // 4 + 15))
+            eng = (f" [engine {t['engine_cycles'] / 100e3:.2f} ms = {t['engine_cycles']} clk (model {model}), copy in "
+                   f"{t['pack'] * 1e3:.2f}, sync {(t['sync_device'] + t['sync_cpu']) * 1e3:.2f}, copy out {t['copy_out'] * 1e3:.2f} ms]")
+        print(f"\n{hw.config} fft N={N} x {batch} ({how}): {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e}{eng} | "
               f"NumPy complex64 {batch / dn:.0f} transforms/s")

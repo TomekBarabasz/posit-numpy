@@ -82,13 +82,21 @@ class PositSw:
         A, B = np.asarray(a), np.asarray(b)
         if A.ndim != 2 or B.ndim != 2 or A.shape[1] != B.shape[0]:
             raise ValueError(f"matmul of shapes {A.shape} and {B.shape}")
-        out = np.zeros((A.shape[0], B.shape[1]), self.dtype)
-        if A.shape[1] == 0:
+        M, K = A.shape
+        N = B.shape[1]
+        out = np.zeros((M, N), self.dtype)
+        if K == 0 or M == 0 or N == 0:
             return out
-        Bt = np.ascontiguousarray(B.T)
-        for i in range(A.shape[0]):
-            for j in range(B.shape[1]):
-                out[i, j] = self.reduce("dot", A[i], Bt[j])[0]
+        A64, B64 = A.astype(np.int64), B.astype(np.int64)
+        rows = max(1, (1 << 21) // (K * N))                       # terms per vecops.fused_dot call ~ 2M
+        for i0 in range(0, M, rows):
+            a = A64[i0:i0 + rows]                                  # (r, K)
+            r = a.shape[0]
+            ta = np.broadcast_to(a.T[:, :, None], (K, r, N)).reshape(K, r * N)
+            tb = np.broadcast_to(B64[:, None, :], (K, r, N)).reshape(K, r * N)
+            res = vecops.fused_dot(self.config, ta, tb)            # every element: exact dot, rounded once
+            out[i0:i0 + r] = res.bits.reshape(r, N)
+            self._count(res)
         return out
 
     def func(self, name: str, a) -> np.ndarray:
@@ -99,12 +107,29 @@ class PositSw:
 
     def correlate(self, x, h) -> np.ndarray:
         """y[i] = sum_j x[i + j] h[j], i = 0 .. len(x) - len(h): every output the exact quire dot, rounded once."""
-        x, h = np.asarray(x).ravel(), np.asarray(h).ravel()
-        n = x.size - h.size + 1
+        x, h = np.asarray(x).ravel().astype(np.int64), np.asarray(h).ravel().astype(np.int64)
+        T = h.size
+        n = x.size - T + 1
         out = np.zeros(max(n, 0), self.dtype)
-        for i in range(n):
-            out[i] = self.reduce("dot", x[i:i + h.size], h)[0]
+        if n <= 0 or T == 0:
+            return out
+        step = max(1, (1 << 21) // T)                              # outputs per vecops.fused_dot call
+        for i0 in range(0, n, step):
+            k = min(step, n - i0)
+            win = np.lib.stride_tricks.sliding_window_view(x[i0:i0 + k + T - 1], T)   # (k, T)
+            res = vecops.fused_dot(self.config, np.ascontiguousarray(win.T), np.broadcast_to(h[:, None], (T, k)))
+            out[i0:i0 + k] = res.bits
+            self._count(res)
         return out
+
+    def fft_core(self, re, im):
+        """The hardware FFT core's transform (positnp.fft.fft_core_model) of every row of (B, N) bits."""
+        from . import fft as F
+        re, im = np.asarray(re).astype(np.int64), np.asarray(im).astype(np.int64)
+        N = re.shape[1]
+        yr, yi = F._core_rows(self.config, re, im, N, F.fft_twiddle_table(self.config, N), False)
+        self._stats["elements"] += int(re.size)
+        return yr.astype(self.dtype), yi.astype(self.dtype)
 
     def gemv(self, a, x) -> np.ndarray:
         """y = A x on raw bits: matmul with one column."""

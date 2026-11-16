@@ -185,8 +185,8 @@ def _as_complex(x, config: Optional[PositConfig]):
     if isinstance(x, tuple) and len(x) == 2:
         re = x[0] if isinstance(x[0], A.PositArray) else A.array(x[0], config)
         return re, re._coerce(x[1])
-    if isinstance(x, A.PositArray):
-        return x, A.zeros(x.shape, x.config)
+    if isinstance(x, A.PositArray):                              # real input: zero imaginary bits, no conversion
+        return x, A.PositArray._wrap(np.zeros(x.shape, A.bits_dtype(x.config)), x.config)
     arr = np.asarray(x)
     if np.iscomplexobj(arr):
         re = A.array(arr.real, config)
@@ -195,7 +195,7 @@ def _as_complex(x, config: Optional[PositConfig]):
     return re, A.zeros(re.shape, re.config)
 
 
-def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config) -> PositComplex:
+def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config, method: str = "auto") -> PositComplex:
     A = _arr()
     re, im = _as_complex(x, config)
     c = re.config
@@ -214,15 +214,28 @@ def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config) -> Po
         I2 = (-I2.astype(np.int64)) & c.mask
     ctx = _Ctx(c)
     if exact:
+        method = "exact"
+    if method not in ("auto", "core", "blocks", "exact"):
+        raise ValueError(f"method {method!r}: 'auto', 'core', 'blocks' or 'exact'")
+    S = (N.bit_length() - 1) // 2
+    core_ok = N >= 16 and _is_pow4(N)
+    if method == "auto":                                        # the hardware core when the bitstream has it
+        method = "core" if core_ok and getattr(ctx.be, "fft_max_s", 0) >= S else "blocks"
+    if method == "exact":
         if N > EXACT_MAX:
             raise ValueError(f"exact=True: direct DFT up to {EXACT_MAX} points (got {N})")
         yr, yi = ctx.dft_rows(R2, I2)
+    elif method == "core":
+        if not core_ok:
+            raise ValueError(f"method='core': N = 4^S >= 16 (got {N})")
+        fc = getattr(ctx.be, "fft_core", None) or ctx.A._sw.setdefault(c, ctx.A.PositSw(c)).fft_core
+        yr, yi = fc(R2.astype(ctx.dt, copy=False), I2.astype(ctx.dt, copy=False))
     else:
         yr, yi = ctx.fft_rows(R2, I2, radix)
     if inverse:
         yi = (-np.asarray(yi).astype(np.int64)) & c.mask
-    Yr = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yr).reshape(lead + (N,))).astype(ctx.dt), c)
-    Yi = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yi).reshape(lead + (N,))).astype(ctx.dt), c)
+    Yr = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yr).reshape(lead + (N,))).astype(ctx.dt, copy=False), c)
+    Yi = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yi).reshape(lead + (N,))).astype(ctx.dt, copy=False), c)
     if inverse:
         Yr, Yi = Yr / N, Yi / N
     if axis not in (-1, rb.ndim - 1):
@@ -232,25 +245,27 @@ def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config) -> Po
 
 
 def fft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, radix: int = RADIX,
-        config: Optional[PositConfig] = None) -> PositComplex:
+        config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
     """Discrete Fourier transform along `axis`: X[k] = sum_n x[n] e^(-2 pi i nk / N).
 
     x: PositArray (real), PositComplex, a (re, im) pair, or anything pn.array accepts (complex too).
     exact=True: one direct DFT (N <= 2048), every output rounded once from the exact sum.
+    method: "auto" (the engine's FFT core for N = 4^S when the bitstream has one, else DFT blocks),
+    "core" (the core's radix-4 transform, in software when there is no core), "blocks", "exact".
     """
-    return _transform(x, n, axis, False, exact, radix, config)
+    return _transform(x, n, axis, False, exact, radix, config, method)
 
 
 def ifft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, radix: int = RADIX,
-         config: Optional[PositConfig] = None) -> PositComplex:
+         config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
     """Inverse DFT: x[n] = (1 / N) sum_k X[k] e^(+2 pi i nk / N); the 1 / N is one more rounding."""
-    return _transform(x, n, axis, True, exact, radix, config)
+    return _transform(x, n, axis, True, exact, radix, config, method)
 
 
 def rfft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, radix: int = RADIX,
-         config: Optional[PositConfig] = None) -> PositComplex:
+         config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
     """DFT of a real signal, the N // 2 + 1 non-negative frequencies (like np.fft.rfft)."""
-    X = _transform(x, n, axis, False, exact, radix, config)
+    X = _transform(x, n, axis, False, exact, radix, config, method)
     A = _arr()
     N = X.real.shape[axis]
     k = N // 2 + 1
@@ -258,6 +273,107 @@ def rfft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, rad
     sl[axis] = slice(0, k)
     take = lambda a: A.PositArray._wrap(np.ascontiguousarray(a.bits[tuple(sl)]), a.config)   # noqa: E731
     return PositComplex(take(X.real), take(X.imag))
+
+
+# ---- model of the hardware FFT core (PositVecAxi 5.5, PositFftCore) ---------------------------------
+#
+# Radix-4 decimation in time, N = 4^S (16 .. 4^maxS): base-4 digit-reversed load, S in-place stages,
+# natural-order output. Stage s (Q = 4^s, sub-transform L = 4Q): butterflies on y_p = x[g L + k + p Q],
+# twiddles w_p = W_N^(p k N / L) from one table T[e] = W_N^e, e < 3N/4 (loaded by Python, posit-rounded).
+# A butterfly is the classic one, every operation rounded (the core is PositMul / PositAdd in a pipeline):
+#   P0 = y0, P_p = w_p y_p:  re = wr yr - wi yi,  im = wr yi + wi yr       (p = 1, 2, 3)
+#   s0 = P0 + P2, d0 = P0 - P2, s1 = P1 + P3, d1 = P1 - P3
+#   X0 = s0 + s1, X2 = s0 - s1, X1 = (d0r + d1i, d0i - d1r), X3 = (d0r - d1i, d0i + d1r)
+# fft_fused_model: the same transform with every butterfly output rounded once (reference for accuracy).
+
+def fft_twiddle_table(c: PositConfig, N: int) -> Tuple[np.ndarray, np.ndarray]:
+    """(re, im) bits of W_N^e = e^(-2 pi i e / N) for e = 0 .. 3N/4 - 1 (the core's twiddle table)."""
+    e = np.arange(3 * N // 4)
+    th = 2 * np.pi * e / N
+    re = _exact_trig(c, np.cos(th), e, N, "cos")
+    im = (-_exact_trig(c, np.sin(th), e, N, "sin")) & c.mask
+    return re, im
+
+
+def _rot(wr, wi, m, mask):
+    """(wr + i wi) * (-i)^m on bits: exact (swap / negate)."""
+    neg = lambda b: (-b) & mask                                     # noqa: E731
+    return [(wr, wi), (wi, neg(wr)), (neg(wr), neg(wi)), (neg(wi), wr)][m % 4]
+
+
+def _is_pow4(n: int) -> bool:
+    return n >= 1 and n & (n - 1) == 0 and (n.bit_length() - 1) % 2 == 0
+
+
+def _core_rows(c, re, im, N_top, table, fused):
+    """Radix-4 DIT of every row of (B, L) bits, L | N_top, twiddles from the N_top table."""
+    B, L = re.shape
+    if L == 1:
+        return re, im
+    M = L // 4
+    # the 4 subsequences x[p::4] of every row as one batch (B * 4 rows): one recursive call per level
+    sub = lambda a: a.reshape(B, M, 4).transpose(0, 2, 1).reshape(B * 4, M)   # noqa: E731
+    zr, zi = _core_rows(c, sub(re), sub(im), N_top, table, fused)
+    zr, zi = zr.reshape(B, 4, M), zi.reshape(B, 4, M)
+    ys = [(zr[:, p], zi[:, p]) for p in range(4)]
+    k = np.arange(M)
+    tr, ti = table
+    out_r = np.empty((B, L), np.int64)
+    out_i = np.empty((B, L), np.int64)
+    if fused:
+        for q in range(4):
+            ar, br, ai, bi = [], [], [], []
+            for p in range(4):
+                e = p * k * (N_top // L)
+                cr, ci = _rot(tr[e], ti[e], p * q, c.mask)
+                yr, yi = ys[p]
+                cr_b, ci_b = np.broadcast_to(cr, (B, M)), np.broadcast_to(ci, (B, M))
+                ar += [yr, yi]; br += [cr_b, (-ci_b) & c.mask]
+                ai += [yi, yr]; bi += [cr_b, ci_b]
+            st = lambda ts: np.stack([t.ravel() for t in ts])          # noqa: E731
+            out_r[:, q * M:(q + 1) * M] = vecops.fused_dot(c, st(ar), st(br)).bits.reshape(B, M)
+            out_i[:, q * M:(q + 1) * M] = vecops.fused_dot(c, st(ai), st(bi)).bits.reshape(B, M)
+        return out_r, out_i
+    op = lambda name, a, b: vecops.op(c, name, a, b).bits.astype(np.int64)   # noqa: E731
+    P = [ys[0]]
+    for p in range(1, 4):
+        e = p * k * (N_top // L)
+        wr, wi = np.broadcast_to(tr[e], (B, M)), np.broadcast_to(ti[e], (B, M))
+        yr, yi = ys[p]
+        P.append((op("sub", op("mul", wr, yr), op("mul", wi, yi)), op("add", op("mul", wr, yi), op("mul", wi, yr))))
+    (p0r, p0i), (p1r, p1i), (p2r, p2i), (p3r, p3i) = P
+    s0r, s0i, d0r, d0i = op("add", p0r, p2r), op("add", p0i, p2i), op("sub", p0r, p2r), op("sub", p0i, p2i)
+    s1r, s1i, d1r, d1i = op("add", p1r, p3r), op("add", p1i, p3i), op("sub", p1r, p3r), op("sub", p1i, p3i)
+    out_r[:, 0:M], out_i[:, 0:M] = op("add", s0r, s1r), op("add", s0i, s1i)
+    out_r[:, 2 * M:3 * M], out_i[:, 2 * M:3 * M] = op("sub", s0r, s1r), op("sub", s0i, s1i)
+    out_r[:, M:2 * M], out_i[:, M:2 * M] = op("add", d0r, d1i), op("sub", d0i, d1r)
+    out_r[:, 3 * M:], out_i[:, 3 * M:] = op("sub", d0r, d1i), op("add", d0i, d1r)
+    return out_r, out_i
+
+
+def _core(x, config, fused) -> PositComplex:
+    A = _arr()
+    re, im = _as_complex(x, config)
+    c = re.config
+    N = re.shape[-1]
+    if not _is_pow4(N) or N < 4:
+        raise ValueError(f"the FFT core takes N = 4^S (got {N})")
+    lead = re.shape[:-1]
+    yr, yi = _core_rows(c, re.bits.reshape(-1, N).astype(np.int64), im.bits.reshape(-1, N).astype(np.int64),
+                        N, fft_twiddle_table(c, N), fused)
+    dt = A.bits_dtype(c)
+    return PositComplex(A.PositArray._wrap(yr.astype(dt).reshape(lead + (N,)), c),
+                        A.PositArray._wrap(yi.astype(dt).reshape(lead + (N,)), c))
+
+
+def fft_core_model(x, config: Optional[PositConfig] = None) -> PositComplex:
+    """Bit-exact model of the hardware FFT core along the last axis (N = 4^S, classic radix-4 butterflies)."""
+    return _core(x, config, fused=False)
+
+
+def fft_fused_model(x, config: Optional[PositConfig] = None) -> PositComplex:
+    """The core's radix-4 transform with every butterfly output rounded once (accuracy reference only)."""
+    return _core(x, config, fused=True)
 
 
 def levels(N: int, radix: int = RADIX) -> int:
@@ -271,4 +387,5 @@ def levels(N: int, radix: int = RADIX) -> int:
         N //= f
 
 
-__all__ = ["PositComplex", "fft", "ifft", "rfft", "levels", "RADIX", "EXACT_MAX"]
+__all__ = ["PositComplex", "fft", "ifft", "rfft", "fft_core_model", "fft_fused_model", "fft_twiddle_table",
+           "levels", "RADIX", "EXACT_MAX"]

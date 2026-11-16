@@ -63,7 +63,9 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
 - Etap 7, FFT: `pn.fft.fft`, `pn.fft.ifft`, `pn.fft.rfft` (i `np.fft.fft / ifft / rfft` na `PositArray`) zwracają
   `PositComplex` (`.real`, `.imag`, `.to_complex()`; `re, im = pn.fft.fft(x)`); wejście: PositArray, para (re, im),
   PositComplex albo tablica NumPy (też zespolona). Bloki DFT do 64 punktów dokładnie w quire (matmul), twiddle przez FMA3;
-  `exact=True` — jedno DFT (N ≤ 2048), jedno zaokrąglenie na wyjście. Opis i dokładność: `hw/top-modules/vec/README.md`.
+  `exact=True` — jedno DFT (N ≤ 2048), jedno zaokrąglenie na wyjście. Silnik 5.5 z rdzeniem FFT (`--fft`): `method="auto"`
+  liczy N = 4^S na rdzeniu radix-4 (`hw.fft_core`, model `pn.fft.fft_core_model`, `method="core"` w programie).
+  Opis i dokładność: `hw/top-modules/vec/README.md`.
 - Etap 7, splot: `np.convolve`, `np.correlate` (tryby full / same / valid), `pn.convolve`, `pn.correlate`; każde wyjście
   dokładnie w quire, zaokrąglone raz; NaR tylko tam, gdzie jest składnikiem sumy (jak `nan` w NumPy). Silnik 5.4:
   FIR przez gemv z oknem (`hw.correlate`, P wyjść na wiersz); bez okna albo dla odczepów dłuższych niż maxK − P + 1: PositSw.
