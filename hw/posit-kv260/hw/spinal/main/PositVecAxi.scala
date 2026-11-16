@@ -278,8 +278,9 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
 
   // ---- dane: grupy po L elementow {a, b(, c), last}; OP sum/dot/sumsq -> quire, reszta -> ALU ------
   // 5.5: tryb FFT wylacza zwykle sciezki (OP bez znaczenia)
-  val fftCtrl = Reg(Bits(2 bits)) init 0
-  val fftS    = Reg(UInt(3 bits)) init 2
+  // rejestry tylko w silniku z blokiem (bez niego stale - inaczej rejestr bez przypisania)
+  val fftCtrl = if (withFft) Reg(Bits(2 bits)) init 0 else B(0, 2 bits)
+  val fftS    = if (withFft) Reg(UInt(3 bits)) init 2 else U(2, 3 bits)
   if (withFft) {
     bus.readAndWrite(fftCtrl, FFT_CTRL)
     bus.readAndWrite(fftS, FFT_CFG)
@@ -290,7 +291,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   val reduce = (opReg === OP_SUM || opReg === OP_DOT || opReg === OP_SUMSQ) && !fftAny
   val isXload = if (withGemv) opReg === OP_XLOAD && !fftAny else False
   val isGemv  = if (withGemv) opReg === OP_GEMV && !fftAny else False
-  val tableLoad = Reg(Bool()) init False
+  val tableLoad = if (withTable) Reg(Bool()) init False else False
   if (withTable) bus.readAndWrite(tableLoad, TABLE_CTRL, TABLE_CTRL_LOAD)
   val isTableOp = if (withTable) opReg === OP_TABLE && !fftAny else False
   val isTload   = isTableOp && tableLoad                // ladowanie tablicy: po jednym elemencie na takt
