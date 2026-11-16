@@ -28,7 +28,7 @@ class FakeVecMmio(FakeAluMmio):
     def __init__(self, config: PositConfig = PositConfig(32), ops=("add", "sub", "mul", "div"), busy_reads: int = 1,
                  stage5: bool = True, k: int = 4, units: int = 1, mem: Optional[FakeUDmaBuf] = None, lanes: int = 1,
                  lazy_mem: bool = False, gemv_k: Optional[int] = None, gemv_cols: int = 4,
-                 table: Optional[bool] = None):
+                 table: Optional[bool] = None, fft_max_s: Optional[int] = None):
         super().__init__(config, ops, busy_reads)
         self.engine_cfg = lanes << 16 | units << 8 | k
         # stage 6: with `mem` the engine has its own AXI4 master and works on that buffer (MEM_* registers)
@@ -50,6 +50,12 @@ class FakeVecMmio(FakeAluMmio):
         self.tab = np.zeros(1 << config.n if self.table else 1, np.uint64)
         self.regs[regs.TABLE_CTRL] = 0
         self.table_loads = 0
+        # 5.5: FFT core (fft_max_s: largest S, N = 4^S; 0: none)
+        self.fft_max_s = (6 if mem is not None and config.n >= 16 else 0) if fft_max_s is None else fft_max_s
+        self.regs[regs.FFT_CTRL] = 0
+        self.regs[regs.FFT_CFG] = 2
+        self.fft_tw = None
+        self.fft_tw_loads = 0
         # lazy_mem: the command runs only at the first MEM_STATUS read after the start - the latest
         # moment real hardware could read its input - so a driver that touches a half of the buffer
         # still in use (or starts a command before the previous one finished) gets wrong results
@@ -80,6 +86,10 @@ class FakeVecMmio(FakeAluMmio):
                 s5 |= 1 << regs.OP_TABLE
             return super().read(offset) | 1 << regs.CONFIG_HAS_STREAM | 1 << regs.CONFIG_HAS_QUIRE | master | \
                 (reduce_mask | s5) << 16
+        if offset == regs.FFT_INFO:
+            return self.fft_max_s
+        if offset in (regs.FFT_CTRL, regs.FFT_CFG):
+            return self.regs[offset]
         if offset == regs.TABLE_CFG:
             return (2 << 8 | self.config.n) if self.table else 0
         if offset == regs.TABLE_CTRL:
@@ -121,6 +131,9 @@ class FakeVecMmio(FakeAluMmio):
         if offset in (regs.MEM_LEN, regs.MEM_SRC_A, regs.MEM_SRC_B, regs.MEM_SRC_C, regs.MEM_DST,
                       regs.MEM_LO, regs.MEM_HI, regs.MEM_CFG):
             self.regs[offset] = value & 0xFFFFFFFF
+            return
+        if offset in (regs.FFT_CTRL, regs.FFT_CFG) and self.fft_max_s:
+            self.regs[offset] = value & (3 if offset == regs.FFT_CTRL else 7)
             return
         if offset == regs.TABLE_CTRL and self.table:
             self.regs[offset] = value & 1
@@ -167,10 +180,16 @@ class FakeVecMmio(FakeAluMmio):
         op = r[regs.OP]
         gemv = bool(self.gemv_k) and op == regs.OP_GEMV
         xload = bool(self.gemv_k) and op == regs.OP_XLOAD
+        fctl = r[regs.FFT_CTRL] if self.fft_max_s else 0
+        is_tw, is_fft = bool(fctl & 2), bool(fctl & 1) and not fctl & 2
+        if is_tw or is_fft:
+            op = -1                                                  # FFT mode: OP does not matter
+        gemv = gemv and op == regs.OP_GEMV
+        xload = xload and op == regs.OP_XLOAD
         tload = self.table and op == regs.OP_TABLE and bool(r[regs.TABLE_CTRL] & 1)
         lookup = self.table and op == regs.OP_TABLE and not tload
         use = [True, bool(cfg >> regs.MEM_CFG_READ_B & 1), bool(cfg >> regs.MEM_CFG_READ_C & 1)]
-        write = bool(cfg >> regs.MEM_CFG_WRITE & 1) and not xload and not tload
+        write = bool(cfg >> regs.MEM_CFG_WRITE & 1) and not xload and not tload and not is_tw
         srcs = [r[regs.MEM_SRC_A], r[regs.MEM_SRC_B], r[regs.MEM_SRC_C]]
         nbytes = -(-length * by // 16) * 16
         cols = r[regs.GEMV_COLS]
@@ -186,6 +205,12 @@ class FakeVecMmio(FakeAluMmio):
         bad_len = ((rows_m - 1) * cols + k != length or rows_m == 0 or cols > k) if window else rows_m * k != length
         bad_shape = (gemv and (bad_k or bad_len or wlen > 0xFFFFFFFF)) or \
             (xload and (bad_k or k * cols != length)) or (tload and length != self.tab.size)
+        S = r[regs.FFT_CFG]
+        s_ok = 2 <= S <= self.fft_max_s
+        if is_fft:
+            bad_shape = not s_ok or r[regs.MEM_WLEN] == 0 or length != r[regs.MEM_WLEN] * 2 * 4 ** S
+        if is_tw:
+            bad_shape = not s_ok or length != 3 * 4 ** S // 2
         self.mem_log.append((length, srcs, r[regs.MEM_DST], cfg))
         st = 1 << regs.MEM_ST_DONE | bad_range << regs.MEM_ST_ERR_RANGE | bad_align << regs.MEM_ST_ERR_ALIGN | \
             bad_shape << regs.MEM_ST_ERR_SHAPE
@@ -196,7 +221,19 @@ class FakeVecMmio(FakeAluMmio):
         view = lambda a: np.frombuffer(self.mem.memory, dt, length, a - self.mem.phys_addr)   # noqa: E731
         a = view(srcs[0]).astype(np.uint64)
         b = view(srcs[1]).astype(np.uint64) if use[1] else np.zeros(length, np.uint64)
-        if tload:
+        if is_tw:
+            h = length // 2
+            self.fft_tw = (a[:h].astype(np.int64), a[h:].astype(np.int64))
+            self.fft_tw_loads += 1
+        elif is_fft:
+            from . import fft as F
+            N = 4 ** S
+            x = a.astype(np.int64).reshape(-1, 2, N)
+            yr, yi = F._core_rows(self.config, x[:, 0], x[:, 1], N, self.fft_tw, False)
+            if write:
+                np.frombuffer(self.mem.memory, dt, length, r[regs.MEM_DST] - self.mem.phys_addr)[:] = \
+                    np.stack([yr, yi], axis=1).reshape(-1).astype(dt)
+        elif tload:
             self.tab[:] = a
             self.table_loads += 1
         elif lookup:

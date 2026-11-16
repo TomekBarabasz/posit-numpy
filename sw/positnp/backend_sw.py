@@ -106,6 +106,15 @@ class PositSw:
             out[i] = self.reduce("dot", x[i:i + h.size], h)[0]
         return out
 
+    def fft_core(self, re, im):
+        """The hardware FFT core's transform (positnp.fft.fft_core_model) of every row of (B, N) bits."""
+        from . import fft as F
+        re, im = np.asarray(re).astype(np.int64), np.asarray(im).astype(np.int64)
+        N = re.shape[1]
+        yr, yi = F._core_rows(self.config, re, im, N, F.fft_twiddle_table(self.config, N), False)
+        self._stats["elements"] += int(re.size)
+        return yr.astype(self.dtype), yi.astype(self.dtype)
+
     def gemv(self, a, x) -> np.ndarray:
         """y = A x on raw bits: matmul with one column."""
         return self.matmul(a, np.asarray(x).reshape(-1, 1)).reshape(np.shape(a)[0])

@@ -117,7 +117,15 @@ object PositVecRegs {
                          //     MEM_LEN = (M - 1) * cols + K elementow x
   val GEMV_MODE_WINDOW = 0
 
-  val VERSION = 0x0504           // 5.4: okno (FIR)
+  // 5.5: sprzetowe FFT radix-4 (PositFftCore, fftMaxS > 0)
+  val FFT_CTRL  = 0xE4   // RW  bit 0 fft: polecenie MEM = partia FFT (MEM_LEN = 2N * MEM_WLEN, zapis tyle samo),
+                         //     bit 1 twiddle: polecenie MEM laduje tablice W_N^e (MEM_LEN = 3N / 2, bez zapisu)
+  val FFT_CFG   = 0xE8   // RW  [2:0] S: N = 4^S (2 .. FFT_INFO.maxS)
+  val FFT_INFO  = 0xEC   // RO  [3:0] maxS (0: brak rdzenia FFT)
+  val FFT_CTRL_FFT = 0
+  val FFT_CTRL_TWIDDLE = 1
+
+  val VERSION = 0x0505           // 5.5: FFT
 
   def idVersion : Long = (ID.toLong << 16) | VERSION
   def config(cfg : PositAluConfig, master : Boolean = false, gemv : Boolean = false, table : Boolean = false) : Long =
@@ -150,7 +158,9 @@ object PositVecRegs {
     "MEM_WLEN" -> MEM_WLEN, "GEMV_K" -> GEMV_K, "GEMV_CFG" -> GEMV_CFG, "OP_XLOAD" -> OP_XLOAD, "OP_GEMV" -> OP_GEMV,
     "MEM_ST_ERR_SHAPE" -> MEM_ST_ERR_SHAPE, "CONFIG_HAS_GEMV" -> CONFIG_HAS_GEMV, "GEMV_COLS" -> GEMV_COLS,
     "TABLE_CTRL" -> TABLE_CTRL, "TABLE_CFG" -> TABLE_CFG, "OP_TABLE" -> OP_TABLE, "TABLE_CTRL_LOAD" -> TABLE_CTRL_LOAD,
-    "GEMV_MODE" -> GEMV_MODE, "GEMV_MODE_WINDOW" -> GEMV_MODE_WINDOW)
+    "GEMV_MODE" -> GEMV_MODE, "GEMV_MODE_WINDOW" -> GEMV_MODE_WINDOW,
+    "FFT_CTRL" -> FFT_CTRL, "FFT_CFG" -> FFT_CFG, "FFT_INFO" -> FFT_INFO, "FFT_CTRL_FFT" -> FFT_CTRL_FFT,
+    "FFT_CTRL_TWIDDLE" -> FFT_CTRL_TWIDDLE)
 }
 
 /** withMaster = false: dane przez AXI4-Stream (s_axis {b, a}, m_axis wynik) z AXI DMA (etapy 2-5);
@@ -166,7 +176,8 @@ object PositVecRegs {
 class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
                   val memCfg : Option[MemMoverConfig] = None,
                   val withGemv : Boolean = false, val gemvMaxK : Int = 4096,
-                  val gemvCols : Int = 1, val tableCopies : Int = 0) extends Component {
+                  val gemvCols : Int = 1, val tableCopies : Int = 0,
+                  val fftMaxS : Int = 0) extends Component {
   import PositAluRegs.{VERSION => _, idVersion => _, config => _, all => _, _}
   import PositVecRegs._
   val c = cfg.c
@@ -180,6 +191,8 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   require(gemvCols >= 1 && gemvCols <= 16, s"gemvCols $gemvCols: 1..16")
   val P = if (withGemv) gemvCols else 0
   val withTable = tableCopies > 0
+  val withFft = fftMaxS > 0
+  require(!withFft || (withMaster && Seq(1, 2, 4).contains(L)), "FFT: tylko z masterem AXI4, L = 1, 2 albo 4")
   require(!withTable || (withMaster && c.n <= 16), "tablica: tylko z masterem AXI4 i n <= 16")
   require(tableCopies <= (L + 1) / 2, s"tableCopies $tableCopies: najwyzej (L + 1) / 2 = ${(L + 1) / 2} (2 odczyty na kopie)")
 
@@ -264,15 +277,25 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   }
 
   // ---- dane: grupy po L elementow {a, b(, c), last}; OP sum/dot/sumsq -> quire, reszta -> ALU ------
-  val reduce = opReg === OP_SUM || opReg === OP_DOT || opReg === OP_SUMSQ
-  val isXload = if (withGemv) opReg === OP_XLOAD else False
-  val isGemv  = if (withGemv) opReg === OP_GEMV else False
+  // 5.5: tryb FFT wylacza zwykle sciezki (OP bez znaczenia)
+  val fftCtrl = Reg(Bits(2 bits)) init 0
+  val fftS    = Reg(UInt(3 bits)) init 2
+  if (withFft) {
+    bus.readAndWrite(fftCtrl, FFT_CTRL)
+    bus.readAndWrite(fftS, FFT_CFG)
+  }
+  val isTw   = if (withFft) fftCtrl(FFT_CTRL_TWIDDLE) else False
+  val isFft  = if (withFft) fftCtrl(FFT_CTRL_FFT) && !fftCtrl(FFT_CTRL_TWIDDLE) else False
+  val fftAny = isTw || isFft
+  val reduce = (opReg === OP_SUM || opReg === OP_DOT || opReg === OP_SUMSQ) && !fftAny
+  val isXload = if (withGemv) opReg === OP_XLOAD && !fftAny else False
+  val isGemv  = if (withGemv) opReg === OP_GEMV && !fftAny else False
   val tableLoad = Reg(Bool()) init False
   if (withTable) bus.readAndWrite(tableLoad, TABLE_CTRL, TABLE_CTRL_LOAD)
-  val isTableOp = if (withTable) opReg === OP_TABLE else False
+  val isTableOp = if (withTable) opReg === OP_TABLE && !fftAny else False
   val isTload   = isTableOp && tableLoad                // ladowanie tablicy: po jednym elemencie na takt
   val isLookup  = isTableOp && !tableLoad
-  val serial  = reduce || isXload || isGemv || isTload  // po jednym elemencie na takt (quire, bufor x, tablica)
+  val serial  = reduce || isXload || isGemv || isTload || isTw   // po jednym elemencie na takt (quire, bufor x, tablica, twiddle)
   val inValid = Bool()
   val inA, inB = Bits(L * c.n bits)
   val inC     = Bits(L * c.n bits)
@@ -293,7 +316,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     s
   }
   val aluReady = laneIn.map(_.ready).reduce(_ && _)
-  for (s <- laneIn) s.valid := inValid && !serial && !isLookup && (if (L == 1) True else aluReady)   // L = 1: bez kolejki, ready nie wraca do valid
+  for (s <- laneIn) s.valid := inValid && !serial && !isLookup && !fftAny && (if (L == 1) True else aluReady)   // L = 1: bez kolejki, ready nie wraca do valid
 
   // quire (i gemv): 1 element / takt - grupa rozkladana na elementy
   val sReady = Bool()                                  // odbiorca elementu qA gotowy
@@ -378,12 +401,12 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     when(busy) { cycles := cycles + 1 }
 
     // gemv: M (MEM_WLEN) i K (GEMV_K); iloczyn M * K z rejestru (rejestry stoja przed startem)
-    val wlenReg = withGemv generate (Reg(UInt(32 bits)) init 0)
+    val wlenReg = (withGemv || withFft) generate (Reg(UInt(32 bits)) init 0)
     val kReg    = withGemv generate (Reg(UInt(log2Up(gemvMaxK + 1) bits)) init 0)
     val colsReg = withGemv generate (Reg(UInt(log2Up(gemvCols + 1) + 1 bits)) init 1)
     val winReg  = withGemv generate (Reg(Bool()) init False)
+    if (withGemv || withFft) bus.readAndWrite(wlenReg, MEM_WLEN)
     if (withGemv) {
-      bus.readAndWrite(wlenReg, MEM_WLEN)
       bus.readAndWrite(kReg, GEMV_K)
       bus.readAndWrite(colsReg, GEMV_COLS)
       bus.readAndWrite(winReg, GEMV_MODE, GEMV_MODE_WINDOW)
@@ -395,6 +418,15 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     val prodMC = withGemv generate RegNext(wlenReg * colsReg)
     val wtotal = withGemv generate prodMC(31 downto 0)              // elementy y do zapisu
     val wlen = if (withGemv) Mux(isGemv, wtotal, len) else len
+    // FFT: N = 4^S, S in 2 .. fftMaxS; partia MEM_LEN = MEM_WLEN << (2S + 1), twiddle MEM_LEN = 3 << (2S - 1)
+    val fftBad = if (!withFft) False else {
+      val sOk   = fftS >= 2 && fftS <= fftMaxS
+      val opts  = (0 to 7).map(ss => if (ss < 2 || ss > fftMaxS) U(0, 40 bits) else (wlenReg.resize(40) << (2 * ss + 1)).resize(40))
+      val twOpt = (0 to 7).map(ss => if (ss < 2 || ss > fftMaxS) U(0, 40 bits) else U(3L << (2 * ss - 1), 40 bits))
+      val fLen  = RegNext(Vec(opts)(fftS))
+      val tLen  = Vec(twOpt)(fftS)
+      (isFft && (!sOk || wlenReg === 0 || fLen =/= len.resize(40))) || (isTw && (!sOk || tLen =/= len.resize(40)))
+    }
     val badShape = (if (!withGemv) False else {
       val badK    = kReg === 0 || kReg > gemvMaxK
       val badCols = colsReg === 0 || colsReg > gemvCols
@@ -404,7 +436,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
                        prodMK =/= len.resize(prodMK.getWidth))
       (isGemv && (badK || badCols || badLen || prodMC(prodMC.getWidth - 1 downto 32) =/= 0)) ||
       (isXload && (badK || badCols || prodKC =/= len.resize(prodKC.getWidth)))
-    }) || (if (withTable) isTload && len =/= (1L << c.n) else False)
+    }) || (if (withTable) isTload && len =/= (1L << c.n) else False) || fftBad
 
     // zakres: [addr, addr + slowa * 16) w [lo, hi), bez przekroczenia 2^32
     def bytesOf(n : UInt) : UInt = (mc.beats(n).resize(33) << log2Up(mc.beatBytes)).resize(33)
@@ -416,7 +448,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
     val wbytes = if (withGemv) bytesOf(wlen) else bytes
     def aligned(a : UInt) : Bool = a(log2Up(mc.beatBytes) - 1 downto 0) === 0
     val use = Vec(True, mcfg(MEM_CFG_READ_B), mcfg(MEM_CFG_READ_C))
-    val wr  = mcfg(MEM_CFG_WRITE) && !isXload && !isTload   // XLOAD i ladowanie tablicy nic nie zapisuja
+    val wr  = mcfg(MEM_CFG_WRITE) && !isXload && !isTload && !isTw   // ladowania (x, tablica, twiddle) nic nie zapisuja
     val badRange = (0 until 3).map(i => use(i) && !inRange(src(i), bytes)).reduce(_ || _) || (wr && !inRange(dst, wbytes))
     val badAlign = (0 until 3).map(i => use(i) && !aligned(src(i))).reduce(_ || _) || (wr && !aligned(dst))
 
@@ -677,6 +709,26 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
       val outCount = Mux(outFire, Mux(outLast, lastCnt, U(L, lastCnt.getWidth bits)), U(0, lastCnt.getWidth bits))
     }
 
+    // ---- 5.5: FFT ------------------------------------------------------------------------------------
+    val fft = withFft generate new Area {
+      val core = new PositFftCore(PositFftConfig(c, fftMaxS, L))
+      core.io.s        := fftS
+      core.io.batches  := wlenReg
+      core.io.startFft := launch && isFft
+      core.io.startTw  := launch && isTw
+      core.io.din.valid   := inValid && isFft
+      core.io.din.payload := inA
+      when(isFft) { inReady := core.io.din.ready }
+      core.io.tw.valid   := sFire && isTw
+      core.io.tw.payload := qA
+      when(isTw) { sReady := True }
+      core.io.dout.ready := mover.io.res.ready || !wr
+      when(isFft) {
+        mover.io.res.valid   := core.io.dout.valid && wr
+        mover.io.res.payload := core.io.dout.payload
+      }
+    }
+
     bus.read(errShape ## errResp ## errAlign ## errRange ## done ## busy, MEM_STATUS)
     bus.read(cycles, MEM_CYCLES)
   }
@@ -764,6 +816,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   bus.read(B(idVersion, 32 bits), ID_VERSION)
   bus.read(B(config(cfg, withMaster, withGemv, withTable), 32 bits), CONFIG)
   bus.read(B(if (withTable) ((2L * tableCopies) << 8) | c.n else 0L, 32 bits), TABLE_CFG)
+  bus.read(B(fftMaxS, 32 bits), FFT_INFO)
   bus.read(B(if (withGemv) (gemvCols.toLong << 16) | gemvMaxK else 0L, 32 bits), GEMV_CFG)
   bus.read(flags ## B(0, 2 bits) ## quire.io.nar ## quire.io.busy ## anyInFlight ## error ## done ## busy, STATUS)
   bus.read(result, RESULT)

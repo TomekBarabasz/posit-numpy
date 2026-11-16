@@ -26,6 +26,9 @@ import posit.kv260._
 //  Wersja 5.3: silniki posit8 / posit16 z masterem maja tablice funkcji (OP_TABLE, exp / log / sin ...
 //  z positnp.funcs) w --table-copies C kopiach dwuportowej BRAM (domyslnie max(1, L / 2): 2 C = L odczytow
 //  na takt; posit16: 32 BRAM36 na kopie); --table-copies 0: bez tablicy.
+//  Wersja 5.5, opcjonalnie: --fft S[:n,n] - sprzetowe FFT radix-4 (PositFftCore, N = 4^2 .. 4^S) w silnikach
+//  posit16 / posit32 z L <= 4, np. --fft 6:32 tylko w posit32 (domyslnie wylaczone; posit32: ok. 30 tys. LUT, 48 DSP -
+//  w obu silnikach naraz z gemv x 4 bitstream zbliza sie do 117 tys. LUT xck26).
 //
 //  Wynik: hw/gen/p<n>/PositVecAxi_p<n>.v dla kazdego silnika; dalej vivado/build.tcl -engines "32 16 8"
 //  (z --dma: build.tcl -io dma).
@@ -37,6 +40,8 @@ object VecKv260 {
   var gemvK  = 4096      // etap 7a: pojemnosc bufora x (0: bez gemv)
   var gemvP  = 4         // 5.2: kolumny naraz
   var tableC = -1        // 5.3: kopie tablicy (-1: max(1, L / 2) dla n <= 16)
+  var fftS   = 0         // 5.5: rdzen FFT do N = 4^fftS (0: bez)
+  var fftNs  = Set(16, 32)   // formaty z rdzeniem FFT (--fft S:32)
 
   val lanes = scala.collection.mutable.Map[Int, Int]()     // n -> L z argumentow
 
@@ -56,6 +61,9 @@ object VecKv260 {
 
   def topName(n : Int) : String = s"PositVecAxi_p$n"
 
+  /** Rdzen FFT silnika posit<n>: z masterem, n >= 16, L <= 4. */
+  def fftOf(n : Int) : Int = if (master && n >= 16 && fftNs.contains(n) && lanes.getOrElse(n, 1) <= 4) fftS else 0
+
   /** Kopie tablicy funkcji silnika posit<n>: tylko z masterem i n <= 16. */
   def tableCopies(n : Int) : Int = {
     val l = lanes.getOrElse(n, 1)
@@ -69,12 +77,13 @@ object VecKv260 {
       .generateVerilog(new PositVecAxi(cfg, withMaster = master,
         memCfg = Some(MemMoverConfig(n, lanes = lanes.getOrElse(n, 1))),
         withGemv = master && gemvK > 0, gemvMaxK = gemvK max 2, gemvCols = gemvP,
-        tableCopies = tableCopies(n)).setDefinitionName(topName(n)))
+        tableCopies = tableCopies(n), fftMaxS = fftOf(n)).setDefinitionName(topName(n)))
     require(master || lanes.getOrElse(n, 1) == 1, "L > 1 tylko z masterem AXI4 (bez --dma)")
     val gemv  = master && gemvK > 0
     val ports = (if (master) "m_axi 128 b, irq" else s"s_axis ${2 * n} b, m_axis $n b") + s", L=${lanes.getOrElse(n, 1)}" +
                 (if (gemv) s", gemv K <= $gemvK x $gemvP kolumn" else "") +
-                (if (tableCopies(n) > 0) s", tablica 2^$n x ${tableCopies(n)}" else "")
+                (if (tableCopies(n) > 0) s", tablica 2^$n x ${tableCopies(n)}" else "") +
+                (if (fftOf(n) > 0) s", FFT do N = ${1 << (2 * fftOf(n))}" else "")
     println(s"${rep.toplevelName}: $cfg, CONFIG = 0x${PositVecRegs.config(cfg, master, gemv, tableCopies(n) > 0).toHexString}, " +
             s"$ports -> hw/gen/p$n/${rep.toplevelName}.v")
     rep.toplevelName
@@ -82,11 +91,13 @@ object VecKv260 {
 
   def main(args : Array[String]) : Unit = {
     master = !args.contains("--dma")
-    val opts = Seq("--gemv-k", "--gemv-cols", "--table-copies")
+    val opts = Seq("--gemv-k", "--gemv-cols", "--table-copies", "--fft")
     val vals = opts.map(o => args.indexOf(o)).filter(_ >= 0).map(_ + 1).toSet
     for ((o, i) <- opts.map(o => (o, args.indexOf(o))) if i >= 0) {
-      val v = args(i + 1).toInt
-      o match { case "--gemv-k" => gemvK = v; case "--gemv-cols" => gemvP = v; case _ => tableC = v }
+      val raw = args(i + 1).split(":")
+      if (o == "--fft" && raw.size > 1) fftNs = raw(1).split(",").map(_.trim.toInt).toSet
+      val v = raw(0).toInt
+      o match { case "--gemv-k" => gemvK = v; case "--gemv-cols" => gemvP = v; case "--fft" => fftS = v; case _ => tableC = v }
     }
     val specs = args.toSeq.zipWithIndex.collect { case (a, i) if a != "--dma" && !opts.contains(a) && !vals.contains(i) => a }
     val cfgs = (if (specs.isEmpty) Seq("32") else specs).map(parse)

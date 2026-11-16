@@ -335,6 +335,9 @@ class PositVecHw(PositAluHw):
         self.table_bits = tcfg & 0xFF
         self.table_rate = tcfg >> 8 & 0xFF
         self._table: Optional[str] = None          # function whose table the engine holds
+        # 5.5: hardware FFT, radix 4, N = 4^S for 2 <= S <= fft_max_s (0: no core)
+        self.fft_max_s = self.read(regs.FFT_INFO) & 0xF if self.master and self.version >= 0x0505 else 0
+        self._fft_tw: Optional[int] = None         # N whose twiddle table the core holds
         self.in_dtype = self.IN_DTYPE[n]
         self.out_dtype = self.OUT_DTYPE[n]
         self.in_bytes = 2 * n // 8
@@ -1117,6 +1120,88 @@ class PositVecHw(PositAluHw):
         t0 = time.perf_counter()
         self.correlate(x, h)
         return (size - taps + 1) / (time.perf_counter() - t0)
+
+    # ---- 5.5: hardware FFT (PositFftCore) --------------------------------------------------------------
+
+    def fft_core(self, re, im) -> Tuple[np.ndarray, np.ndarray]:
+        """FFT of every row of (B, N) raw bits on the engine's radix-4 core (N = 4^S, 2 <= S <= fft_max_s):
+        (re, im) bits, the same as positnp.fft.fft_core_model. Without the core: the model in software."""
+        from . import fft as F
+        re, im = np.asarray(re), np.asarray(im)
+        B, N = re.shape
+        S = (N.bit_length() - 1) // 2
+        if not self.fft_max_s or 4 ** S != N or not 2 <= S <= self.fft_max_s or self.heap is None:
+            self._fallback += re.size
+            return self._sw.fft_core(re, im)
+        t_start = time.perf_counter()
+        timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
+        by = self.out_bytes
+        self.write(regs.FFT_CFG, S)
+        if self._fft_tw != N:                                      # twiddle table W_N^e, e < 3N/4
+            tr, ti = F.fft_twiddle_table(self.config, N)
+            tb = self.heap.empty(tr.size * 2, self.out_dtype)
+            if tb is None:
+                raise PositAluError(f"device memory full for the FFT twiddles ({self.heap})")
+            tb[:] = np.concatenate([tr, ti])
+            off = self.heap.offset_of(tb)
+            self.buf.sync_for_device(off, tb.nbytes, 1)
+            self._fft_tw = None
+            self.write(regs.FFT_CTRL, 1 << regs.FFT_CTRL_TWIDDLE)
+            try:
+                self._mem_cmd(tb.size, [off, 0, 0], None, False, False)
+            finally:
+                self.write(regs.FFT_CTRL, 0)
+            del tb
+            self._fft_tw = N
+        per = 2 * N
+        rows = min(B, max(1, 0xFFFF0000 // per))
+        while True:
+            xb = self.heap.empty(rows * per, self.out_dtype)
+            yb = self.heap.empty(rows * per, self.out_dtype)
+            if xb is not None and yb is not None:
+                break
+            del xb, yb
+            if rows == 1:
+                raise PositAluError(f"device memory full for an FFT of {N} points ({self.heap})")
+            rows = -(-rows // 2)
+        off_x, off_y = self.heap.offset_of(xb), self.heap.offset_of(yb)
+        out_r = np.empty((B, N), self.out_dtype)
+        out_i = np.empty((B, N), self.out_dtype)
+        cycles = 0
+        self.write(regs.OP, regs.OP_ADD)
+        try:
+            for b0 in range(0, B, rows):
+                nb = min(rows, B - b0)
+                t = time.perf_counter()
+                x2 = xb[:nb * per].reshape(nb, 2, N)
+                x2[:, 0] = re[b0:b0 + nb]
+                x2[:, 1] = im[b0:b0 + nb]
+                timing["pack"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.buf.sync_for_device(off_x, nb * per * by, 1)
+                self.buf.sync_for_device(off_y, nb * per * by, 0)
+                timing["sync_device"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.write(regs.MEM_WLEN, nb)
+                self.write(regs.FFT_CTRL, 1 << regs.FFT_CTRL_FFT)
+                cycles += self._mem_cmd(nb * per, [off_x, 0, 0], off_y, False, False)
+                self.write(regs.FFT_CTRL, 0)
+                timing["dma"] += time.perf_counter() - t
+                t = time.perf_counter()
+                self.buf.sync_for_cpu(off_y, nb * per * by, 2)
+                timing["sync_cpu"] += time.perf_counter() - t
+                t = time.perf_counter()
+                y2 = yb[:nb * per].reshape(nb, 2, N)
+                out_r[b0:b0 + nb] = y2[:, 0]
+                out_i[b0:b0 + nb] = y2[:, 1]
+                timing["copy_out"] += time.perf_counter() - t
+        finally:
+            self.write(regs.FFT_CTRL, 0)
+        del xb, yb
+        timing["total"] = time.perf_counter() - t_start
+        timing["engine_cycles"] = cycles
+        self.last_timing = timing
+        return out_r, out_i
 
     def _matmul_dots(self, A, B, out) -> np.ndarray:
         """C[i, j] as one quire dot each (no gemv in the bitstream, K > gemv_max_k, or no device memory)."""

@@ -26,6 +26,7 @@ import posit.kv260.PositGen.{DividerJob, UnitJob}
 //    hw/gen/vec_p32_mem_L2_gemv/ etap 7a: L2 z gemv (bufor x 4096 elementow, drugi quire)
 //    hw/gen/vec_p32_mem_L2_gemv4/ 5.2: L2 z gemv na 4 kolumny (4 bufory x, 8 quire)
 //    hw/gen/vec_p16_mem_L4_table/ 5.3: posit16 x 4 z tablica funkcji w 2 kopiach (bez gemv): koszt tablicy
+//    hw/gen/vec_p32_mem_L2_fft6/ 5.5: posit32 x 2 z rdzeniem FFT do N = 4096 (bez gemv): koszt rdzenia
 //
 //  sbt "top-ooc/runMain posit.top.ooc.OocUnits"
 //  Synteza: vivado/ooc_synth.tcl (opis w README.md).
@@ -71,5 +72,9 @@ object OocUnits {
       .generateVerilog(new PositVecAxi(PositAluConfig(PositConfig(16), PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full,
                                                       sqrt = true, fma = true, fma3 = true), withMaster = true,
                                        memCfg = Some(MemMoverConfig(16, lanes = 4)), tableCopies = 2))
+    Kv260.spinal.copy(targetDirectory = "hw/gen/vec_p32_mem_L2_fft6")
+      .generateVerilog(new PositVecAxi(PositAluConfig(PositConfig(32), PositOp.all, divBitsPerCycle = 4, pipe = PositPipeline.full,
+                                                      sqrt = true, fma = true, convert = true, fma3 = true), withMaster = true,
+                                       memCfg = Some(MemMoverConfig(32, lanes = 2)), fftMaxS = 6))
   }
 }

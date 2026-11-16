@@ -13,7 +13,7 @@ from . import board
 from .backend_sw import PositSw
 from .ref import Flags, PositConfig
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = ["ref", "regs", "vecops", "Flags", "PositConfig", "PositArray", "PositSw", "P8", "P16", "P32",
            "array", "from_bits", "zeros", "nar", "quire", "fma", "axpy", "matmul", "convolve", "correlate", "func", "sigmoid", "funcs", "fft", "to_device", "set_backend", "get_backend", "active_backends", "board", "using", "stats", "clear_stats",

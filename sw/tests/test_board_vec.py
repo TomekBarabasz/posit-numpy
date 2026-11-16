@@ -511,10 +511,11 @@ def test_fft_matches_sw(hw, sw):
     rnd = np.random.default_rng(12)
     for N in (8, 64, 1024, 4096):
         x = pn.array(rnd.standard_normal((2, N)), hw.config)
-        want = pn.fft.fft(x)                                       # PositSw (no engine registered for the format here)
-        with pn.using(hw):
-            got = pn.fft.fft(x)
-        assert got.real.equal_bits(want.real) and got.imag.equal_bits(want.imag), N
+        for method in ("blocks", "core") if N >= 16 and N in (64, 1024, 4096) else ("blocks",):
+            want = pn.fft.fft(x, method=method)                    # PositSw (no engine registered here)
+            with pn.using(hw):
+                got = pn.fft.fft(x, method=method)                 # "core": the engine's FFT core when present
+            assert got.real.equal_bits(want.real) and got.imag.equal_bits(want.imag), (N, method)
 
 
 def test_fft_throughput(hw):
@@ -524,13 +525,16 @@ def test_fft_throughput(hw):
     for N, batch in ((64, 1024), (1024, 64), (4096, 16)):
         x = pn.array(rnd.standard_normal((batch, N)), hw.config)
         with pn.using(hw):
+            pn.fft.fft(x[:1])                                      # twiddle table loaded outside the timing
             t0 = time.perf_counter()
             X = pn.fft.fft(x)
             dt = time.perf_counter() - t0
+        how = "core" if getattr(hw, "fft_max_s", 0) and 4 ** ((N.bit_length() - 1) // 2) == N \
+            and (N.bit_length() - 1) // 2 <= hw.fft_max_s else "blocks"
         z = (rnd.standard_normal((batch, N)) + 1j * rnd.standard_normal((batch, N))).astype(np.complex64)
         t0 = time.perf_counter()
         np.fft.fft(z)
         dn = time.perf_counter() - t0
         err = np.max(np.abs(X.to_complex() - np.fft.fft(x.to_float()))) / np.max(np.abs(np.fft.fft(x.to_float())))
-        print(f"\n{hw.config} fft N={N} x {batch}: {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e} | "
+        print(f"\n{hw.config} fft N={N} x {batch} ({how}): {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e} | "
               f"NumPy complex64 {batch / dn:.0f} transforms/s")

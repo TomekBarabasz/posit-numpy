@@ -320,6 +320,80 @@ def quire(c: PositConfig, mode: str, a, b=None):
     return q, False
 
 
+def fused_dot(c: PositConfig, a, b) -> Rounded:
+    """Many short exact dot products at once: out[i] = round(sum_t a[t, i] * b[t, i]), one rounding each.
+
+    a, b: posit bits of shape (T, n). The model of a fused butterfly (a + w b computed exactly, rounded
+    once): every product is cut into 16-bit limbs, the limbs are summed per (element, position) with
+    np.bincount, carries are propagated limb by limb for all elements at once (int64), and the 53 leading
+    bits plus a sticky bit go to encode(). NaR in any term of an element -> NaR.
+    """
+    _check(c)
+    a = np.asarray(a)
+    b = np.asarray(b)
+    if a.shape != b.shape or a.ndim != 2:
+        raise ValueError(f"fused_dot: a and b of shape (T, n), got {a.shape} and {b.shape}")
+    T, n = a.shape
+    da, db = decode(c, a.ravel()), decode(c, b.ravel())
+    F = frac_bits(c)
+    elem = np.tile(np.arange(n), T)
+    nar = np.zeros(n, bool)
+    np.logical_or.at(nar, elem, da.nar | db.nar)
+    live = ~(da.zero | db.zero | da.nar | db.nar)
+    prod = (da.sig * db.sig)[live]                                  # 2F + 2 bits, exact (< 2**58 for posit32)
+    pos = (da.scale + db.scale)[live] + c.quire_frac - 2 * F        # bit position of the product's LSB
+    sgn = np.where((da.sign ^ db.sign)[live], -1.0, 1.0)
+    el = elem[live]
+    low = pos < 0
+    prod = np.where(low, prod >> np.where(low, -pos, 0), prod)      # bits below the quire LSB are zeros
+    pos = np.where(low, 0, pos)
+    base, off = pos // LIMB, pos % LIMB
+    nl = c.quire_width(64) // LIMB + 8
+    acc = np.zeros(n * nl)
+    mask = (1 << LIMB) - 1
+    for t in range((2 * F + 2 + LIMB - 1) // LIMB):
+        piece = (prod >> (LIMB * t)) & mask
+        shifted = piece << off
+        idx = el * nl + base + t
+        acc += np.bincount(idx, weights=sgn * (shifted & mask), minlength=n * nl)
+        acc += np.bincount(idx + 1, weights=sgn * (shifted >> LIMB), minlength=n * nl)
+    v = acc.reshape(n, nl).astype(np.int64)
+    carry = np.zeros(n, np.int64)
+    for i in range(nl):                                             # normalise: limbs in [0, 2**16), top carry = sign
+        v[:, i] += carry
+        carry = v[:, i] >> LIMB
+        v[:, i] &= mask
+    neg = carry < 0
+    if neg.any():                                                   # magnitude of the negative sums: ~v + 1
+        w = np.where(neg[:, None], mask - v, v)
+        carry = neg.astype(np.int64)
+        for i in range(nl):
+            w[:, i] += carry
+            carry = w[:, i] >> LIMB
+            w[:, i] &= mask
+        v = w
+    nz = v != 0
+    zero = ~nz.any(axis=1) & ~nar
+    top = np.where(zero, 0, nl - 1 - np.argmax(nz[:, ::-1], axis=1))
+    rows = np.arange(n)
+    limb = lambda k: np.where(k >= 0, v[rows, np.clip(k, 0, nl - 1)], 0).astype(np.uint64)   # noqa: E731
+    word = (limb(top) << np.uint64(48)) | (limb(top - 1) << np.uint64(32)) | (limb(top - 2) << np.uint64(16)) | limb(top - 3)
+    bl = np.floor(np.log2(np.maximum(limb(top), 1).astype(np.float64))).astype(np.int64) + 1   # bits in the top limb
+    lead = bl - 1 + 48                                              # leading one in `word`
+    sh = lead - 52                                                  # > 0: drop sh bits of `word`; < 0: take -sh from limb top - 4
+    shr = np.maximum(sh, 0).astype(np.uint64)
+    shl = np.maximum(-sh, 0).astype(np.uint64)
+    l4 = limb(top - 4)
+    sig = np.where(sh >= 0, word >> shr, (word << shl) | (l4 >> (np.uint64(16) - shl))).astype(np.int64)
+    lost = np.where(sh >= 0, (word & ((np.uint64(1) << shr) - np.uint64(1))) != 0,
+                    (l4 & ((np.uint64(1) << (np.uint64(16) - shl)) - np.uint64(1))) != 0)
+    cnz = np.cumsum(nz, axis=1)
+    k = np.where(sh >= 0, top - 4, top - 5)                         # highest limb entirely under the window
+    below = np.where(k >= 0, cnz[rows, np.clip(k, 0, nl - 1)] > 0, False)
+    scale = top * LIMB + bl - 1 - c.quire_frac
+    return encode(c, neg & ~zero, scale, sig, 52, lost | below, nar, zero)
+
+
 def quire_round(c: PositConfig, q: int, nar: bool) -> Rounded:
     from . import ref
     bits, f = ref.quire_round(c, q, nar)
