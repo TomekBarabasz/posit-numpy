@@ -501,3 +501,36 @@ def test_correlate_throughput(hw):
         print(f"\n{hw.config} FIR {taps} taps, {size} samples, {hw.gemv_cols} outputs/row: {r / 1e6:.2f} M outputs/s "
               f"({mac / t['total'] / 1e6:.0f} M MAC/s; engine {mac / max(t['engine_cycles'], 1):.2f} MAC/clock) | "
               f"NumPy float32 np.convolve {npr / 1e6:.2f} M outputs/s")
+
+
+# ---- stage 7: FFT (exact DFT blocks through matmul, twiddles through FMA3) -------------------------------
+
+def test_fft_matches_sw(hw, sw):
+    _need_gemv(hw)
+    import positnp as pn
+    rnd = np.random.default_rng(12)
+    for N in (8, 64, 1024, 4096):
+        x = pn.array(rnd.standard_normal((2, N)), hw.config)
+        want = pn.fft.fft(x)                                       # PositSw (no engine registered for the format here)
+        with pn.using(hw):
+            got = pn.fft.fft(x)
+        assert got.real.equal_bits(want.real) and got.imag.equal_bits(want.imag), N
+
+
+def test_fft_throughput(hw):
+    _need_gemv(hw)
+    import positnp as pn
+    rnd = np.random.default_rng(13)
+    for N, batch in ((64, 1024), (1024, 64), (4096, 16)):
+        x = pn.array(rnd.standard_normal((batch, N)), hw.config)
+        with pn.using(hw):
+            t0 = time.perf_counter()
+            X = pn.fft.fft(x)
+            dt = time.perf_counter() - t0
+        z = (rnd.standard_normal((batch, N)) + 1j * rnd.standard_normal((batch, N))).astype(np.complex64)
+        t0 = time.perf_counter()
+        np.fft.fft(z)
+        dn = time.perf_counter() - t0
+        err = np.max(np.abs(X.to_complex() - np.fft.fft(x.to_float()))) / np.max(np.abs(np.fft.fft(x.to_float())))
+        print(f"\n{hw.config} fft N={N} x {batch}: {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e} | "
+              f"NumPy complex64 {batch / dn:.0f} transforms/s")

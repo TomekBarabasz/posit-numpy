@@ -748,8 +748,18 @@ _FUNCTIONS: Dict[Any, Any] = {
     np.vdot: lambda a, b: (a if isinstance(a, PositArray) else b._coerce(a)).dot(b),
     np.linalg.norm: lambda x, ord=None, axis=None, keepdims=False: _norm(x, ord, axis),
     np.convolve: lambda a, v, mode="full": convolve(a, v, mode),
+    np.fft.fft: lambda a, n=None, axis=-1, norm=None: _fft("fft", a, n, axis, norm),
+    np.fft.ifft: lambda a, n=None, axis=-1, norm=None: _fft("ifft", a, n, axis, norm),
+    np.fft.rfft: lambda a, n=None, axis=-1, norm=None: _fft("rfft", a, n, axis, norm),
     np.correlate: lambda a, v, mode="valid": correlate(a, v, mode),
 }
+
+
+def _fft(name, a, n, axis, norm):
+    if norm not in (None, "backward"):
+        raise TypeError(f"np.fft.{name} on posit arrays: norm={norm!r} not supported (only the default)")
+    from . import fft as F
+    return getattr(F, name)(a, n, axis)
 
 
 def _norm(x, ord, axis):
