@@ -538,5 +538,13 @@ def test_fft_throughput(hw):
         np.fft.fft(z)
         dn = time.perf_counter() - t0
         err = np.max(np.abs(X.to_complex() - np.fft.fft(x.to_float()))) / np.max(np.abs(np.fft.fft(x.to_float())))
-        print(f"\n{hw.config} fft N={N} x {batch} ({how}): {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e} | "
+        eng = ""
+        if how == "core":
+            t = hw.last_timing
+            S = (N.bit_length() - 1) // 2
+            L = (hw.engine_cfg() or {}).get("lanes", 1)
+            model = batch * (4 * N // L + S * (N // 4 + 15))
+            eng = (f" [engine {t['engine_cycles'] / 100e3:.2f} ms = {t['engine_cycles']} clk (model {model}), copy in "
+                   f"{t['pack'] * 1e3:.2f}, sync {(t['sync_device'] + t['sync_cpu']) * 1e3:.2f}, copy out {t['copy_out'] * 1e3:.2f} ms]")
+        print(f"\n{hw.config} fft N={N} x {batch} ({how}): {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e}{eng} | "
               f"NumPy complex64 {batch / dn:.0f} transforms/s")

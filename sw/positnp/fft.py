@@ -185,8 +185,8 @@ def _as_complex(x, config: Optional[PositConfig]):
     if isinstance(x, tuple) and len(x) == 2:
         re = x[0] if isinstance(x[0], A.PositArray) else A.array(x[0], config)
         return re, re._coerce(x[1])
-    if isinstance(x, A.PositArray):
-        return x, A.zeros(x.shape, x.config)
+    if isinstance(x, A.PositArray):                              # real input: zero imaginary bits, no conversion
+        return x, A.PositArray._wrap(np.zeros(x.shape, A.bits_dtype(x.config)), x.config)
     arr = np.asarray(x)
     if np.iscomplexobj(arr):
         re = A.array(arr.real, config)
@@ -229,13 +229,13 @@ def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config, metho
         if not core_ok:
             raise ValueError(f"method='core': N = 4^S >= 16 (got {N})")
         fc = getattr(ctx.be, "fft_core", None) or ctx.A._sw.setdefault(c, ctx.A.PositSw(c)).fft_core
-        yr, yi = fc(R2.astype(ctx.dt), I2.astype(ctx.dt))
+        yr, yi = fc(R2.astype(ctx.dt, copy=False), I2.astype(ctx.dt, copy=False))
     else:
         yr, yi = ctx.fft_rows(R2, I2, radix)
     if inverse:
         yi = (-np.asarray(yi).astype(np.int64)) & c.mask
-    Yr = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yr).reshape(lead + (N,))).astype(ctx.dt), c)
-    Yi = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yi).reshape(lead + (N,))).astype(ctx.dt), c)
+    Yr = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yr).reshape(lead + (N,))).astype(ctx.dt, copy=False), c)
+    Yi = A.PositArray._wrap(np.ascontiguousarray(np.asarray(yi).reshape(lead + (N,))).astype(ctx.dt, copy=False), c)
     if inverse:
         Yr, Yi = Yr / N, Yi / N
     if axis not in (-1, rb.ndim - 1):

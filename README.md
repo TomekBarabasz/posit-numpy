@@ -42,8 +42,9 @@ Stan:
 - FFT (`pn.fft.fft / ifft / rfft`, `np.fft.fft`): bloki DFT dokładnie w quire przez matmul, twiddle przez FMA3, bez nowego
   sprzętu — posit32 6–7 × dokładniejszy niż float32 `np.fft`; sprawdzone na płytce (bit w bit), 13–19 × wolniejsze
   niż `np.fft` na A53 (np. 18 455 transformat 64-punktowych / s);
-- sprzętowe FFT radix-4 (5.5, opcjonalne `VecKv260 --fft 6:32`): jeden motylek na takt, N = 16 … 4096, posit32 ok. 3 ×
-  dokładniejszy niż float32; w symulacji bit w bit z modelem, oczekiwane 2–3 × szybciej niż `np.fft`; czeka na płytkę.
+- sprzętowe FFT radix-4 (5.5, opcjonalne `VecKv260 --fft 6:32`, z `--gemv-cols 32=2,16=2,8=0`, żeby się zmieściło):
+  sprawdzone na płytce bit w bit z modelem — posit32 N = 4096: 2 874 transformat / s (NumPy complex64: 2 352),
+  N = 64: 152 550 / s, 8–21 × szybciej niż bloki DFT, ok. 3 × dokładniej niż float32.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)

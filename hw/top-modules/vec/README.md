@@ -334,6 +334,21 @@ Oczekiwane na płytce (100 MHz), transformaty / s:
 Wczytanie i zapis nie zachodzą jeszcze na obliczenia: z podwójnym buforem banków rdzeń byłby ograniczony samym
 liczeniem (N = 1024: 1 355 zamiast 3 400 taktów, ok. 74 000 transformat / s).
 
+**Na płytce (2026-11-16, `--fft 6:32 --gemv-cols 32=2,16=2,8=0`, rdzeń tylko w posit32)**: `test_fft_matches_sw` bit w bit
+z modelem rdzenia (`PositSw.fft_core`). posit32, transformaty / s (czas partii) i błąd względny wobec float64:
+
+| N × partia | rdzeń | bloki DFT (poprzednio) | NumPy complex64 |
+| --- | ---: | ---: | ---: |
+| 64 × 1024 | 152 550 (6,7 ms), 8,6e-9 | 18 823 | 346 570 |
+| 1024 × 64 | 11 665 (5,5 ms), 1,2e-8 | 750 | 13 346 |
+| 4096 × 16 | **2 874** (5,6 ms), 1,6e-8 | 135 | 2 352 |
+
+- 8–21 × szybciej niż bloki DFT; dla N = 4096 szybciej niż `np.fft` na A53, dla N = 1024 prawie tyle samo.
+- Silnik według rachunku taktów to ok. 2,3 ms na partię (np. 1024 × 64: 1024 · 221 taktów), reszta (3–4 ms) to Python:
+  kopie danych do bufora urządzenia i z powrotem, synchronizacja cache i otoczka `pn.fft` (na PC ok. 0,5 ms);
+  `test_fft_throughput` wypisuje teraz rozbicie z `hw.last_timing`.
+- posit16 / posit8 bez rdzenia (bloki DFT przy gemv × 2, posit8 bez gemv: pominięte).
+
 ## FFT z bloków DFT (bez nowego sprzętu)
 
 `pn.fft.fft / ifft / rfft` i `np.fft.fft` na `PositArray` (`sw/positnp/fft.py`) składają FFT z tego, co silnik już ma:
