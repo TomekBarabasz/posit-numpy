@@ -311,7 +311,11 @@ def _core_rows(c, re, im, N_top, table, fused):
     if L == 1:
         return re, im
     M = L // 4
-    ys = [_core_rows(c, re[:, p::4], im[:, p::4], N_top, table, fused) for p in range(4)]
+    # the 4 subsequences x[p::4] of every row as one batch (B * 4 rows): one recursive call per level
+    sub = lambda a: a.reshape(B, M, 4).transpose(0, 2, 1).reshape(B * 4, M)   # noqa: E731
+    zr, zi = _core_rows(c, sub(re), sub(im), N_top, table, fused)
+    zr, zi = zr.reshape(B, 4, M), zi.reshape(B, 4, M)
+    ys = [(zr[:, p], zi[:, p]) for p in range(4)]
     k = np.arange(M)
     tr, ti = table
     out_r = np.empty((B, L), np.int64)

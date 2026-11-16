@@ -511,7 +511,9 @@ def test_fft_matches_sw(hw, sw):
     rnd = np.random.default_rng(12)
     for N in (8, 64, 1024, 4096):
         x = pn.array(rnd.standard_normal((2, N)), hw.config)
-        for method in ("blocks", "core") if N >= 16 and N in (64, 1024, 4096) else ("blocks",):
+        core = getattr(hw, "fft_max_s", 0) and 4 ** ((N.bit_length() - 1) // 2) == N \
+            and 2 <= (N.bit_length() - 1) // 2 <= hw.fft_max_s
+        for method in ("blocks", "core") if core else ("blocks",):     # no core: "core" would be software twice
             want = pn.fft.fft(x, method=method)                    # PositSw (no engine registered here)
             with pn.using(hw):
                 got = pn.fft.fft(x, method=method)                 # "core": the engine's FFT core when present
