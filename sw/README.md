@@ -65,6 +65,8 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
   PositComplex albo tablica NumPy (też zespolona). Bloki DFT do 64 punktów dokładnie w quire (matmul), twiddle przez FMA3;
   `exact=True` — jedno DFT (N ≤ 2048), jedno zaokrąglenie na wyjście. Silnik 5.5 z rdzeniem FFT (`--fft`): `method="auto"`
   liczy N = 4^S na rdzeniu radix-4 (`hw.fft_core`, model `pn.fft.fft_core_model`, `method="core"` w programie).
+  `X.to_device()` (PositComplex) kładzie dane w buforze urządzenia (…, 2, N): fft / ifft czytają go w miejscu i zostawiają
+  wynik na urządzeniu (`X.on_device`, `X.to_host()`).
   Opis i dokładność: `hw/top-modules/vec/README.md`.
 - Etap 7, splot: `np.convolve`, `np.correlate` (tryby full / same / valid), `pn.convolve`, `pn.correlate`; każde wyjście
   dokładnie w quire, zaokrąglone raz; NaR tylko tam, gdzie jest składnikiem sumy (jak `nan` w NumPy). Silnik 5.4:

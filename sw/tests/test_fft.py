@@ -136,3 +136,37 @@ def test_core_on_fake_engine(n):
     assert vec.regs[regs.FFT_CTRL] == 0
     with pytest.raises(ValueError, match="4\\^S"):
         pn.fft.fft(pn.array(np.ones(32), c), method="core")
+
+
+def test_core_device_memory_chain():
+    """PositComplex.to_device(): the core reads the (B, 2, N) buffer in place and leaves its result there;
+    fft -> ifft on the device without copies, bit for bit the software model."""
+    c = PositConfig(32)
+    mem = FakeUDmaBuf(1 << 21)
+    vec = FakeVecMmio(c, mem=mem, fft_max_s=5)
+    hw = PositVecHw(vec, None, mem)
+    rnd = np.random.default_rng(21)
+    z = rnd.standard_normal((4, 256)) + 1j * rnd.standard_normal((4, 256))
+    x = pn.fft.PositComplex(pn.array(z.real, c), pn.array(z.imag, c))
+    want_f = F.fft_core_model(x)
+    want_i = pn.fft.ifft(want_f, method="core")                    # PositSw: conj(fft(conj)) / N
+    with pn.using(hw):
+        xd = x.to_device()
+        assert xd.on_device and xd.real.equal_bits(x.real)
+        src = hw.fft_device_offset(xd.real.bits, xd.imag.bits)
+        vec.mem_log.clear()
+        Xd = pn.fft.fft(xd)
+        assert Xd.on_device                                        # result stays on the device
+        fft_cmds = [cmd for cmd in vec.mem_log if cmd[3] >> 2 & 1]
+        assert fft_cmds and fft_cmds[0][1][0] == mem.phys_addr + src   # read in place, no staging copy
+        xi = pn.fft.ifft(Xd)
+        assert xi.on_device
+    assert Xd.real.equal_bits(want_f.real) and Xd.imag.equal_bits(want_f.imag)
+    assert xi.real.equal_bits(want_i.real) and xi.imag.equal_bits(want_i.imag)
+    assert np.max(np.abs(xi.to_complex() - x.to_complex())) < 1e-7
+    h = xi.to_host()
+    assert not h.on_device and h.real.equal_bits(xi.real)
+    del xd, Xd, xi
+    import gc
+    gc.collect()
+    assert hw.heap.stats()["blocks"] == 0

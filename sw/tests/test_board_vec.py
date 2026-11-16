@@ -546,5 +546,16 @@ def test_fft_throughput(hw):
             model = batch * (4 * N // L + S * (N // 4 + 15))
             eng = (f" [engine {t['engine_cycles'] / 100e3:.2f} ms = {t['engine_cycles']} clk (model {model}), copy in "
                    f"{t['pack'] * 1e3:.2f}, sync {(t['sync_device'] + t['sync_cpu']) * 1e3:.2f}, copy out {t['copy_out'] * 1e3:.2f} ms]")
-        print(f"\n{hw.config} fft N={N} x {batch} ({how}): {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e}{eng} | "
+        dev = ""
+        if how == "core":                                          # the same batch in device memory: no copies
+            with pn.using(hw):
+                xd = pn.fft.PositComplex(x, pn.zeros(x.shape, hw.config)).to_device()
+                pn.fft.fft(xd)
+                t0 = time.perf_counter()
+                Xd = pn.fft.fft(xd)
+                dd = time.perf_counter() - t0
+                assert Xd.on_device and Xd.real.equal_bits(X.real) and Xd.imag.equal_bits(X.imag)
+                del xd, Xd
+            dev = f" | device memory {batch / dd:.0f} transforms/s ({dd * 1e3:.2f} ms)"
+        print(f"\n{hw.config} fft N={N} x {batch} ({how}): {batch / dt:.0f} transforms/s ({dt * 1e3:.1f} ms), rel err {err:.1e}{eng}{dev} | "
               f"NumPy complex64 {batch / dn:.0f} transforms/s")

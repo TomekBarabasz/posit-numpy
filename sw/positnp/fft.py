@@ -67,6 +67,50 @@ class PositComplex:
     def conj(self) -> "PositComplex":
         return PositComplex(self.real, -self.imag)
 
+    # ---- device memory: one buffer (B, 2, N), the layout of the hardware FFT core -------------------------
+
+    def to_device(self) -> "PositComplex":
+        """Copy into the device memory of the format's engine as one (..., 2, N) buffer (the FFT core's layout):
+        pn.fft on it reads it in place and leaves its result on the device too. No device memory: unchanged."""
+        A = _arr()
+        c = self.config
+        be = A.get_backend(c)
+        heap = getattr(be, "heap", None)
+        if heap is None or self.on_device:
+            return self
+        N = self.shape[-1] if self.shape else 1
+        B = int(np.prod(self.shape[:-1])) if len(self.shape) > 1 else 1
+        d = heap.empty(B * 2 * N, A.bits_dtype(c))
+        if d is None:
+            raise MemoryError(f"device memory full ({heap})")
+        d3 = d.reshape(B, 2, N)
+        d3[:, 0] = self.real.bits.reshape(B, N)
+        d3[:, 1] = self.imag.bits.reshape(B, N)
+        return _device_complex(d3, self.shape, c)
+
+    @property
+    def on_device(self) -> bool:
+        """Both parts are the halves of one (B, 2, N) device buffer (what the FFT core reads in place)."""
+        A = _arr()
+        be = A.get_backend(self.config)
+        f = getattr(be, "fft_device_offset", None)
+        if f is None:
+            return False
+        N = self.shape[-1] if self.shape else 1
+        return f(self.real.bits.reshape(-1, N), self.imag.bits.reshape(-1, N)) is not None
+
+    def to_host(self) -> "PositComplex":
+        A = _arr()
+        return PositComplex(A.PositArray(self.real.bits.copy(), self.config), A.PositArray(self.imag.bits.copy(), self.config))
+
+
+def _device_complex(d3: np.ndarray, shape, c: PositConfig) -> PositComplex:
+    """PositComplex whose parts are views of the (B, 2, N) device buffer d3."""
+    A = _arr()
+    shape = tuple(shape) if shape else (d3.shape[-1],)
+    return PositComplex(A.PositArray._wrap(d3[:, 0].reshape(shape), c, view=True),
+                        A.PositArray._wrap(d3[:, 1].reshape(shape), c, view=True))
+
     def __repr__(self) -> str:
         return f"PositComplex({self.config}, shape={self.shape})"
 
@@ -210,8 +254,6 @@ def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config, metho
         ib = np.pad(ib[..., :N], pad)
     lead = rb.shape[:-1]
     R2, I2 = rb.reshape(-1, N), ib.reshape(-1, N)
-    if inverse:                                                 # ifft(x) = conj(fft(conj(x))) / N
-        I2 = (-I2.astype(np.int64)) & c.mask
     ctx = _Ctx(c)
     if exact:
         method = "exact"
@@ -221,15 +263,25 @@ def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config, metho
     core_ok = N >= 16 and _is_pow4(N)
     if method == "auto":                                        # the hardware core when the bitstream has it
         method = "core" if core_ok and getattr(ctx.be, "fft_max_s", 0) >= S else "blocks"
+    if method == "core":
+        if not core_ok:
+            raise ValueError(f"method='core': N = 4^S >= 16 (got {N})")
+        fc = getattr(ctx.be, "fft_core", None) or ctx.A._sw.setdefault(c, ctx.A.PositSw(c)).fft_core
+        # inverse on the core: conj(fft(conj x)) / N in the backend (FFT_CTRL.conj; device buffers stay on the device)
+        yr, yi = fc(R2.astype(ctx.dt, copy=False), I2.astype(ctx.dt, copy=False), inverse=inverse)
+        shp = lead + (N,)
+        if axis in (-1, rb.ndim - 1):
+            return PositComplex(A.PositArray._wrap(np.asarray(yr).reshape(shp), c, view=True),
+                                A.PositArray._wrap(np.asarray(yi).reshape(shp), c, view=True))
+        Yr = A.PositArray._wrap(np.ascontiguousarray(np.moveaxis(np.asarray(yr).reshape(shp), -1, axis)), c)
+        Yi = A.PositArray._wrap(np.ascontiguousarray(np.moveaxis(np.asarray(yi).reshape(shp), -1, axis)), c)
+        return PositComplex(Yr, Yi)
+    if inverse:                                                 # ifft(x) = conj(fft(conj(x))) / N
+        I2 = (-I2.astype(np.int64)) & c.mask
     if method == "exact":
         if N > EXACT_MAX:
             raise ValueError(f"exact=True: direct DFT up to {EXACT_MAX} points (got {N})")
         yr, yi = ctx.dft_rows(R2, I2)
-    elif method == "core":
-        if not core_ok:
-            raise ValueError(f"method='core': N = 4^S >= 16 (got {N})")
-        fc = getattr(ctx.be, "fft_core", None) or ctx.A._sw.setdefault(c, ctx.A.PositSw(c)).fft_core
-        yr, yi = fc(R2.astype(ctx.dt, copy=False), I2.astype(ctx.dt, copy=False))
     else:
         yr, yi = ctx.fft_rows(R2, I2, radix)
     if inverse:

@@ -25,7 +25,7 @@ object PositVecMemPlan {
   val plan : Seq[Testpoint] = Seq(
     Testpoint("mem_regs", Stage.V1,
       "Wersja 5.0, CONFIG.has_master, rejestry MEM_*",
-      checking = Seq("ID_VERSION == 0x50530505", "CONFIG bit 14 i maska z FMA3 (bit 12)",
+      checking = Seq("ID_VERSION == 0x50530506", "CONFIG bit 14 i maska z FMA3 (bit 12)",
                      "MEM_*: odczyt == zapis, po resecie pusty zakres [0, 0)")),
 
     Testpoint("mem_elementwise", Stage.V1,
@@ -116,7 +116,7 @@ object PositVecMemPlan {
                      "po FFT zwykle add (tryb FFT wylaczony)"),
       checking = Seq("wynik == radix-4 DIT na PositRef (ta sama kolejnosc dzialan) bit w bit, uklad re / im",
                      "FFT_INFO == maxS, wersja 5.5", "zly MEM_LEN, S < 2, S > maxS, MEM_WLEN = 0: err_shape",
-                     "takty na transformate ok. 4N / L + S (N / 4 + 15)")),
+                     "partia B: ok. (B + 2) * max(2N / L, S (N / 4 + 15)) taktow (trzy zestawy bankow naraz)")),
 
     Testpoint("mem_table_absent", Stage.V1,
       "Silnik bez tablicy",
@@ -241,7 +241,7 @@ class PositVecMemTestplan extends TestplanSuite {
 
   testpoint("mem_regs") {
     sim(m32, "mem_regs") { e =>
-      assert(e.rd(ID_VERSION) == 0x50530505L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
+      assert(e.rd(ID_VERSION) == 0x50530506L, f"ID_VERSION 0x${e.rd(ID_VERSION)}%x")
       val cfg = e.rd(CONFIG)
       assert(((cfg >> CONFIG_HAS_MASTER) & 1) == 1 && ((cfg >> (16 + OP_FMA3)) & 1) == 1, f"CONFIG 0x$cfg%x")
       for ((r, v) <- Seq(MEM_LEN -> 123L, MEM_SRC_A -> 0x1230L, MEM_SRC_B -> 0x4560L, MEM_SRC_C -> 0x7890L,
@@ -776,6 +776,40 @@ class PositVecMemTestplan extends TestplanSuite {
           assert(mem(e).readWords(yA + e.bytes.toLong * 2 * nn * b, 1, 32) == guard, s"fft N=$nn: zapis za koncem")
           info(f"FFT posit${c.n} L=$l N=$nn x $b: ${e.rd(MEM_CYCLES)} taktow")
         }
+        // conj: N * ifft = conj(fft(conj x)) (negacja czesci urojonej przy wczytaniu i zapisie)
+        {
+          val sv = 2; val nn = 16
+          val tw = twTable(c, nn)
+          e.put(twA, tw._1 ++ tw._2)
+          e.wr(FFT_CFG, sv); e.wr(FFT_CTRL, 1 << FFT_CTRL_TWIDDLE)
+          e.run(PositAluOp.code(PositOp.Add), 3 * nn / 2, twA)
+          val xs = stress(c, 2 * nn, e.rnd).toSeq.map(_._1)
+          e.put(xA, xs)
+          e.wr(FFT_CFG, sv); e.wr(MEM_WLEN, 1); e.wr(FFT_CTRL, (1 << FFT_CTRL_FFT) | (1 << FFT_CTRL_CONJ))
+          val st = e.run(PositAluOp.code(PositOp.Add), 2 * nn, xA, None, None, Some(yA))
+          e.wr(FFT_CTRL, 0)
+          assert((st & 0x3c) == 0, f"conj: MEM_STATUS 0x$st%x")
+          def neg(v : BigInt) = (-v) & ((BigInt(1) << c.n) - 1)
+          val (wr, wi) = fftRef(c, xs.take(nn).toIndexedSeq, xs.drop(nn).map(neg).toIndexedSeq, nn, tw)
+          assertSeq(s"fft conj L=$l", e.get(yA, 2 * nn), wr ++ wi.map(neg))
+        }
+        // przepustowosc: dluga partia, fazy naraz
+        e.mem.stall = 0.0
+        e.mem.maxDelay = 20
+        val (sv, bb) = (if (maxS >= 3) 3 else 2, 8)
+        val nn = 1 << (2 * sv)
+        e.put(twA, twTable(c, nn)._1 ++ twTable(c, nn)._2)
+        e.wr(FFT_CFG, sv); e.wr(FFT_CTRL, 1 << FFT_CTRL_TWIDDLE)
+        e.run(PositAluOp.code(PositOp.Add), 3 * nn / 2, twA)
+        e.wr(FFT_CTRL, 0)
+        e.put(xA, e.rand(2 * nn * bb))
+        fftRun(sv, bb, e.rand(2 * nn * bb))
+        val cyc = e.rd(MEM_CYCLES)
+        val slotLen = math.max(2 * nn / l, sv * (nn / 4 + 15)) + 8
+        assert(cyc <= (bb + 2) * slotLen + 200, s"FFT N=$nn x $bb: $cyc taktow (szczelina $slotLen)")
+        info(f"FFT posit${c.n} L=$l N=$nn x $bb: $cyc taktow, ${cyc.toDouble / bb}%.0f na transformate (szczelina $slotLen)")
+        e.mem.stall = 0.3
+        e.mem.maxDelay = 30
         // zwykla sciezka po FFT
         val xs = stress(c, 50, e.rnd).toSeq
         e.put(BASE, xs.map(_._1)); e.put(BASE + 0x10000, xs.map(_._2))

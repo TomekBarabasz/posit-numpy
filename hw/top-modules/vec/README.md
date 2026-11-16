@@ -349,6 +349,22 @@ z modelem rdzenia (`PositSw.fft_core`). posit32, transformaty / s (czas partii) 
   `test_fft_throughput` wypisuje teraz rozbicie z `hw.last_timing`.
 - posit16 / posit8 bez rdzenia (bloki DFT przy gemv × 2, posit8 bez gemv: pominięte).
 
+### Wersja 5.6: fazy naraz i FFT w pamięci urządzenia
+
+- **Trzy zestawy banków**: w slocie t wczytanie transformaty t, liczenie t − 1 i zapis t − 2, każde w swoim zestawie;
+  po slocie role się obracają. Partia B trwa ok. (B + 2) · max(2N / L, S (N / 4 + 15)) taktów zamiast
+  B · (4N / L + S (N / 4 + 15)): posit32 ×2, N = 64 — 114 zamiast 221 taktów na transformatę (symulacja, partia 8),
+  N = 1024 — ok. 1 355 zamiast 3 400. Koszt: 3 × banki danych (posit32, N = 4096: ok. 24 BRAM36).
+- **`FFT_CTRL.conj`** (bit 2): część urojona negowana przy wczytaniu i zapisie — rdzeń liczy N · ifft = conj(fft(conj x))
+  bez kopii danych (negacja positu jest dokładna); `ifft` dzieli potem przez N na silniku.
+- **Pamięć urządzenia**: `PositComplex.to_device()` kładzie dane w jednym buforze (…, 2, N) — dokładnie układ rdzenia;
+  `.real` / `.imag` to widoki. `pn.fft.fft` / `ifft` na takiej tablicy czyta ją w miejscu (`hw.fft_device_offset`) i zostawia
+  wynik w nowym buforze urządzenia w tym samym układzie (`X.on_device`), więc łańcuchy fft → mnożenie → ifft nie wracają
+  na procesor; `X.to_host()` kopiuje.
+
+Oczekiwane na płytce (posit32 ×2, 100 MHz, sam silnik): N = 64 ok. 1 000 000, N = 1024 ok. 74 000, N = 4096 ok. 16 000
+transformat / s (NumPy complex64: 346 570 / 13 346 / 2 352); `test_fft_throughput` mierzy też wariant w pamięci urządzenia.
+
 ## FFT z bloków DFT (bez nowego sprzętu)
 
 `pn.fft.fft / ifft / rfft` i `np.fft.fft` na `PositArray` (`sw/positnp/fft.py`) składają FFT z tego, co silnik już ma:

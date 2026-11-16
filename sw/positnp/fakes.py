@@ -133,7 +133,7 @@ class FakeVecMmio(FakeAluMmio):
             self.regs[offset] = value & 0xFFFFFFFF
             return
         if offset in (regs.FFT_CTRL, regs.FFT_CFG) and self.fft_max_s:
-            self.regs[offset] = value & (3 if offset == regs.FFT_CTRL else 7)
+            self.regs[offset] = value & 7
             return
         if offset == regs.TABLE_CTRL and self.table:
             self.regs[offset] = value & 1
@@ -229,7 +229,11 @@ class FakeVecMmio(FakeAluMmio):
             from . import fft as F
             N = 4 ** S
             x = a.astype(np.int64).reshape(-1, 2, N)
-            yr, yi = F._core_rows(self.config, x[:, 0], x[:, 1], N, self.fft_tw, False)
+            cj = bool(fctl & 4)
+            xi = (-x[:, 1]) & self.config.mask if cj else x[:, 1]
+            yr, yi = F._core_rows(self.config, x[:, 0], xi, N, self.fft_tw, False)
+            if cj:
+                yi = (-yi) & self.config.mask
             if write:
                 np.frombuffer(self.mem.memory, dt, length, r[regs.MEM_DST] - self.mem.phys_addr)[:] = \
                     np.stack([yr, yi], axis=1).reshape(-1).astype(dt)
