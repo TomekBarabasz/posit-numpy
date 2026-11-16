@@ -280,6 +280,33 @@ posit8 ×8 bit w bit z `QuireRef`; **64 × 64 posit32 na 4 kolumny: 4 160 taktó
 - Dalej: więcej kolumn (P = 8: ok. +20 000 LUT dla posit32, zmieści się) albo L elementów A na takt
   (wymaga L quire na kolumnę).
 
+## FFT z bloków DFT (bez nowego sprzętu)
+
+`pn.fft.fft / ifft / rfft` i `np.fft.fft` na `PositArray` (`sw/positnp/fft.py`) składają FFT z tego, co silnik już ma:
+
+- **bloki DFT przez matmul**: wiersz [re(R), im(R)] · M (2R × 2R, M = [[C, −S], [S, C]]) = [Re X, Im X] — każde wyjście
+  bloku to dokładna suma quire po twiddlach zaokrąglonych do positów, zaokrąglona raz; wierszami są sygnały / kolumny
+  macierzy czterech kroków, M siedzi w buforach x silnika, więc przejście A daje 4 kolumny (P = 4) przy małej liczbie poleceń;
+- **duże N**: Cooley–Tukey w czterech krokach, N = N1 · N2 (N1 ≤ 64), transpozycje na procesorze; poziomów DFT
+  log₆₄ N (2 dla N ≤ 4096);
+- **twiddle**: mnożenie zespolone jako `fma(xr, wr, −(xi · wi))`, `fma(xr, wi, xi · wr)` — FMA3 silnika, dwa zaokrąglenia
+  na składową;
+- `exact=True`: jedno bezpośrednie DFT (N ≤ 2048, K = 2N ≤ 4096) — każde wyjście poprawnie zaokrąglone z dokładnej sumy;
+- `ifft` = sprzężenie · fft · sprzężenie / N (1 / N: jedno zaokrąglenie więcej), `rfft` = pierwsze N / 2 + 1 wyjść, wsadowo
+  po dowolnej osi, `n` przycina / dopełnia zerami jak NumPy; długości z dużym czynnikiem pierwszym > 2048: błąd.
+
+Dokładność wobec float64 `np.fft.fft` tych samych wejść (największy błąd / największy moduł wyjścia):
+
+| N | posit16 | float16 (radix-2) | posit32 | float32 `np.fft` |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 1,1e-4 | 5,8e-4 | 2,9e-9 | 3,5e-8 |
+| 1024 | 3,6e-4 | 8,3e-4 | 6,1e-9 | 4,2e-8 |
+| 4096 | 3,3e-4 | 6,9e-4 | 5,3e-9 | 3,3e-8 |
+
+posit32 jest 6–7 × dokładniejszy niż float32, posit16 ok. 2 × niż float16 — dzięki dokładnym blokom (jedno zaokrąglenie
+na 64-punktowe DFT zamiast sześciu poziomów motylków). Na płytce działa na bitstreamie 5.2+ (matmul + FMA3):
+`test_board_vec.py -k fft` (bit w bit z PositSw, przepustowość wobec complex64 `np.fft`).
+
 ## FIR / splot: GEMV z oknem (wersja 5.4)
 
 y[i] = Σⱼ x[i + j] · h[j] to gemv, w którym wiersz A jest oknem sygnału: wiersz r = x[r·P .. r·P + K), K = T + P − 1,

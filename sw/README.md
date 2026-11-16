@@ -60,6 +60,10 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
   (A już na urządzeniu: `A.to_device()` — czytana w miejscu). Silnik 5.2 liczy P kolumn B na jedno przejście A
   (`hw.gemv_cols`, domyślnie 4: 4 MAC na takt). K > 4096, brak gemv albo pełna pamięć urządzenia:
   jeden dot quire na element (też dokładnie). `hw.time_matmul(m, k, n)` mierzy MAC/s.
+- Etap 7, FFT: `pn.fft.fft`, `pn.fft.ifft`, `pn.fft.rfft` (i `np.fft.fft / ifft / rfft` na `PositArray`) zwracają
+  `PositComplex` (`.real`, `.imag`, `.to_complex()`; `re, im = pn.fft.fft(x)`); wejście: PositArray, para (re, im),
+  PositComplex albo tablica NumPy (też zespolona). Bloki DFT do 64 punktów dokładnie w quire (matmul), twiddle przez FMA3;
+  `exact=True` — jedno DFT (N ≤ 2048), jedno zaokrąglenie na wyjście. Opis i dokładność: `hw/top-modules/vec/README.md`.
 - Etap 7, splot: `np.convolve`, `np.correlate` (tryby full / same / valid), `pn.convolve`, `pn.correlate`; każde wyjście
   dokładnie w quire, zaokrąglone raz; NaR tylko tam, gdzie jest składnikiem sumy (jak `nan` w NumPy). Silnik 5.4:
   FIR przez gemv z oknem (`hw.correlate`, P wyjść na wiersz); bez okna albo dla odczepów dłuższych niż maxK − P + 1: PositSw.
@@ -91,6 +95,7 @@ positnp/
                    quire, sqrt, fma, float32 <-> posit32                        etap 4-5
   backend_sw.py    PositSw: te same array_op na vecops (bez płytki, wzorzec)   etap 2-3
   funcs.py         funkcje elementarne: tablice posit8 / posit16, posit32 z float64  etap 7
+  fft.py           FFT: bloki DFT przez matmul (quire), twiddle przez FMA3, PositComplex  etap 7
   array.py         PositArray z protokołami NumPy, pn.array, using, stats       etap 3
   board.py         pn.board: aplikacje PL z Pythona (xmutil), silniki jako backendy
   devmem.py        pamięć urządzenia: sterta w buforze u-dma-buf, tablice bez kopii
