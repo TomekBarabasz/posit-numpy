@@ -1123,21 +1123,44 @@ class PositVecHw(PositAluHw):
 
     # ---- 5.5: hardware FFT (PositFftCore) --------------------------------------------------------------
 
-    def fft_core(self, re, im) -> Tuple[np.ndarray, np.ndarray]:
+    def fft_device_offset(self, re, im) -> Optional[int]:
+        """Buffer offset of a (B, 2, N) device buffer whose halves are `re` and `im` ((B, N) views), else None."""
+        if self.heap is None:
+            return None
+        re, im = np.asarray(re), np.asarray(im)
+        if re.ndim != 2 or re.shape != im.shape or re.dtype != self.out_dtype or im.dtype != self.out_dtype:
+            return None
+        B, N = re.shape
+        by = self.out_bytes
+        if re.strides[1] != by or im.strides[1] != by or (B > 1 and (re.strides[0] != 2 * N * by or im.strides[0] != 2 * N * by)):
+            return None
+        a_re = re.__array_interface__["data"][0] - self.heap.base_addr
+        a_im = im.__array_interface__["data"][0] - self.heap.base_addr
+        end = a_re + B * 2 * N * by
+        if a_im != a_re + N * by or a_re % 16 or a_re < self.heap.start or end > self.heap.start + self.heap.size:
+            return None
+        return a_re
+
+    def fft_core(self, re, im, inverse: bool = False) -> Tuple[np.ndarray, np.ndarray]:
         """FFT of every row of (B, N) raw bits on the engine's radix-4 core (N = 4^S, 2 <= S <= fft_max_s):
-        (re, im) bits, the same as positnp.fft.fft_core_model. Without the core: the model in software."""
+        (re, im) bits, the same as positnp.fft.fft_core_model; inverse: conjugated twiddles, then / N.
+
+        Device input - the halves of one (B, 2, N) device buffer (PositComplex.to_device, or the result of an
+        earlier transform) - is read in place and the result stays in a new (B, 2, N) device buffer (re, im
+        are views of it): no copies. Host input is copied in and out. Without the core: the model in software."""
         from . import fft as F
         re, im = np.asarray(re), np.asarray(im)
         B, N = re.shape
         S = (N.bit_length() - 1) // 2
         if not self.fft_max_s or 4 ** S != N or not 2 <= S <= self.fft_max_s or self.heap is None:
             self._fallback += re.size
-            return self._sw.fft_core(re, im)
+            return self._sw.fft_core(re, im, inverse)
         t_start = time.perf_counter()
         timing = dict.fromkeys(("pack", "sync_device", "dma", "sync_cpu", "copy_out"), 0.0)
         by = self.out_bytes
+        per = 2 * N
         self.write(regs.FFT_CFG, S)
-        if self._fft_tw != N:                                      # twiddle table W_N^e, e < 3N/4
+        if self._fft_tw != N:                                      # twiddle table W_N^e, once per N
             tr, ti = F.fft_twiddle_table(self.config, N)
             tb = self.heap.empty(tr.size * 2, self.out_dtype)
             if tb is None:
@@ -1153,53 +1176,83 @@ class PositVecHw(PositAluHw):
                 self.write(regs.FFT_CTRL, 0)
             del tb
             self._fft_tw = N
-        per = 2 * N
-        rows = min(B, max(1, 0xFFFF0000 // per))
-        while True:
-            xb = self.heap.empty(rows * per, self.out_dtype)
-            yb = self.heap.empty(rows * per, self.out_dtype)
-            if xb is not None and yb is not None:
-                break
-            del xb, yb
-            if rows == 1:
-                raise PositAluError(f"device memory full for an FFT of {N} points ({self.heap})")
-            rows = -(-rows // 2)
-        off_x, off_y = self.heap.offset_of(xb), self.heap.offset_of(yb)
-        out_r = np.empty((B, N), self.out_dtype)
-        out_i = np.empty((B, N), self.out_dtype)
+        dev_in = self.fft_device_offset(re, im)
         cycles = 0
         self.write(regs.OP, regs.OP_ADD)
         try:
-            for b0 in range(0, B, rows):
-                nb = min(rows, B - b0)
+            if dev_in is not None:                                 # in place: one command, result on the device
+                yb = self.heap.empty(B * per, self.out_dtype)
+                if yb is None:
+                    raise PositAluError(f"device memory full for an FFT of {B} x {N} points ({self.heap})")
+                off_y = self.heap.offset_of(yb)
                 t = time.perf_counter()
-                x2 = xb[:nb * per].reshape(nb, 2, N)
-                x2[:, 0] = re[b0:b0 + nb]
-                x2[:, 1] = im[b0:b0 + nb]
-                timing["pack"] += time.perf_counter() - t
-                t = time.perf_counter()
-                self.buf.sync_for_device(off_x, nb * per * by, 1)
-                self.buf.sync_for_device(off_y, nb * per * by, 0)
+                self.buf.sync_for_device(dev_in, B * per * by, 1)
+                self.buf.sync_for_device(off_y, B * per * by, 0)
                 timing["sync_device"] += time.perf_counter() - t
                 t = time.perf_counter()
-                self.write(regs.MEM_WLEN, nb)
-                self.write(regs.FFT_CTRL, 1 << regs.FFT_CTRL_FFT)
-                cycles += self._mem_cmd(nb * per, [off_x, 0, 0], off_y, False, False)
-                self.write(regs.FFT_CTRL, 0)
+                for b0 in range(0, B, max(1, 0xFFFF0000 // per)):
+                    nb = min(B - b0, max(1, 0xFFFF0000 // per))
+                    self.write(regs.MEM_WLEN, nb)
+                    self.write(regs.FFT_CTRL, 1 << regs.FFT_CTRL_FFT | inverse << regs.FFT_CTRL_CONJ)
+                    cycles += self._mem_cmd(nb * per, [dev_in + b0 * per * by, 0, 0], off_y + b0 * per * by, False, False)
+                    self.write(regs.FFT_CTRL, 0)
                 timing["dma"] += time.perf_counter() - t
                 t = time.perf_counter()
-                self.buf.sync_for_cpu(off_y, nb * per * by, 2)
+                self.buf.sync_for_cpu(off_y, B * per * by, 2)
                 timing["sync_cpu"] += time.perf_counter() - t
-                t = time.perf_counter()
-                y2 = yb[:nb * per].reshape(nb, 2, N)
-                out_r[b0:b0 + nb] = y2[:, 0]
-                out_i[b0:b0 + nb] = y2[:, 1]
-                timing["copy_out"] += time.perf_counter() - t
+                if inverse:                                        # 1 / N on the engine, the whole buffer at once
+                    nbits = int(F.vecops.from_float(self.config, float(N)).bits)
+                    yb = self.array_op("div", yb, scalar=nbits)
+                y3 = yb.reshape(B, 2, N)
+                out_r, out_i = y3[:, 0], y3[:, 1]
+            else:
+                rows = min(B, max(1, 0xFFFF0000 // per))
+                while True:
+                    xb = self.heap.empty(rows * per, self.out_dtype)
+                    yb = self.heap.empty(rows * per, self.out_dtype)
+                    if xb is not None and yb is not None:
+                        break
+                    del xb, yb
+                    if rows == 1:
+                        raise PositAluError(f"device memory full for an FFT of {N} points ({self.heap})")
+                    rows = -(-rows // 2)
+                off_x, off_y = self.heap.offset_of(xb), self.heap.offset_of(yb)
+                out_r = np.empty((B, N), self.out_dtype)
+                out_i = np.empty((B, N), self.out_dtype)
+                for b0 in range(0, B, rows):
+                    nb = min(rows, B - b0)
+                    t = time.perf_counter()
+                    x2 = xb[:nb * per].reshape(nb, 2, N)
+                    x2[:, 0] = re[b0:b0 + nb]
+                    x2[:, 1] = im[b0:b0 + nb]
+                    timing["pack"] += time.perf_counter() - t
+                    t = time.perf_counter()
+                    self.buf.sync_for_device(off_x, nb * per * by, 1)
+                    self.buf.sync_for_device(off_y, nb * per * by, 0)
+                    timing["sync_device"] += time.perf_counter() - t
+                    t = time.perf_counter()
+                    self.write(regs.MEM_WLEN, nb)
+                    self.write(regs.FFT_CTRL, 1 << regs.FFT_CTRL_FFT | inverse << regs.FFT_CTRL_CONJ)
+                    cycles += self._mem_cmd(nb * per, [off_x, 0, 0], off_y, False, False)
+                    self.write(regs.FFT_CTRL, 0)
+                    timing["dma"] += time.perf_counter() - t
+                    t = time.perf_counter()
+                    self.buf.sync_for_cpu(off_y, nb * per * by, 2)
+                    timing["sync_cpu"] += time.perf_counter() - t
+                    t = time.perf_counter()
+                    y2 = yb[:nb * per].reshape(nb, 2, N)
+                    if inverse:
+                        nbits = int(F.vecops.from_float(self.config, float(N)).bits)
+                        y2 = self.array_op("div", yb[:nb * per], scalar=nbits).reshape(nb, 2, N)
+                    out_r[b0:b0 + nb] = y2[:, 0]
+                    out_i[b0:b0 + nb] = y2[:, 1]
+                    timing["copy_out"] += time.perf_counter() - t
+                del xb, yb
         finally:
             self.write(regs.FFT_CTRL, 0)
-        del xb, yb
         timing["total"] = time.perf_counter() - t_start
         timing["engine_cycles"] = cycles
+        timing["device"] = dev_in is not None
         self.last_timing = timing
         return out_r, out_i
 

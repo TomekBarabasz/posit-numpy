@@ -122,12 +122,21 @@ class PositSw:
             self._count(res)
         return out
 
-    def fft_core(self, re, im):
-        """The hardware FFT core's transform (positnp.fft.fft_core_model) of every row of (B, N) bits."""
+    def fft_core(self, re, im, inverse: bool = False):
+        """The hardware FFT core's transform (positnp.fft.fft_core_model) of every row of (B, N) bits;
+        inverse: conj(fft(conj x)) / N - as the engine does it (FFT_CTRL.conj, then a division)."""
         from . import fft as F
         re, im = np.asarray(re).astype(np.int64), np.asarray(im).astype(np.int64)
         N = re.shape[1]
+        m = self.config.mask
+        if inverse:
+            im = (-im) & m
         yr, yi = F._core_rows(self.config, re, im, N, F.fft_twiddle_table(self.config, N), False)
+        if inverse:
+            yi = (-yi) & m
+            nb = int(vecops.from_float(self.config, float(N)).bits)
+            yr = vecops.op(self.config, "div", yr, nb).bits
+            yi = vecops.op(self.config, "div", yi, nb).bits
         self._stats["elements"] += int(re.size)
         return yr.astype(self.dtype), yi.astype(self.dtype)
 

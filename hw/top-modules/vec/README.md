@@ -349,6 +349,34 @@ z modelem rdzenia (`PositSw.fft_core`). posit32, transformaty / s (czas partii) 
   `test_fft_throughput` wypisuje teraz rozbicie z `hw.last_timing`.
 - posit16 / posit8 bez rdzenia (bloki DFT przy gemv × 2, posit8 bez gemv: pominięte).
 
+### Wersja 5.6: fazy naraz i FFT w pamięci urządzenia
+
+- **Trzy zestawy banków**: w slocie t wczytanie transformaty t, liczenie t − 1 i zapis t − 2, każde w swoim zestawie;
+  po slocie role się obracają. Partia B trwa ok. (B + 2) · max(2N / L, S (N / 4 + 15)) taktów zamiast
+  B · (4N / L + S (N / 4 + 15)): posit32 ×2, N = 64 — 114 zamiast 221 taktów na transformatę (symulacja, partia 8),
+  N = 1024 — ok. 1 355 zamiast 3 400. Koszt: 3 × banki danych (posit32, N = 4096: ok. 24 BRAM36).
+- **`FFT_CTRL.conj`** (bit 2): część urojona negowana przy wczytaniu i zapisie — rdzeń liczy N · ifft = conj(fft(conj x))
+  bez kopii danych (negacja positu jest dokładna); `ifft` dzieli potem przez N na silniku.
+- **Pamięć urządzenia**: `PositComplex.to_device()` kładzie dane w jednym buforze (…, 2, N) — dokładnie układ rdzenia;
+  `.real` / `.imag` to widoki. `pn.fft.fft` / `ifft` na takiej tablicy czyta ją w miejscu (`hw.fft_device_offset`) i zostawia
+  wynik w nowym buforze urządzenia w tym samym układzie (`X.on_device`), więc łańcuchy fft → mnożenie → ifft nie wracają
+  na procesor; `X.to_host()` kopiuje.
+
+**Na płytce (2026-11-17, 5.6, posit32 ×2)**: bit w bit z modelem; transformaty / s:
+
+| N × partia | z kopiami | **pamięć urządzenia** | NumPy complex64 | silnik: takty na transformatę (rachunek) |
+| --- | ---: | ---: | ---: | ---: |
+| 64 × 1024 | 275 476 | **640 025** (1,75 ×) | 366 075 | 94 (93) |
+| 1024 × 64 | 26 162 | **41 955** (3,3 ×) | 12 877 | 1 389 (1 355) |
+| 4096 × 16 | 6 194 | **9 356** (4,0 ×) | 2 349 | 6 752 (7 013 z napełnieniem) |
+
+- Silnik robi dokładnie tyle, ile rachunek slotów: 2,4 × mniej taktów niż 5.5 (np. N = 64: 94 zamiast 221).
+- W pamięci urządzenia rdzeń jest szybszy niż `np.fft` we wszystkich rozmiarach — 1,75 × (N = 64) do 4 × (N = 4096);
+  z kopiami dopiero od N = 1024 (2 ×), bo kopie do i z bufora (ok. 1,7 ms dla 64 × 1024) to więcej niż sam silnik (0,96 ms).
+- Wobec 5.5: N = 64 z kopiami 152 550 → 275 476, w pamięci urządzenia 640 025 (4,2 ×); N = 4096: 2 874 → 9 356 (3,3 ×).
+- W wariancie bez kopii zostaje ok. 0,6 ms ponad silnik na wywołanie (synchronizacja cache ok. 0,2 ms i Python) —
+  przy większych partiach waży mniej.
+
 ## FFT z bloków DFT (bez nowego sprzętu)
 
 `pn.fft.fft / ifft / rfft` i `np.fft.fft` na `PositArray` (`sw/positnp/fft.py`) składają FFT z tego, co silnik już ma:

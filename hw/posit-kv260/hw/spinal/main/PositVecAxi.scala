@@ -119,13 +119,15 @@ object PositVecRegs {
 
   // 5.5: sprzetowe FFT radix-4 (PositFftCore, fftMaxS > 0)
   val FFT_CTRL  = 0xE4   // RW  bit 0 fft: polecenie MEM = partia FFT (MEM_LEN = 2N * MEM_WLEN, zapis tyle samo),
-                         //     bit 1 twiddle: polecenie MEM laduje tablice W_N^e (MEM_LEN = 3N / 2, bez zapisu)
+                         //     bit 1 twiddle: polecenie MEM laduje tablice W_N^e (MEM_LEN = 3N / 2, bez zapisu),
+                         //     bit 2 conj (5.6): czesc urojona negowana przy wczytaniu i zapisie - N * ifft = conj(fft(conj x))
   val FFT_CFG   = 0xE8   // RW  [2:0] S: N = 4^S (2 .. FFT_INFO.maxS)
   val FFT_INFO  = 0xEC   // RO  [3:0] maxS (0: brak rdzenia FFT)
   val FFT_CTRL_FFT = 0
   val FFT_CTRL_TWIDDLE = 1
+  val FFT_CTRL_CONJ = 2
 
-  val VERSION = 0x0505           // 5.5: FFT
+  val VERSION = 0x0506           // 5.6: FFT z trzema zestawami bankow (wczytanie / liczenie / zapis naraz)
 
   def idVersion : Long = (ID.toLong << 16) | VERSION
   def config(cfg : PositAluConfig, master : Boolean = false, gemv : Boolean = false, table : Boolean = false) : Long =
@@ -160,7 +162,7 @@ object PositVecRegs {
     "TABLE_CTRL" -> TABLE_CTRL, "TABLE_CFG" -> TABLE_CFG, "OP_TABLE" -> OP_TABLE, "TABLE_CTRL_LOAD" -> TABLE_CTRL_LOAD,
     "GEMV_MODE" -> GEMV_MODE, "GEMV_MODE_WINDOW" -> GEMV_MODE_WINDOW,
     "FFT_CTRL" -> FFT_CTRL, "FFT_CFG" -> FFT_CFG, "FFT_INFO" -> FFT_INFO, "FFT_CTRL_FFT" -> FFT_CTRL_FFT,
-    "FFT_CTRL_TWIDDLE" -> FFT_CTRL_TWIDDLE)
+    "FFT_CTRL_TWIDDLE" -> FFT_CTRL_TWIDDLE, "FFT_CTRL_CONJ" -> FFT_CTRL_CONJ)
 }
 
 /** withMaster = false: dane przez AXI4-Stream (s_axis {b, a}, m_axis wynik) z AXI DMA (etapy 2-5);
@@ -279,7 +281,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
   // ---- dane: grupy po L elementow {a, b(, c), last}; OP sum/dot/sumsq -> quire, reszta -> ALU ------
   // 5.5: tryb FFT wylacza zwykle sciezki (OP bez znaczenia)
   // rejestry tylko w silniku z blokiem (bez niego stale - inaczej rejestr bez przypisania)
-  val fftCtrl = if (withFft) Reg(Bits(2 bits)) init 0 else B(0, 2 bits)
+  val fftCtrl = if (withFft) Reg(Bits(3 bits)) init 0 else B(0, 3 bits)
   val fftS    = if (withFft) Reg(UInt(3 bits)) init 2 else U(2, 3 bits)
   if (withFft) {
     bus.readAndWrite(fftCtrl, FFT_CTRL)
@@ -717,6 +719,7 @@ class PositVecAxi(val cfg : PositAluConfig, val withMaster : Boolean = false,
       core.io.batches  := wlenReg
       core.io.startFft := launch && isFft
       core.io.startTw  := launch && isTw
+      core.io.conj     := fftCtrl(FFT_CTRL_CONJ)
       core.io.din.valid   := inValid && isFft
       core.io.din.payload := inA
       when(isFft) { inReady := core.io.din.ready }

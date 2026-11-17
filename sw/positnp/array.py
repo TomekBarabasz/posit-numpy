@@ -352,12 +352,13 @@ class PositArray:
         self.bits = (np.asarray(bits).astype(np.int64) & config.mask).astype(bits_dtype(config))
 
     @classmethod
-    def _wrap(cls, bits, config: PositConfig) -> "PositArray":
+    def _wrap(cls, bits, config: PositConfig, view: bool = False) -> "PositArray":
         """Result of a backend: no copy when the bits already have the storage dtype (device memory stays
-        device memory); otherwise as the constructor."""
+        device memory); otherwise as the constructor. view=True keeps a strided view too (the parts of a
+        device PositComplex)."""
         bits = np.asarray(bits)
         dt = bits_dtype(config)
-        if bits.dtype == dt and config.n == 8 * dt().itemsize and bits.flags.c_contiguous:
+        if bits.dtype == dt and config.n == 8 * dt().itemsize and (bits.flags.c_contiguous or view):
             obj = cls.__new__(cls)
             obj.config = config
             obj.bits = bits

@@ -123,8 +123,9 @@ FFT_CFG = 0xE8        # RW  [2:0] S: N = 4^S (2 .. FFT_INFO.maxS)
 FFT_INFO = 0xEC       # RO  [3:0] maxS (0: no FFT core)
 FFT_CTRL_FFT = 0
 FFT_CTRL_TWIDDLE = 1
+FFT_CTRL_CONJ = 2     # 5.6: imaginary part negated on load and on store: N * ifft = conj(fft(conj x))
 
-VERSION_VEC = 0x0505
+VERSION_VEC = 0x0506
 VERSION_STREAM_MIN = 0x0200   # oldest PositVecAxi with the stream path that PositVecHw drives
 REDUCE = {"sum": OP_SUM, "dot": OP_DOT, "sumsq": OP_SUMSQ}
 STAGE5 = {"sqrt": OP_SQRT, "fma": OP_FMA, "axpy": OP_AXPY, "f2p": OP_F2P, "p2f": OP_P2F}
