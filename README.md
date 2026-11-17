@@ -25,6 +25,8 @@ y = x * x - x / 3 + 1                     # every operation rounded once
 np.sum(y), np.dot(x, y)                   # exact in the quire, rounded once
 A = pn.array(np.random.rand(64, 64))
 A @ A, np.fft.fft(x), np.convolve(x, y)   # matmul, FFT, FIR: every dot product exact
+np.var(x), x ** 3, np.cumsum(x)           # exact, rounded once
+np.linalg.solve(A, pn.array(np.ones(64)))  # LU from the quire, refined with a quire residual
 ```
 
 **Start with the examples:** [`sw/examples/README.md`](sw/examples/README.md) - a guided tour from `+ - * /` to

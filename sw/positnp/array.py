@@ -112,9 +112,7 @@ def array(x, config: Optional[PositConfig] = None) -> "PositArray":
 
     A float32 array going to posit32 is converted by the backend (F2P in the PL on the KV260)."""
     if isinstance(x, PositArray):
-        if config is None or config == x.config:
-            return x.copy()
-        return array(x.to_float(), config)
+        return x.astype(config or x.config)
     c = config or P32
     if isinstance(x, np.ndarray) and x.dtype == np.float32 and c.n == 32 and c.es == 2 and x.size:
         be = get_backend(c)
@@ -134,11 +132,8 @@ def fma(a, b, c) -> "PositArray":
     On the KV260: c a scalar -> OP_FMA (c in OPERAND_C); b a scalar and c an array -> OP_AXPY;
     three arrays -> OP_FMA3 on stage 6 engines (own AXI4 master, a third read stream), on older
     engines PositSw (counted in stats()["fallback"])."""
-    first = next((x for x in (a, b, c) if isinstance(x, PositArray)), None)
-    cfg = first.config if first is not None else P32
-    A, B, C = (x if isinstance(x, PositArray) else array(x, cfg) for x in (a, b, c))
-    if len({A.config, B.config, C.config}) != 1:
-        raise TypeError("fma: posit formats differ")
+    A, B, C = _unify(a, b, c)
+    cfg = A.config
     shape = np.broadcast_shapes(A.shape, B.shape, C.shape)
     be = get_backend(cfg)
     scalar = lambda x: x.size == 1 and x.ndim <= 1                                  # noqa: E731
@@ -162,10 +157,7 @@ def matmul(a, b) -> "PositArray":
 
     On a KV260 engine with gemv (PositVecAxi 5.1): OP_XLOAD / OP_GEMV, 1 multiply-add per clock;
     elsewhere PositSw or one quire dot per element (both exact, slower)."""
-    first = a if isinstance(a, PositArray) else b
-    if not isinstance(first, PositArray):
-        first = array(a)
-    A, B = first._coerce(a), first._coerce(b)
+    A, B = _unify(a, b)
     if A.ndim == 0 or B.ndim == 0:
         raise ValueError("matmul: scalar operands are not allowed, use *")
     if A.ndim == 1 and B.ndim == 1:
@@ -225,10 +217,7 @@ def _conv_slice(A: "PositArray", V: "PositArray", lo: int, n_out: int) -> "Posit
 
 
 def _conv_args(a, v):
-    first = a if isinstance(a, PositArray) else v
-    if not isinstance(first, PositArray):
-        first = array(a)
-    A, V = first._coerce(a), first._coerce(v)
+    A, V = _unify(a, v)
     if A.ndim != 1 or V.ndim != 1:
         raise ValueError("convolve / correlate: 1-D arrays only")
     if A.size == 0 or V.size == 0:
@@ -293,11 +282,203 @@ def zeros(shape, config: PositConfig = P32) -> "PositArray":
     return PositArray(np.zeros(shape, np.int64), config)
 
 
+# ---- formats: one format per operation ----------------------------------------------------------
+#
+# Formats with the same es nest: posit<8,es> is a subset of posit<16,es> and of posit<32,es> (the bits padded
+# with zeros), so an operation on mixed formats widens the narrower operands to the widest one without any
+# rounding, like float32 + float64 in NumPy. Different es: no exact common format, TypeError.
+
+def _promoted(configs) -> PositConfig:
+    cs = set(configs)
+    if len(cs) == 1:
+        return cs.pop()
+    if len({c.es for c in cs}) != 1:
+        raise TypeError(f"mixed posit formats {', '.join(sorted(map(str, cs)))}: different es, "
+                        "convert with x.astype(config) first")
+    return max(cs, key=lambda c: c.n)
+
+
+def _unify(*xs, default: Optional[PositConfig] = None):
+    """The operands as PositArrays of one format; numbers and ndarrays are rounded to it."""
+    configs = [x.config for x in xs if isinstance(x, PositArray)]
+    c = _promoted(configs) if configs else (default or P32)
+    out = []
+    for x in xs:
+        if isinstance(x, PositArray):
+            out.append(x if x.config == c else x.astype(c))
+        elif isinstance(x, np.ndarray) and x.dtype == bool:
+            raise TypeError("boolean arrays are not posits")
+        else:
+            out.append(array(x, c))
+    return out
+
+
+# ---- exact values rounded once, in the PS -------------------------------------------------------
+
+def _round_exact(c: PositConfig, ms, es, sticky=None, nar=None) -> np.ndarray:
+    """Many exact values m * 2**e (Python ints; sticky: something nonzero below m's last bit) rounded once.
+
+    Each value is cut to 53 bits with round-to-odd (every dropped bit, and the sticky bit, OR-ed into the
+    last kept bit). A later round-to-nearest-even to at most 51 bits cannot tell that float64 from the
+    exact value, so vecops.from_float rounds it exactly as one rounding of the exact value would."""
+    f = np.zeros(len(ms))
+    for i, (m, e) in enumerate(zip(ms, es)):
+        if m == 0:
+            continue
+        a = abs(m)
+        sh = a.bit_length() - 53                         # exactly 53 bits: drop the excess or pad with zeros
+        t = a >> sh if sh > 0 else a << -sh
+        e += sh
+        if (sh > 0 and (t << sh) != a) or (sticky is not None and sticky[i]):
+            t |= 1                                       # round to odd at 53 bits
+        top = t.bit_length() + e                        # posits saturate long before float64 does
+        e = min(max(e, -1000 - t.bit_length()), 1000 - t.bit_length()) if abs(top) > 1000 else e
+        f[i] = math.ldexp(-t if m < 0 else t, e)
+    bits = vecops.from_float(c, f).bits.astype(np.int64)
+    if nar is not None:
+        bits = np.where(np.asarray(nar, bool), c.nar, bits)
+    return bits
+
+
+def _one_bits(c: PositConfig) -> int:
+    return ref.round_(c, (1, 0))[0]
+
+
+def _pown(x: "PositArray", n: int) -> "PositArray":
+    """x ** n for an integer n, correctly rounded (exact power in Python integers, one rounding).
+    NaR ** n, 0 ** 0 (posit standard: pow(0, 0) is NaR) and 0 ** (n < 0) are NaR."""
+    c = x.config
+    if abs(n) > 1 << 16:
+        raise ValueError(f"x ** {n}: exponent too large (|n| <= 65536)")
+    u, inv = np.unique(x.bits.ravel(), return_inverse=True)
+    ms, es, st, bad = [], [], [], []
+    for b in u.tolist():
+        d = ref.decode(c, b)
+        if d is None or (d[0] == 0 and n <= 0):
+            ms.append(0), es.append(0), st.append(False), bad.append(True)
+            continue
+        m, e = d
+        if m == 0:
+            ms.append(0), es.append(0), st.append(False), bad.append(False)
+            continue
+        tz = (m & -m).bit_length() - 1                   # odd mantissa: smaller powers
+        m, e = m >> tz, e + tz
+        s = abs(m).bit_length() - 1 + e                  # 2**s <= |x| < 2**(s+1)
+        k = abs(n)
+        sign = -1 if (m < 0 and k % 2) else 1
+        lo, hi = (s * n, (s + 1) * n) if n > 0 else ((s + 1) * n, s * n)   # 2**lo <= |x**n| <= 2**hi
+        if n == 0:
+            ms.append(1), es.append(0), st.append(False), bad.append(False)
+        elif lo > c.max_scale + 2:                         # above maxpos: saturates, no need for the digits
+            ms.append(sign), es.append(c.max_scale + 4), st.append(False), bad.append(False)
+        elif hi < -c.max_scale - 2:                        # below minpos: minpos
+            ms.append(sign), es.append(-c.max_scale - 4), st.append(False), bad.append(False)
+        elif n > 0:
+            ms.append(m ** k), es.append(e * k), st.append(False), bad.append(False)
+        else:
+            q, inexact = ref._div((1, 0), (m ** k, e * k))
+            ms.append(q[0]), es.append(q[1]), st.append(inexact), bad.append(False)
+    bits = _round_exact(c, ms, es, st, bad)
+    return PositArray(bits[inv].reshape(x.shape), c)
+
+
+def _cumsum_bits(c: PositConfig, v: np.ndarray) -> np.ndarray:
+    """Exact running sum in quire units (Python ints), every prefix rounded once; NaR from the first NaR on."""
+    ms, bad = [], []
+    q, nar = 0, False
+    for b in v.tolist():
+        t = ref.quire_term(c, int(b))
+        if t is None:
+            nar = True
+        elif not nar:
+            q += t
+        ms.append(0 if nar else q)
+        bad.append(nar)
+    return _round_exact(c, ms, [-c.quire_frac] * len(ms), None, bad)
+
+
+def _prod_bits(c: PositConfig, v: np.ndarray) -> int:
+    """Exact product (Python ints, pairwise), rounded once; saturates to maxpos / minpos like any posit result."""
+    ds = [ref.decode(c, int(b)) for b in v.tolist()]
+    if any(d is None for d in ds):
+        return c.nar
+    if any(d[0] == 0 for d in ds):
+        return 0
+    ms, E, lo, neg = [], 0, 0, False
+    for m, e in ds:
+        tz = (m & -m).bit_length() - 1
+        m, e = m >> tz, e + tz
+        neg ^= m < 0
+        ms.append(abs(m))
+        E += e
+        lo += abs(m).bit_length() - 1 + e                 # 2**lo <= |product| < 2**(lo + len)
+    sign = -1 if neg else 1
+    if lo > c.max_scale + 1 or lo + len(ds) < -c.max_scale - 1:
+        return ref.round_(c, (sign, lo))[0]               # beyond maxpos / below minpos: saturates
+    while len(ms) > 1:
+        ms = [ms[i] * ms[i + 1] if i + 1 < len(ms) else ms[i] for i in range(0, len(ms), 2)]
+    return ref.round_(c, (sign * (ms[0] if ms else 1), E))[0]
+
+
+def _var_bits(c: PositConfig, x: "PositArray", ddof: int, root: bool) -> int:
+    """Variance (root: standard deviation) from two exact quire sums, rounded once.
+
+    S1 = sum x, S2 = sum x**2 (both exact): var = (N S2 - S1**2) / (N (N - ddof)), an exact rational -
+    no cancellation, unlike the two-pass float formula; std = sqrt(var) through an integer square root with
+    a sticky bit."""
+    N = x.size
+    if N - ddof <= 0:
+        return c.nar
+    _, _, q1, nar1 = _quire(x, "sum")
+    _, _, q2, nar2 = _quire(x, "sumsq")
+    if nar1 or nar2:
+        return c.nar
+    F = c.quire_frac
+    num = ((N * q2) << F) - q1 * q1                       # (N S2 - S1**2) * 2**(2F) >= 0
+    den = N * (N - ddof)
+    if num == 0:
+        return 0
+    if not root:
+        q, inexact = ref._div((num, -2 * F), (den, 0))
+        return ref.round_(c, q, inexact)[0]
+    extra = 64 + c.n + den.bit_length()
+    t, r = divmod(num << (2 * extra), den)
+    s = math.isqrt(t)
+    return ref.round_(c, (s, -F - extra), r != 0 or s * s != t)[0]
+
+
+def _no_out(name, out=None, dtype=None, keepdims=False, **kw):
+    if out is not None or dtype is not None or keepdims or kw.get("where", True) is not True:
+        raise TypeError(f"np.{name} on posit arrays: out=, dtype=, keepdims= and where= are not supported")
+
+
+# ---- files ---------------------------------------------------------------------------------------
+
+def save(file, x) -> None:
+    """Save a PositArray (or PositComplex) with its format to a .npz file: the bits plus n and es.
+    np.save cannot keep the format (a .npy holds plain integers), so it refuses posit arrays."""
+    from .fft import PositComplex
+    if isinstance(x, PositComplex):
+        np.savez(file, real=x.real.bits, imag=x.imag.bits, n=x.config.n, es=x.config.es)
+    elif isinstance(x, PositArray):
+        np.savez(file, bits=x.bits, n=x.config.n, es=x.config.es)
+    else:
+        raise TypeError(f"pn.save: PositArray or PositComplex, got {type(x).__name__}")
+
+
+def load(file):
+    """Load what pn.save wrote: a PositArray or a PositComplex in its own format."""
+    from .fft import PositComplex
+    with np.load(file, allow_pickle=False) as z:
+        c = PositConfig(int(z["n"]), int(z["es"]))
+        if "bits" in z.files:
+            return PositArray(z["bits"], c)
+        return PositComplex(PositArray(z["real"], c), PositArray(z["imag"], c))
+
+
 # ---- the class ----------------------------------------------------------------------------------
 
-_LATER = {
-    "prod": "no exact posit product reduction planned", "cumsum": "not planned (one quire per prefix)",
-}
+_LATER: Dict[str, str] = {}
 
 
 # ---- quire reductions (stage 4) -----------------------------------------------------------------
@@ -399,13 +580,24 @@ class PositArray:
             return bits.view(np.float32).reshape(self.shape)
         return self.to_float().astype(np.float32)
 
-    def astype(self, dtype) -> np.ndarray:
+    def astype(self, dtype):
+        """x.astype(pn.P16): another posit format (always a copy); x.astype(np.float32 / np.float64): floats.
+
+        Widening with the same es (P8 -> P16 -> P32) is exact: the bits padded with zeros. Any other change
+        of format is one correct rounding (every posit up to 32 bits is exact in float64)."""
+        if isinstance(dtype, PositConfig):
+            s = self.config
+            if dtype == s:
+                return self.copy()
+            if dtype.es == s.es and dtype.n >= s.n:
+                return PositArray(self.bits.astype(np.int64) << (dtype.n - s.n), dtype)
+            return PositArray(vecops.from_float(dtype, self.to_float()).bits, dtype)
         dt = np.dtype(dtype)
         if dt == np.float32:
             return self.to_float32()
         if dt == np.float64:
             return self.to_float()
-        raise TypeError(f"PositArray.astype({dt}): float32 or float64 (bits: .bits)")
+        raise TypeError(f"PositArray.astype({dt}): a posit format (pn.P16, ...), float32 or float64 (bits: .bits)")
 
     def _func(self, name: str) -> "PositArray":
         be = get_backend(self.config)
@@ -448,7 +640,8 @@ class PositArray:
         return PositArray(self.bits[idx], self.config)
 
     def __setitem__(self, idx, value) -> None:
-        self.bits[idx] = self._coerce(value).bits
+        v = value.astype(self.config) if isinstance(value, PositArray) else self._coerce(value)   # rounds like NumPy
+        self.bits[idx] = v.bits
 
     def copy(self) -> "PositArray":
         return PositArray(self.bits.copy(), self.config)
@@ -478,27 +671,48 @@ class PositArray:
     # ---- operands ---------------------------------------------------------------------------
 
     def _coerce(self, other) -> "PositArray":
+        """other in this array's format: numbers are rounded, narrower posits (same es) widened exactly."""
         if isinstance(other, PositArray):
             if other.config != self.config:
-                raise TypeError(f"{self.config} and {other.config}: convert with pn.array(x, config) first")
+                if _promoted([self.config, other.config]) != self.config:
+                    raise TypeError(f"{other.config} into {self.config} would round: use x.astype({self.config})")
+                return other.astype(self.config)
             return other
-        if isinstance(other, np.ndarray) and other.dtype == bool:
-            raise TypeError("boolean arrays are not posits")
-        return array(other, self.config)
+        return _unify(other, default=self.config)[0]
 
     def _binary(self, name: str, other) -> "PositArray":
-        o = self._coerce(other)
-        be = get_backend(self.config)
-        if o.size == 1 and o.shape in ((), (1,)) and self.size >= 1:
-            r = be.array_op(name, self.bits.ravel(), scalar=int(o.bits.ravel()[0]))
-            shape = np.broadcast_shapes(self.shape, o.shape)
-            return PositArray._wrap(r.reshape(shape), self.config)
-        a, b = np.broadcast_arrays(self.bits, o.bits)
+        s, o = _unify(self, other)
+        be = get_backend(s.config)
+        if o.size == 1 and o.shape in ((), (1,)) and s.size >= 1:
+            r = be.array_op(name, s.bits.ravel(), scalar=int(o.bits.ravel()[0]))
+            shape = np.broadcast_shapes(s.shape, o.shape)
+            return PositArray._wrap(r.reshape(shape), s.config)
+        a, b = np.broadcast_arrays(s.bits, o.bits)
         r = be.array_op(name, np.ascontiguousarray(a).ravel(), np.ascontiguousarray(b).ravel())
-        return PositArray._wrap(r.reshape(a.shape), self.config)
+        return PositArray._wrap(r.reshape(a.shape), s.config)
 
     def _rbinary(self, name: str, other) -> "PositArray":
-        return self._coerce(other)._binary(name, self)
+        s, o = _unify(self, other)
+        return o._binary(name, s)
+
+    def __pow__(self, p):
+        """x ** p for a number p: 2 is a multiply, -1 a division, 0.5 the square root (one rounding each, on
+        the engine); any other integer the exact power rounded once (in the PS). Other exponents: TypeError."""
+        if isinstance(p, (PositArray, bool, np.bool_)) or np.ndim(p) != 0:
+            raise TypeError("x ** p on posit arrays: p must be a number (an integer or 0.5)")
+        if p == 0.5:
+            return self.sqrt()
+        if float(p) != int(p):
+            raise TypeError(f"x ** {p!r}: integer exponents and 0.5 only (pn.func('exp', y * pn.func('log', x)) "
+                            "for others)")
+        n = int(p)
+        if n == 1:
+            return self.copy()
+        if n == 2:
+            return self._binary("mul", self)
+        if n == -1:
+            return PositArray(_one_bits(self.config), self.config)._binary("div", self)
+        return _pown(self, n)
 
     # ---- arithmetic: the backend ------------------------------------------------------------
 
@@ -549,8 +763,8 @@ class PositArray:
         return PositArray(vecops.absolute(self.config, self.bits), self.config)
 
     def _cmp(self, other, op) -> np.ndarray:
-        o = self._coerce(other)
-        return op(self._signed(), o._signed())
+        s, o = _unify(self, other)
+        return op(s._signed(), o._signed())
 
     def __lt__(self, other):
         return self._cmp(other, np.less)
@@ -616,19 +830,86 @@ class PositArray:
 
     def dot(self, other) -> "PositArray":
         """1-D . 1-D: exact sum of products in the quire, rounded once; 2-D: matmul (np.dot of matrices)."""
-        o = self._coerce(other)
-        if self.ndim in (1, 2) and o.ndim in (1, 2) and (self.ndim == 2 or o.ndim == 2):
-            return matmul(self, o)
-        if self.ndim != 1 or o.ndim != 1:
-            raise TypeError(f"dot of shapes {self.shape} and {o.shape}: vectors and matrices only (use matmul)")
-        if o.size != self.size:
-            raise ValueError(f"dot of {self.size} and {o.size} elements")
-        return PositArray(_quire(self, "dot", o)[0], self.config)
+        s, o = _unify(self, other)
+        if s.ndim in (1, 2) and o.ndim in (1, 2) and (s.ndim == 2 or o.ndim == 2):
+            return matmul(s, o)
+        if s.ndim != 1 or o.ndim != 1:
+            raise TypeError(f"dot of shapes {s.shape} and {o.shape}: vectors and matrices only (use matmul)")
+        if o.size != s.size:
+            raise ValueError(f"dot of {s.size} and {o.size} elements")
+        return PositArray(_quire(s, "dot", o)[0], s.config)
 
     def norm(self) -> "PositArray":
         """Euclidean norm of all elements: exact sum of squares, square root rounded once."""
         _, _, q, nar = _quire(self.ravel(), "sumsq")
         return PositArray(_sqrt_bits(self.config, q, nar), self.config)
+
+    def var(self, axis=None, ddof: int = 0) -> "PositArray":
+        """Variance from two exact quire sums (sum x, sum x**2), rounded once - no cancellation."""
+        return self._along(axis, lambda v: _var_bits(self.config, v, ddof, False))
+
+    def std(self, axis=None, ddof: int = 0) -> "PositArray":
+        """Standard deviation: the square root of the exact variance, rounded once."""
+        return self._along(axis, lambda v: _var_bits(self.config, v, ddof, True))
+
+    def prod(self, axis=None) -> "PositArray":
+        """Exact product, rounded once (computed in the PS: the engine has no product reduction)."""
+        return self._along(axis, lambda v: _prod_bits(self.config, v.bits))
+
+    def cumsum(self, axis=None) -> "PositArray":
+        """Running sums, each the exact sum of its prefix rounded once (in the PS); axis None: flattened."""
+        c = self.config
+        if axis is None:
+            return PositArray(_cumsum_bits(c, self.bits.ravel()), c)
+        moved = np.moveaxis(self.bits, axis, -1)
+        rows = moved.reshape(-1, moved.shape[-1])
+        out = np.array([_cumsum_bits(c, r) for r in rows], np.int64).reshape(moved.shape)
+        return PositArray(np.moveaxis(out, -1, axis), c)
+
+    # ---- level 0 again: clip and rounding to integers, exact ---------------------------------------
+
+    def clip(self, a_min=None, a_max=None) -> "PositArray":
+        """Clamp on the bits (posits order like integers); NaR stays NaR, a NaR bound gives NaR."""
+        if a_min is None and a_max is None:
+            raise ValueError("clip: a_min and a_max cannot both be None")
+        xs = _unify(self, *(b for b in (a_min, a_max) if b is not None))
+        x, rest = xs[0], list(xs[1:])
+        lo = rest.pop(0) if a_min is not None else None
+        hi = rest.pop(0) if a_max is not None else None
+        s = x._signed()
+        bad = x.isnar()
+        if lo is not None:
+            s = np.maximum(s, lo._signed())
+            bad = bad | lo.isnar()
+        if hi is not None:
+            s = np.minimum(s, hi._signed())
+            bad = bad | hi.isnar()
+        r = x._from_signed(s)
+        return PositArray(np.where(bad, x.config.nar, r.bits), x.config)
+
+    def _to_integer(self, fn) -> "PositArray":
+        # exact: posits up to 32 bits are exact in float64, and an integer obtained by rounding a posit is
+        # itself a posit (same binade with an ulp <= 1, or the next power of two)
+        return PositArray(vecops.from_float(self.config, fn(self.to_float())).bits, self.config)
+
+    def floor(self) -> "PositArray":
+        return self._to_integer(np.floor)
+
+    def ceil(self) -> "PositArray":
+        return self._to_integer(np.ceil)
+
+    def trunc(self) -> "PositArray":
+        return self._to_integer(np.trunc)
+
+    def rint(self) -> "PositArray":
+        """Nearest integer, ties to even (as np.rint and np.round)."""
+        return self._to_integer(np.rint)
+
+    def round(self, decimals: int = 0) -> "PositArray":
+        if decimals != 0:
+            raise TypeError("round on posit arrays: decimals=0 only (10**-d is not a posit, so the result "
+                            "would not be exact)")
+        return self.rint()
 
     # ---- NumPy protocols ----------------------------------------------------------------------
 
@@ -644,6 +925,9 @@ class PositArray:
         np.arcsin: "f:arcsin", np.arccos: "f:arccos", np.arctan: "f:arctan", np.sinh: "f:sinh",
         np.cosh: "f:cosh", np.tanh: "f:tanh", np.arcsinh: "f:arcsinh", np.arccosh: "f:arccosh",
         np.arctanh: "f:arctanh", np.cbrt: "f:cbrt",
+        # rounding to integers (exact) and powers
+        np.floor: "r:floor", np.ceil: "r:ceil", np.trunc: "r:trunc", np.rint: "r:rint",
+        np.power: "power", np.reciprocal: "reciprocal",
     }
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -654,9 +938,16 @@ class PositArray:
             if ufunc.__name__ in _LATER:
                 raise TypeError(f"np.{ufunc.__name__} on posit arrays: {_LATER[ufunc.__name__]}")
             return NotImplemented
-        first = next(x for x in inputs if isinstance(x, PositArray))
-        args = [first._coerce(x) for x in inputs]
+        if what == "power":
+            if not isinstance(inputs[0], PositArray):
+                raise TypeError("number ** posit array: the exponent must be a number (x ** p)")
+            return inputs[0] ** inputs[1]
+        args = _unify(*inputs)
         a = args[0]
+        if what == "reciprocal":
+            return a ** -1
+        if what.startswith("r:"):
+            return getattr(a, what[2:])()
         if what in ("add", "sub", "mul", "div"):
             return a._binary(what, args[1])
         if what == "matmul":
@@ -692,13 +983,6 @@ class PositArray:
         return impl(*args, **kwargs)
 
 
-def _config_of(seq) -> PositConfig:
-    configs = {x.config for x in seq if isinstance(x, PositArray)}
-    if len(configs) != 1:
-        raise TypeError(f"mixed posit formats: {sorted(map(str, configs))}")
-    return configs.pop()
-
-
 def _sort(a, axis=-1, **kw):
     r = a.copy()
     r.sort(axis=axis)
@@ -706,21 +990,50 @@ def _sort(a, axis=-1, **kw):
 
 
 def _concatenate(arrays, axis=0, **kw):
-    c = _config_of(arrays)
-    return PositArray(np.concatenate([array(x, c).bits if not isinstance(x, PositArray) else x.bits for x in arrays],
-                                     axis=axis), c)
+    xs = _unify(*arrays)
+    return PositArray(np.concatenate([x.bits for x in xs], axis=axis), xs[0].config)
 
 
 def _stack(arrays, axis=0, **kw):
-    c = _config_of(arrays)
-    return PositArray(np.stack([x.bits for x in arrays], axis=axis), c)
+    xs = _unify(*arrays)
+    return PositArray(np.stack([x.bits for x in xs], axis=axis), xs[0].config)
 
 
 def _where(cond, x, y):
-    c = _config_of([x, y])
-    xb = x.bits if isinstance(x, PositArray) else array(x, c).bits
-    yb = y.bits if isinstance(y, PositArray) else array(y, c).bits
-    return PositArray(np.where(np.asarray(cond), xb, yb), c)
+    xv, yv = _unify(x, y)
+    return PositArray(np.where(np.asarray(cond), xv.bits, yv.bits), xv.config)
+
+
+def _var_fn(root):
+    def f(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, **kw):
+        _no_out("std" if root else "var", out, dtype, keepdims, **kw)
+        return a.std(axis, ddof) if root else a.var(axis, ddof)
+    return f
+
+
+def _clip(a, a_min=None, a_max=None, out=None, *, min=None, max=None, **kw):   # noqa: A002 (NumPy 2.1 names)
+    _no_out("clip", out)
+    return a.clip(a_min if min is None else min, a_max if max is None else max)
+
+
+def _round(a, decimals=0, out=None):
+    _no_out("round", out)
+    return a.round(decimals)
+
+
+def _cumsum(a, axis=None, dtype=None, out=None):
+    _no_out("cumsum", out, dtype)
+    return a.cumsum(axis)
+
+
+def _prod(a, axis=None, dtype=None, out=None, keepdims=False, **kw):
+    _no_out("prod", out, dtype, keepdims, **kw)
+    return a.prod(axis)
+
+
+def _np_save(*args, **kw):
+    raise TypeError("np.save would drop the posit format (a .npy holds plain integers): "
+                    "use pn.save(file, x) and pn.load(file)")
 
 
 _FUNCTIONS: Dict[Any, Any] = {
@@ -753,7 +1066,26 @@ _FUNCTIONS: Dict[Any, Any] = {
     np.fft.ifft: lambda a, n=None, axis=-1, norm=None: _fft("ifft", a, n, axis, norm),
     np.fft.rfft: lambda a, n=None, axis=-1, norm=None: _fft("rfft", a, n, axis, norm),
     np.correlate: lambda a, v, mode="valid": correlate(a, v, mode),
+    np.var: _var_fn(False),
+    np.std: _var_fn(True),
+    np.clip: _clip,
+    np.round: _round,
+    np.cumsum: _cumsum,
+    np.prod: _prod,
+    np.save: _np_save,
+    np.linalg.solve: lambda a, b: _linalg().solve(a, b),
+    np.linalg.inv: lambda a: _linalg().inv(a),
+    np.linalg.det: lambda a: _linalg().det(a),
 }
+
+
+if hasattr(np, "around"):
+    _FUNCTIONS[np.around] = _round
+
+
+def _linalg():
+    from . import linalg
+    return linalg
 
 
 def _fft(name, a, n, axis, norm):
