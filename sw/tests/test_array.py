@@ -40,8 +40,10 @@ def test_array_basics():
     assert np.array_equal((1 - x).to_float(), [0.0, -1.5, 4.0])
     assert np.array_equal((6 / x).to_float(), [6.0, 2.4000000059604645, -2.0])
     assert float(x[1]) == 2.5 and "NaR" in repr(pn.nar(3))
-    with pytest.raises(TypeError):
-        x + pn.array([1.0, 2.0, 3.0], pn.P16)
+    y = x + pn.array([1.0, 2.0, 3.0], pn.P16)              # same es: widened to posit32, no rounding
+    assert y.config == pn.P32 and np.array_equal(y.to_float(), [2.0, 4.5, 0.0])
+    with pytest.raises(TypeError, match="different es"):
+        x + pn.array([1.0, 2.0, 3.0], pn.PositConfig(32, 3))
 
 
 # ---- broadcasting and views -------------------------------------------------------------------
@@ -98,8 +100,7 @@ def test_ufuncs_and_functions():
     assert np.where(x > 0, x, y).to_float().tolist() == [1.0, 0.5, 4.0]
     assert np.argsort(x).tolist() == [1, 0, 2] and np.array_equal(x, x.copy())
     assert np.sin(x).equal_bits(pn.func("sin", x))                 # stage 7: positnp.funcs
-    with pytest.raises(TypeError, match="not planned"):
-        np.cumsum(x)
+    assert np.cumsum(x).to_float().tolist() == [1.0, -1.0, 3.0]
     with pytest.raises(TypeError):
         np.cumprod(x)                                          # not implemented at all
 

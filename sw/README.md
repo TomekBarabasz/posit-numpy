@@ -13,6 +13,12 @@ np.sum(x), np.dot(x, y), np.mean(x), np.linalg.norm(x)   # quire: dokładnie, je
 pn.quire(x, y)                                # dokładna wartość quire jako Fraction
 np.sqrt(x), pn.fma(x, y, 1.0), pn.axpy(0.5, x, y)   # etap 5: jedno zaokrąglenie
 pn.array(np.float32(...)), x.to_float32()     # float32 <-> posit32 (F2P / P2F w PL na KV260)
+x ** 3, np.var(x), np.std(x), np.cumsum(x), np.prod(x)   # dokładnie, jedno zaokrąglenie (w PS)
+np.clip(x, -1, 1), np.floor(x), np.round(x)   # na bitach / dokładnie
+x.astype(pn.P16), x + pn.array(y, pn.P16)     # inne formaty; P8 / P16 / P32 razem -> najszerszy
+np.linalg.solve(A, b), np.linalg.inv(A), np.linalg.det(A)   # LU z quire + poprawianie z residuum w quire
+X * Y, X / Y, abs(X)                          # PositComplex: składowe dokładnie, zaokrąglone raz
+pn.save("x.npz", x), pn.load("x.npz")         # z formatem (np.save odmawia: .npy go nie zapisze)
 ```
 
 ## Płytka z Pythona: `pn.board`
@@ -77,6 +83,25 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
   (sprawdzone ±4 ulp float64, `funcs.uncertified`); posit32: float64 libm zaokrąglone raz (poprawne poza wynikami
   w odległości 1 ulp float64 od remisu). Reguły positów: NaR, bieguny → NaR, nadmiar → maxpos, niedomiar → minpos.
   Silniki 5.3 posit8 / posit16 czytają tablicę same (OP_TABLE, `hw.func`, `hw.time_func`).
+- Uzupełnienia API (wszystko liczone dokładnie i zaokrąglane raz; bez nowego sprzętu):
+  - formaty: `x.astype(pn.P16)` (poszerzenie przy tym samym es bez zaokrąglenia, inaczej jedno zaokrąglenie), działania
+    na P8 / P16 / P32 naraz idą w najszerszym formacie (posit⟨8,es⟩ ⊂ posit⟨16,es⟩ ⊂ posit⟨32,es⟩, jak float32 + float64
+    w NumPy); różne es → `TypeError`;
+  - `x ** n`: 2 = mul, −1 = div, 0.5 = sqrt na silniku; inne całkowite n dokładnie w PS (liczby całkowite Pythona),
+    jedno zaokrąglenie; `0 ** 0` = NaR (standard posit: pow(0, 0)); `np.power`, `np.reciprocal`;
+  - `np.var`, `np.std` (`axis`, `ddof`): z dwóch sum w quire, var = (N·Σx² − (Σx)²) / (N·(N − ddof)) dokładnie, bez
+    znoszenia się, które psuje var we floatach; std = pierwiastek z dokładnej wariancji, zaokrąglony raz;
+  - `np.clip` (na bitach; NaR zostaje NaR), `np.floor`, `np.ceil`, `np.trunc`, `np.rint`, `np.round` (tylko
+    `decimals=0`): dokładnie, bo zaokrąglony do liczby całkowitej posit też jest positem;
+  - `np.cumsum` (każdy prefiks dokładnie, zaokrąglony raz), `np.prod` (dokładny iloczyn, zaokrąglony raz, z nasyceniem):
+    w PS, bo silnik ich nie ma;
+  - `np.linalg.solve`, `inv`, `det` (`positnp/linalg.py`): LU z wyborem elementu głównego, każdy element z jednej
+    dokładnej sumy w quire (`vecops.fused_dot`), podstawienia tak samo, `refine=1` krok poprawiania z residuum liczonym
+    w quire; w PS, na wszystkich backendach te same bity;
+  - `PositComplex`: `+ - * /`, `abs`, `conj`; składowe iloczynu (ac − bd, ad + bc) i ilorazu oraz `abs` (hypot)
+    dokładnie, zaokrąglone raz;
+  - `pn.save(plik, x)` / `pn.load(plik)`: .npz z bitami oraz n i es (także `PositComplex`); `np.save` na posicie
+    zgłasza błąd z podpowiedzią.
 - `pn.array(tablica float32)` i `x.to_float32()` / `x.astype(np.float32)` dla posit32 idą przez F2P / P2F backendu
   (bez rzutowania przez float64); dla innych formatów przez `vecops`.
 

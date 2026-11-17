@@ -32,7 +32,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from . import vecops
+from . import ref, vecops
 from .ref import PositConfig
 
 RADIX = 64            # largest DFT block of the four-step algorithm
@@ -66,6 +66,108 @@ class PositComplex:
 
     def conj(self) -> "PositComplex":
         return PositComplex(self.real, -self.imag)
+
+    conjugate = conj
+
+    # ---- arithmetic: + - * / and abs, broadcast like NumPy -----------------------------------------------
+    #
+    # A product's components (ac - bd, ad + bc) are exact dot products of length 2, rounded once each
+    # (vecops.fused_dot); a quotient's components and abs (hypot) are exact values rounded once. Computed in
+    # the PS; + and - (and products with a real operand) are ordinary array operations on the backend.
+
+    def _with(self, o):
+        """(self.real, self.imag, o.real, o.imag or None) in one posit format."""
+        A = _arr()
+        if isinstance(o, PositComplex):
+            return tuple(A._unify(self.real, self.imag, o.real, o.imag))
+        if not isinstance(o, A.PositArray) and np.iscomplexobj(o):
+            z = np.asarray(o)
+            return tuple(A._unify(self.real, self.imag, z.real, z.imag))
+        sr, si, orr = A._unify(self.real, self.imag, o)
+        return sr, si, orr, None
+
+    def __add__(self, o):
+        sr, si, orr, oi = self._with(o)
+        return PositComplex(sr + orr, si + oi if oi is not None else _spread(si, sr + orr))
+
+    __radd__ = __add__
+
+    def __sub__(self, o):
+        sr, si, orr, oi = self._with(o)
+        return PositComplex(sr - orr, si - oi if oi is not None else _spread(si, sr - orr))
+
+    def __rsub__(self, o):
+        return (-self) + o
+
+    def __neg__(self):
+        return PositComplex(-self.real, -self.imag)
+
+    def __pos__(self):
+        return PositComplex(self.real.copy(), self.imag.copy())
+
+    def __mul__(self, o):
+        sr, si, orr, oi = self._with(o)
+        if oi is None:
+            return PositComplex(sr * orr, si * orr)
+        c = sr.config
+        shape = np.broadcast_shapes(sr.shape, orr.shape)
+        ar, ai, br, bi = (np.broadcast_to(x.bits, shape).ravel().astype(np.int64) for x in (sr, si, orr, oi))
+        re = vecops.fused_dot(c, np.stack([ar, ai]), np.stack([br, vecops.neg(c, bi)])).bits
+        im = vecops.fused_dot(c, np.stack([ar, ai]), np.stack([bi, br])).bits
+        A = _arr()
+        return PositComplex(A.PositArray(re.reshape(shape), c), A.PositArray(im.reshape(shape), c))
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, o):
+        sr, si, orr, oi = self._with(o)
+        if oi is None:
+            return PositComplex(sr / orr, si / orr)
+        return _cdiv(sr, si, orr, oi)
+
+    def __rtruediv__(self, o):
+        sr, si, orr, oi = self._with(o)
+        if oi is None:
+            oi = _arr().zeros(orr.shape, orr.config)
+        return _cdiv(orr, oi, sr, si)
+
+    def __abs__(self):
+        """|z| = hypot(re, im): the exact square root of re**2 + im**2, rounded once."""
+        A = _arr()
+        c = self.config
+        ms, es, st, bad = [], [], [], []
+        for a, b in zip(self.real.bits.ravel().tolist(), self.imag.bits.ravel().tolist()):
+            x, y = ref.decode(c, a), ref.decode(c, b)
+            if x is None or y is None:
+                ms.append(0), es.append(0), st.append(False), bad.append(True)
+                continue
+            m, e = ref._add(ref._mul(x, x), ref._mul(y, y))
+            if m == 0:
+                ms.append(0), es.append(0), st.append(False), bad.append(False)
+                continue
+            if e % 2:
+                m, e = m << 1, e - 1
+            extra = 64 + c.n
+            t = m << (2 * extra)
+            s = math.isqrt(t)
+            ms.append(s), es.append(e // 2 - extra), st.append(s * s != t), bad.append(False)
+        bits = A._round_exact(c, ms, es, st, bad)
+        return A.PositArray(bits.reshape(self.shape), c)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if method != "__call__" or kwargs:
+            return NotImplemented
+        unary = {np.negative: lambda z: -z, np.positive: lambda z: +z, np.absolute: abs,
+                 np.conjugate: lambda z: z.conj()}
+        if ufunc in unary and len(inputs) == 1:
+            return unary[ufunc](inputs[0])
+        binary = {np.add: "__add__", np.subtract: "__sub__", np.multiply: "__mul__", np.true_divide: "__truediv__"}
+        if ufunc not in binary:
+            return NotImplemented
+        a, b = inputs
+        if isinstance(a, PositComplex):
+            return getattr(a, binary[ufunc])(b)
+        return getattr(b, "__r" + binary[ufunc][2:])(a)
 
     # ---- device memory: one buffer (B, 2, N), the layout of the hardware FFT core -------------------------
 
@@ -102,6 +204,35 @@ class PositComplex:
     def to_host(self) -> "PositComplex":
         A = _arr()
         return PositComplex(A.PositArray(self.real.bits.copy(), self.config), A.PositArray(self.imag.bits.copy(), self.config))
+
+
+def _spread(x, like):
+    """x broadcast to the shape of `like` (a copy)."""
+    return _arr().PositArray(np.broadcast_to(x.bits, like.shape), x.config)
+
+
+def _cdiv(ar, ai, br, bi) -> PositComplex:
+    """(ar + i ai) / (br + i bi): re = (ar br + ai bi) / d, im = (ai br - ar bi) / d, d = br**2 + bi**2,
+    every numerator and d exact, each quotient rounded once; division by 0 -> NaR."""
+    A = _arr()
+    c = ar.config
+    shape = np.broadcast_shapes(ar.shape, br.shape)
+    cols = [np.broadcast_to(x.bits, shape).ravel().tolist() for x in (ar, ai, br, bi)]
+    out = {k: ([], [], [], []) for k in ("re", "im")}
+    for a, b, p, q in zip(*cols):
+        xs = [ref.decode(c, v) for v in (a, b, p, q)]
+        d = None if None in xs else ref._add(ref._mul(xs[2], xs[2]), ref._mul(xs[3], xs[3]))
+        nums = {} if d is None or d[0] == 0 else {
+            "re": ref._add(ref._mul(xs[0], xs[2]), ref._mul(xs[1], xs[3])),
+            "im": ref._add(ref._mul(xs[1], xs[2]), ref._neg(ref._mul(xs[0], xs[3])))}
+        for k, (ms, es, st, bad) in out.items():
+            if not nums:
+                ms.append(0), es.append(0), st.append(False), bad.append(True)
+                continue
+            (m, e), inexact = ref._div(nums[k], d) if nums[k][0] else ((0, 0), False)
+            ms.append(m), es.append(e), st.append(inexact), bad.append(False)
+    re, im = (A._round_exact(c, *out[k]).reshape(shape) for k in ("re", "im"))
+    return PositComplex(A.PositArray(re, c), A.PositArray(im, c))
 
 
 def _device_complex(d3: np.ndarray, shape, c: PositConfig) -> PositComplex:
