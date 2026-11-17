@@ -27,6 +27,7 @@
 #                        albo AXI4-Stream + AXI DMA (etapy 2-5; RTL z VecKv260 --dma)       (master)
 #    -n <bity>           to samo co -engines <bity> (jeden silnik)
 #    -name <nazwa>       nazwa aplikacji                  (posit<n>[_<n>...]_mem, z -io dma: _vec)
+#    -rtl <dir>          RTL silnikow: <dir>/p<n>/PositVecAxi_p<n>.v      (../hw/gen; VecReleases: ../hw/gen/release/<nazwa>)
 #    -part <part>                                                       (xck26-sfvc784-2LV-c)
 #    -out <dir>          katalog roboczy                                (./out)
 #    -deploy <dir>       gdzie zapisac katalog aplikacji                (../../../../sw/positnp/overlays)
@@ -51,6 +52,7 @@ array set opt [list \
     engines 32 \
     io      master \
     name    "" \
+    rtl     [file normalize [file join $script_dir .. hw gen]] \
     part    xck26-sfvc784-2LV-c \
     out     [file join $script_dir out] \
     deploy  [file normalize [file join $script_dir .. .. .. .. sw positnp overlays]] \
@@ -61,13 +63,13 @@ array set opt [list \
 ]
 
 proc usage {} {
-    puts "uzycie: vivado -mode batch -source build.tcl -tclargs \[-engines \"32 16 8\"\] \[-name nazwa\] \[-part part\] \[-out dir\] \[-deploy dir\] \[-buf_mb MB\] \[-jobs n\] \[-threads n\] \[-stop ip|bd\]"
+    puts "uzycie: vivado -mode batch -source build.tcl -tclargs \[-engines \"32 16 8\"\] \[-name nazwa\] \[-rtl dir\] \[-part part\] \[-out dir\] \[-deploy dir\] \[-buf_mb MB\] \[-jobs n\] \[-threads n\] \[-stop ip|bd\]"
 }
 
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
-        -n - -fan - -engines - -io - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
+        -n - -fan - -engines - -io - -name - -rtl - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([expr {$a eq "-n" ? "engines" : [string range $a 1 end]}]) [lindex $argv $i]
@@ -109,7 +111,8 @@ puts "build: $name, silniki $ns, $opt(part), watki $opt(threads), przebiegi $opt
 set vlnv    [dict create]
 set ip_dirs {}
 foreach n $ns {
-    set rtl    [file normalize [file join $script_dir .. hw gen p$n PositVecAxi_p$n.v]]
+    set rtl    [file normalize [file join $opt(rtl) p$n PositVecAxi_p$n.v]]
+    if {![file exists $rtl]} { error "brak $rtl (sbt: VecKv260 albo VecReleases)" }
     set ip_dir [file join $out ip_p$n]
     set busifs [expr {$master ? {s_axi m_axi} : {s_axi s_axis m_axis}}]
     dict set vlnv $n [posit_ip::package $rtl $ip_dir $opt(part) PositVecAxi_p$n $busifs]

@@ -2,3 +2,14 @@
 *
 !.gitignore
 !README.md
+# bitstreamy do pakietow (hw/top-modules/vec/vivado/release_builds.sh): w gicie
+!posit32_16_8_mem/
+!posit32_16_8_mem/**
+!posit32_16_8_dsp/
+!posit32_16_8_dsp/**
+!posit16_8_ml/
+!posit16_8_ml/**
+!posit32_16_linalg/
+!posit32_16_linalg/**
+!posit32_16_dsp/
+!posit32_16_dsp/**
