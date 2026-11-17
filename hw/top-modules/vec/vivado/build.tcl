@@ -330,6 +330,7 @@ set stamp "([clock format [clock seconds] -format {%Y-%m-%d %H:%M}], Vivado [ver
 posit_overlay::write_dtsi [file join $app $name.dtsi] $name $engines $pl0_hz $stamp
 
 set fh [open [file join $app shell.json] w]
+fconfigure $fh -translation lf           ;# LF tez z Windows (pliki dla plytki)
 puts $fh "\{\n    \"shell_type\" : \"XRT_FLAT\",\n    \"num_slots\": \"1\"\n\}"
 close $fh
 

@@ -250,6 +250,7 @@ if {$rc || ![file exists [file join $app $name.bit.bin]]} { error "bootgen: $msg
 # overlay device tree: region FPGA z bitstreamem, zegar PL0, szerokosc HPM0, wezel UIO
 proc cells64 {v} { return [format "0x%x 0x%x" [expr {($v >> 32) & 0xffffffff}] [expr {$v & 0xffffffff}]] }
 set fh [open [file join $app $name.dtsi] w]
+fconfigure $fh -translation lf           ;# LF tez z Windows (pliki dla plytki)
 puts $fh "/*
  * $name: PositAluAxiLite na KV260, wygenerowane przez hw/top-modules/alu/vivado/build.tcl
  * ([clock format [clock seconds] -format {%Y-%m-%d %H:%M}], Vivado [version -short]).
@@ -293,10 +294,12 @@ puts $fh "/*
 close $fh
 
 set fh [open [file join $app shell.json] w]
+fconfigure $fh -translation lf           ;# LF tez z Windows (pliki dla plytki)
 puts $fh "\{\n    \"shell_type\" : \"XRT_FLAT\",\n    \"num_slots\": \"1\"\n\}"
 close $fh
 
 set fh [open [file join $app $name.json] w]
+fconfigure $fh -translation lf           ;# LF tez z Windows (pliki dla plytki)
 puts $fh "\{
     \"overlay\": \"$name\",
     \"ip\": \"posit_alu\",

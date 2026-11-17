@@ -28,6 +28,7 @@ proc posit_overlay::cells64 {v} {
 
 proc posit_overlay::write_dtsi {path name engines pl0_hz {stamp ""}} {
     set fh [open $path w]
+    fconfigure $fh -translation lf     ;# pliki dla Linuksa na plytce: LF tez z Windows
     set ns {}
     foreach e $engines { lappend ns posit<[dict get $e n],2> }
     puts $fh "/*
@@ -111,6 +112,7 @@ proc posit_overlay::write_json {path name engines pl0_hz dma_max_bytes {extra {}
         }
     }
     set fh [open $path w]
+    fconfigure $fh -translation lf     ;# pliki dla Linuksa na plytce: LF tez z Windows
     puts $fh "\{
     \"overlay\": [json_str $name],
     \"engines\": \[

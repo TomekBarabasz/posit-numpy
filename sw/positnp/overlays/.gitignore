@@ -1,6 +1,7 @@
 # katalogi aplikacji z build.tcl (posit<n>_alu/) i stare pliki PYNQ
 *
 !.gitignore
+!.gitattributes
 !README.md
 # bitstreamy do pakietow (hw/top-modules/vec/vivado/release_builds.sh): w gicie
 !posit32_16_8_mem/
