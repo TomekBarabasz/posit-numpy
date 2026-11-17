@@ -686,9 +686,22 @@ dekoder -> prepare -+                                                           
 ## Bitstreamy do pakietów (extras `positnp`)
 
 Jedna aplikacja PL na zastosowanie; każdy bitstream liczy wszystko (czego nie ma w sprzęcie, liczy `PositSw`
-z tymi samymi bitami), różnią się tym, co liczą szybko. Konfiguracje i komendy: `vivado/release_builds.sh`
-(`list`, `print`, `run [nazwa ...]`, osobno `gen` / `build` dla sbt w kontenerze). Wynik: `sw/positnp/overlays/<nazwa>/`
-(te katalogi są w gicie, reszta `overlays/` nie).
+z tymi samymi bitami), różnią się tym, co liczą szybko. Konfiguracje są w jednym miejscu: `hw/spinal/main/VecReleases.scala`.
+Wszystkie naraz, dwie komendy (Windows i Linux):
+
+```
+sbt "top-vec/runMain posit.top.vec.VecReleases"                      # z hw/ (np. w kontenerze SpinalHDL)
+vivado -mode batch -nojournal -nolog -source release_builds.tcl      # z hw/top-modules/vec/vivado
+```
+
+- `VecReleases` generuje RTL każdej konfiguracji do osobnego katalogu `hw/gen/release/<nazwa>/` (+ `release.txt`:
+  silniki, bufor, extra); `VecReleases <nazwa> ...` — tylko wybrane, `VecReleases --list` — lista.
+- `release_builds.tcl` buduje po kolei każdą konfigurację z `hw/gen/release/` w osobnym procesie Vivado (`build.tcl`
+  z `-rtl`); błąd jednej (WNS < 0, placer) nie zatrzymuje pozostałych; na końcu podsumowanie, też w `out/release_summary.txt`.
+  Opcje po `-tclargs`: nazwy konfiguracji, `-jobs n`, `-threads n`, `-dry` (tylko komendy), `-out <dir>` (projekty;
+  na Windows przy błędach długości ścieżek krótki katalog bez spacji, np. `-out C:/vb`).
+- Wynik: `sw/positnp/overlays/<nazwa>/` (te katalogi są w gicie, reszta `overlays/` nie); projekty i logi:
+  `vivado/out/<nazwa>/` (`build.log`).
 
 | nazwa | extra | silniki | VecKv260 | dla kogo | stan |
 | --- | --- | --- | --- | --- | --- |
@@ -710,6 +723,9 @@ Szacunek miejsca (z OOC wyżej): quire posit32 ok. 2 900 LUT, posit16 / posit8 p
   mniej). Gdy się nie zmieści: `--gemv-cols 32=6,16=4`, potem `32=4,16=4`.
 - `posit32_16_dsp`: rdzeń FFT w posit16 zamiast silnika posit8; gdy placer odmówi: `--gemv-cols 32=2,16=1`, potem
   `32=1,16=1`; gdy dalej nie — zostaje `posit32_16_8_dsp`.
+
+Zmiana konfiguracji (np. krok awaryjny): argumenty w `VecReleases.scala`, potem `VecReleases <nazwa>` i
+`release_builds.tcl -tclargs <nazwa>`.
 
 ## Krok po kroku
 

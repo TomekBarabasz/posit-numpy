@@ -31,8 +31,9 @@ import posit.kv260._
 //  posit16 / posit32 z L <= 4, np. --fft 6:32 tylko w posit32 (domyslnie wylaczone; posit32: ok. 30 tys. LUT, 48 DSP -
 //  w obu silnikach naraz z gemv x 4 bitstream zbliza sie do 117 tys. LUT xck26).
 //
-//  Wynik: hw/gen/p<n>/PositVecAxi_p<n>.v dla kazdego silnika; dalej vivado/build.tcl -engines "32 16 8"
-//  (z --dma: build.tcl -io dma).
+//  Wynik: hw/gen/p<n>/PositVecAxi_p<n>.v dla kazdego silnika (--gen-dir <dir>: <dir>/p<n>/); dalej
+//  vivado/build.tcl -engines "32 16 8" (z --dma: build.tcl -io dma; z --gen-dir: build.tcl -rtl <dir>).
+//  Bitstreamy do pakietow: VecReleases (wszystkie konfiguracje naraz) + vivado/release_builds.tcl.
 //  Nazwy modulow maja przedrostek p<n>_ (globalPrefix), wiec silniki roznych formatow
 //  nie zderzaja sie nazwami w jednym projekcie Vivado.
 // =====================================================================
@@ -46,6 +47,13 @@ object VecKv260 {
   var fftNs  = Set(16, 32)   // formaty z rdzeniem FFT (--fft S:32)
 
   val lanes = scala.collection.mutable.Map[Int, Int]()     // n -> L z argumentow
+  var genDir = "hw/gen"  // --gen-dir: katalog RTL (hw/gen/p<n>/; VecReleases: hw/gen/release/<nazwa>/p<n>/)
+
+  /** Stan domyslny - main mozna wolac kilka razy w jednym procesie (VecReleases). */
+  def reset() : Unit = {
+    master = true; gemvK = 4096; gemvP = 4; gemvPn.clear(); tableC = -1; fftS = 0; fftNs = Set(16, 32)
+    lanes.clear(); genDir = "hw/gen"
+  }
 
   def config(n : Int = 32, es : Int = 2, k : Int = 4, units : Int = 1) : PositAluConfig =
     PositAluConfig(PositConfig(n, es), PositOp.all, divBitsPerCycle = k, pipe = PositPipeline.full,
@@ -78,7 +86,7 @@ object VecKv260 {
   def generate(cfg : PositAluConfig) : String = {
     val n   = cfg.c.n
     require(Seq(8, 16, 32).contains(n), s"n = $n: AXI DMA chce tdata w pelnych bajtach (8, 16, 32)")
-    val rep = Kv260.spinal.copy(targetDirectory = s"hw/gen/p$n", globalPrefix = s"p${n}_")
+    val rep = Kv260.spinal.copy(targetDirectory = s"$genDir/p$n", globalPrefix = s"p${n}_")
       .generateVerilog(new PositVecAxi(cfg, withMaster = master,
         memCfg = Some(MemMoverConfig(n, lanes = lanes.getOrElse(n, 1))),
         withGemv = gemvOf(n) > 0, gemvMaxK = gemvK max 2, gemvCols = gemvOf(n) max 1,
@@ -90,18 +98,21 @@ object VecKv260 {
                 (if (tableCopies(n) > 0) s", tablica 2^$n x ${tableCopies(n)}" else "") +
                 (if (fftOf(n) > 0) s", FFT do N = ${1 << (2 * fftOf(n))}" else "")
     println(s"${rep.toplevelName}: $cfg, CONFIG = 0x${PositVecRegs.config(cfg, master, gemv, tableCopies(n) > 0).toHexString}, " +
-            s"$ports -> hw/gen/p$n/${rep.toplevelName}.v")
+            s"$ports -> $genDir/p$n/${rep.toplevelName}.v")
     rep.toplevelName
   }
 
   def main(args : Array[String]) : Unit = {
+    reset()
     master = !args.contains("--dma")
-    val opts = Seq("--gemv-k", "--gemv-cols", "--table-copies", "--fft")
+    val opts = Seq("--gemv-k", "--gemv-cols", "--table-copies", "--fft", "--gen-dir")
     val vals = opts.map(o => args.indexOf(o)).filter(_ >= 0).map(_ + 1).toSet
     for ((o, i) <- opts.map(o => (o, args.indexOf(o))) if i >= 0 && o == "--gemv-cols" && args(i + 1).contains("=")) {
       for (kv <- args(i + 1).split(",")) { val Array(k, v) = kv.split("="); gemvPn(k.trim.toInt) = v.trim.toInt }
     }
-    for ((o, i) <- opts.map(o => (o, args.indexOf(o))) if i >= 0 && !(o == "--gemv-cols" && args(i + 1).contains("="))) {
+    for ((o, i) <- opts.map(o => (o, args.indexOf(o))) if i >= 0 && o == "--gen-dir") genDir = args(i + 1)
+    for ((o, i) <- opts.map(o => (o, args.indexOf(o)))
+         if i >= 0 && o != "--gen-dir" && !(o == "--gemv-cols" && args(i + 1).contains("="))) {
       val raw = args(i + 1).split(":")
       if (o == "--fft" && raw.size > 1) fftNs = raw(1).split(",").map(_.trim.toInt).toSet
       val v = raw(0).toInt
@@ -112,6 +123,7 @@ object VecKv260 {
     val dup  = cfgs.groupBy(_.c.n).collect { case (n, s) if s.size > 1 => n }
     require(dup.isEmpty, s"jeden silnik na format: n = ${dup.mkString(", ")} powtorzone")
     cfgs.foreach(generate)
-    println(s"vivado/build.tcl -engines \"${cfgs.map(_.c.n).mkString(" ")}\"" + (if (master) "" else " -io dma"))
+    println(s"vivado/build.tcl -engines \"${cfgs.map(_.c.n).mkString(" ")}\"" + (if (master) "" else " -io dma") +
+            (if (genDir != "hw/gen") s" -rtl ../$genDir" else ""))
   }
 }
