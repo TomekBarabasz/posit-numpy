@@ -543,7 +543,7 @@ def test_fft_throughput(hw):
             t = hw.last_timing
             S = (N.bit_length() - 1) // 2
             L = (hw.engine_cfg() or {}).get("lanes", 1)
-            model = batch * (4 * N // L + S * (N // 4 + 15))
+            model = (batch + 2) * max(2 * N // L, S * (N // 4 + 15))   # 5.6: three bank sets, phases overlap
             eng = (f" [engine {t['engine_cycles'] / 100e3:.2f} ms = {t['engine_cycles']} clk (model {model}), copy in "
                    f"{t['pack'] * 1e3:.2f}, sync {(t['sync_device'] + t['sync_cpu']) * 1e3:.2f}, copy out {t['copy_out'] * 1e3:.2f} ms]")
         dev = ""

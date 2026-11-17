@@ -45,9 +45,9 @@ Stan:
 - sprzętowe FFT radix-4 (5.5, opcjonalne `VecKv260 --fft 6:32`, z `--gemv-cols 32=2,16=2,8=0`, żeby się zmieściło):
   sprawdzone na płytce bit w bit z modelem — posit32 N = 4096: 2 874 transformat / s (NumPy complex64: 2 352),
   N = 64: 152 550 / s, 8–21 × szybciej niż bloki DFT, ok. 3 × dokładniej niż float32;
-- FFT 5.6: wczytanie / liczenie / zapis naraz (trzy zestawy banków, w symulacji 2–2,5 × mniej taktów na transformatę),
-  ifft na rdzeniu (`FFT_CTRL.conj`), FFT na tablicach w pamięci urządzenia bez kopii (`PositComplex.to_device()`);
-  czeka na płytkę.
+- FFT 5.6: wczytanie / liczenie / zapis naraz (trzy zestawy banków, 2,4 × mniej taktów), ifft na rdzeniu (`FFT_CTRL.conj`),
+  FFT w pamięci urządzenia bez kopii (`PositComplex.to_device()`): sprawdzone na płytce — posit32 640 025 / 41 955 / 9 356
+  transformat / s dla N = 64 / 1024 / 4096, 1,75–4 × szybciej niż NumPy complex64 na A53, ok. 3 × dokładniej niż float32.
 
 # how to's
 ## klonowanie (hw/lib to submodule: fpga-hw-lib)
