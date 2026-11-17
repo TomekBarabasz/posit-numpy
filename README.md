@@ -3,7 +3,7 @@
 Biblioteka w stylu NumPy na KV260: tablice positów liczy logika PL wygenerowana
 w SpinalHDL, a steruje nią Python w PS (Ubuntu z `xmutil`, rejestry przez UIO; bez PYNQ).
 Plan: [posit-numpy na KV260: architektura i plan implementacji](https://claude.ai/artifact/JtAzXExTzWmnyTq6d8kmym).
-Jak działa integracja z KV260 (PS ↔ PL, rejestry, AXI, DMA, własny master, bufory) — do nauki: [doc/kv260/](doc/kv260/README.md).
+How the KV260 integration works (PS ↔ PL, registers, AXI, DMA, the engine's own master, buffers), written for learning (in Polish): [doc/kv260/](doc/kv260/README.md).
 
 ```
 hw/                     sbt, SpinalHDL 1.15.0 (z lib/sbt/HwBuild.scala)
