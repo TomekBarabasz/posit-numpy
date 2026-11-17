@@ -683,6 +683,34 @@ dekoder -> prepare -+                                                           
 - Koszt (OOC, posit32): 4 tory = 10 469 LUT, 4 926 FF, 8 DSP, 113 MHz po routingu, wobec 6 550 LUT przy jednym
   torze — ok. 1 300 LUT na każdy dodatkowy tor, bez nowych DSP i bez zmiany Fmax (`hw/top-modules/ooc/README.md`).
 
+## Bitstreamy do pakietów (extras `positnp`)
+
+Jedna aplikacja PL na zastosowanie; każdy bitstream liczy wszystko (czego nie ma w sprzęcie, liczy `PositSw`
+z tymi samymi bitami), różnią się tym, co liczą szybko. Konfiguracje i komendy: `vivado/release_builds.sh`
+(`list`, `print`, `run [nazwa ...]`, osobno `gen` / `build` dla sbt w kontenerze). Wynik: `sw/positnp/overlays/<nazwa>/`
+(te katalogi są w gicie, reszta `overlays/` nie).
+
+| nazwa | extra | silniki | VecKv260 | dla kogo | stan |
+| --- | --- | --- | --- | --- | --- |
+| `posit32_16_8_mem` | `kv260` (domyślny) | 32 + 16 + 8 | gemv × 4 we wszystkich, tablice p16 / p8 | eksperymenty, porównania formatów, przykłady | sprawdzona (5.4) |
+| `posit32_16_8_dsp` | `kv260-dsp` | 32 + 16 + 8 | `--fft 6:32 --gemv-cols 32=2,16=2,8=0` | FFT, FIR, korelacja | sprawdzona (5.6) |
+| `posit16_8_ml` | `kv260-ml` | 16 + 8 | `--gemv-cols 16=8,8=8` | sieci w 8 / 16 bitach: gemm, sigmoid / tanh / exp z tablic | nowa |
+| `posit32_16_linalg` | `kv260-linalg` | 32 + 16 | `--gemv-cols 32=8,16=4 --table-copies 0` | układy równań, mieszana precyzja | nowa |
+| `posit32_16_dsp` | (`kv260-dsp` v2) | 32 + 16 | `--fft 6 --gemv-cols 2` | FFT także w posit16 (porównania z float16) | eksperyment |
+
+Silniki zawsze `32:2:4:4:2`, `16:2:4:2:4`, `8:2:4:1:8` (jak w sprawdzonych bitstreamach). Dwa silniki: `-buf_mb 96`
+(razem 192 MB CMA, tyle co trzy po 64). Elaboracja wszystkich pięciu przechodzi (2026-11-17); sterownik z gemv
+na 8 i 16 kolumn sprawdzony na atrapach (`matmul`, `np.convolve` bit w bit z `PositSw`).
+
+Szacunek miejsca (z OOC wyżej): quire posit32 ok. 2 900 LUT, posit16 / posit8 proporcjonalnie mniej (256 / 128 b);
+- `ml`: bez silnika posit32 (największego) — 16 quire posit16 i 16 posit8 powinno się zmieścić z zapasem; 8 MAC / takt
+  na silnik (ok. 800 M MAC/s), 2 × więcej niż `kv260`. Gdy się zmieści łatwo: `--gemv-cols 16=16,8=16` (P ≤ 16,
+  elaboracja przechodzi). Gdy WNS < 0: `16=8,8=4` albo `16=4,8=8`.
+- `linalg`: posit32 P = 8 to wg OOC ok. +20 tys. LUT względem P = 4, ale bez silnika posit8 i bez tablic (ok. 60 BRAM36
+  mniej). Gdy się nie zmieści: `--gemv-cols 32=6,16=4`, potem `32=4,16=4`.
+- `posit32_16_dsp`: rdzeń FFT w posit16 zamiast silnika posit8; gdy placer odmówi: `--gemv-cols 32=2,16=1`, potem
+  `32=1,16=1`; gdy dalej nie — zostaje `posit32_16_8_dsp`.
+
 ## Krok po kroku
 
 1. RTL (z `hw/`) — jeden plik na silnik, `hw/gen/p<n>/PositVecAxi_p<n>.v`:
