@@ -115,9 +115,16 @@ tests/
                         przepustowość z rozbiciem na fazy, quire, sqrt / FMA / konwersje
   test_vecops.py        vecops kontra skróty ze Scali, round-tripy, konwersje kontra ref.py
   test_quire.py         modele quire (ref.py, vecops) kontra Fraction, znoszenie się, kolejność
-  test_examples.py      examples/formats.py, examples/quire_dot.py
+  test_examples.py      examples/: formats.py, quire_dot.py, cała seria NN_*.py (też na atrapach silników)
   test_board_api.py     pn.board na PC: katalog firmware, xmutil, /sys/class/uio i u-dma-buf jako atrapy
-examples/
+examples/               przewodnik po bibliotece (po angielsku): examples/README.md
+  00-03                 instalacja, formaty, pn.board i wykrywanie możliwości silników, backendy i liczniki
+  10-13                 arytmetyka, NumPy, quire (sum / dot / mean / norm), fma / sqrt / exp / log ...
+  20-23                 gemv / gemm, FIR (np.convolve / correlate), FFT, pamięć urządzenia
+  30-33                 gdzie posity wygrywają z floatami: precyzja wg rzędu wielkości, zakres w 16 bitach,
+                        rozwiązywanie układów z resztą w quire, powtarzalne sumy
+  template.py           szablon własnego eksperymentu (posit / float obok siebie)
+  _common.py            --hw [APP] / --sim, błędy względne, tabele, bfloat16 / float8 (round_minifloat)
   formats.py            float32 / posit32 / posit16 / float64: Horner i suma drzewem (--hw: posit32 na KV260)
   quire_dot.py          źle uwarunkowany iloczyn skalarny: float32, float64, posit32 bez i z quire
 notebooks/
