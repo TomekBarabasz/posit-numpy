@@ -22,7 +22,7 @@
 #                                                                                         posit32_16_8_mem
 #    ... -tclargs -io dma -engines "32 16 8"  (RTL z VecKv260 --dma)                       posit32_16_8_vec
 #  Opcje (-tclargs):
-#    -engines "<n> ..."  silniki: 8, 16, 32, kazdy co najwyzej raz (rtl z ../hw/gen/p<n>/)   ("32")
+#    -engines "<n> ..."  silniki: 8, 16, 32, kazdy co najwyzej raz; tez 32_16_8 (Windows)       ("32")
 #    -io master|dma      etap 6: wlasny master AXI4 silnika (m_axi -> HP0, przerwanie -> pl_ps_irq0)
 #                        albo AXI4-Stream + AXI DMA (etapy 2-5; RTL z VecKv260 --dma)       (master)
 #    -n <bity>           to samo co -engines <bity> (jeden silnik)
@@ -79,7 +79,7 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
     }
 }
 if {$opt(stop) ni {"" ip bd}} { error "-stop ip|bd, nie $opt(stop)" }
-set ns [string map {, " "} $opt(engines)]
+set ns [string map {, " " _ " " + " "} $opt(engines)]   ;# "32 16 8", 32,16,8 albo 32_16_8 (cmd.exe / vivado.bat dzieli po przecinku)
 if {![llength $ns]} { error "-engines: co najmniej jeden silnik" }
 foreach n $ns {
     if {$n ni {8 16 32}} { error "-engines: 8|16|32 (tdata AXI DMA w pelnych bajtach), nie $n" }

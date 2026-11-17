@@ -81,6 +81,18 @@ proc vivado_exe {} {
 }
 set vivado [vivado_exe]
 
+# pierwszy konkretny blad z build.log: linia przed "while executing" (error z build.tcl) albo "ERROR:"
+proc log_error {log} {
+    if {![file exists $log]} { return "" }
+    set fh [open $log r]
+    set lines [split [read $fh] \n]
+    close $fh
+    set i [lsearch -exact $lines "    while executing"]
+    if {$i > 0} { return [string trim [lindex $lines $i-1]] }
+    set e [lsearch -inline -regexp $lines {^ERROR:}]
+    return [string trim $e]
+}
+
 set deploy_root [file normalize [file join $here .. .. .. .. sw positnp overlays]]
 set results {}
 set t_all [clock seconds]
@@ -90,9 +102,10 @@ puts "vivado: $vivado\n"
 foreach d $todo {
     set name [dict get $d name]
     set dir  [file join $opt(out) $name]
-    # tylko sciezki wzgledne i argumenty bez spacji: bezpieczne w cmd.exe (vivado.bat)
+    # tylko sciezki wzgledne i argumenty bez spacji, przecinkow, srednikow i "=": vivado.bat przechodzi
+    # przez cmd.exe, ktory po nich dzieli argumenty (32,16,8 -> "32" "16" "8"); silniki jako 32_16_8
     set cmd [list -mode batch -nojournal -log $dir/build.log -source build.tcl -tclargs \
-                 -engines [dict get $d engines] -name $name -buf_mb [dict get $d buf_mb] \
+                 -engines [string map {, _} [dict get $d engines]] -name $name -buf_mb [dict get $d buf_mb] \
                  -rtl [dict get $d rtl] -out $dir]
     foreach o {jobs threads} { if {$opt($o) ne ""} { lappend cmd -$o $opt($o) } }
     puts "== $name ([dict get $d extra]): [dict get $d args]"
@@ -109,7 +122,9 @@ foreach d $todo {
     } elseif {!$rc} {
         set r "brak nowego $name.bit.bin ($min min; $dir/build.log)"
     } else {
-        set r "blad po $min min: [lindex [split $err \n] 0] ($dir/build.log; WNS < 0 albo placer)"
+        set why [log_error $dir/build.log]
+        if {$why eq ""} { set why [lindex [split $err \n] 0] }
+        set r "blad po $min min: $why ($dir/build.log)"
     }
     lappend results [list $name $r]
     puts "== $name: $r\n"
