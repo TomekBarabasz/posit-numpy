@@ -690,6 +690,20 @@ z tymi samymi bitami), różnią się tym, co liczą szybko. Konfiguracje i kome
 (`list`, `print`, `run [nazwa ...]`, osobno `gen` / `build` dla sbt w kontenerze). Wynik: `sw/positnp/overlays/<nazwa>/`
 (te katalogi są w gicie, reszta `overlays/` nie).
 
+Konfiguracje są w `vivado/release_configs.txt` (wspólne dla obu skryptów). Bez basha (Windows) to samo robi
+`vivado/release_builds.tcl`, uruchamiany przez Vivado z katalogu `vivado/`:
+
+```
+vivado -mode batch -nojournal -nolog -source release_builds.tcl -tclargs posit32_16_8_mem
+vivado -mode batch -nojournal -nolog -source release_builds.tcl -tclargs run              (wszystkie)
+vivado -mode batch -nojournal -nolog -source release_builds.tcl -tclargs print posit16_8_ml
+```
+
+Nazwy po `-tclargs` (bez tego Vivado nie przekaże ich skryptowi); komendy `list`, `print`, `run`, `gen`, `build`
+jak w wersji bash; `-nogen` pomija sbt (RTL wygenerowany np. w WSL), `-sbt` / `-vivado "<komenda>"` gdy nie ma ich
+w PATH (Vivado szuka też w `%XILINX_VIVADO%\bin`), `-vivado_args "-jobs 4"`. Każda konfiguracja to osobny proces
+Vivado z własnym `out/<nazwa>/build.log`.
+
 | nazwa | extra | silniki | VecKv260 | dla kogo | stan |
 | --- | --- | --- | --- | --- | --- |
 | `posit32_16_8_mem` | `kv260` (domyślny) | 32 + 16 + 8 | gemv × 4 we wszystkich, tablice p16 / p8 | eksperymenty, porównania formatów, przykłady | sprawdzona (5.4); 5.6 zbudowana |
