@@ -102,6 +102,33 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
     dokładnie, zaokrąglone raz;
   - `pn.save(plik, x)` / `pn.load(plik)`: .npz z bitami oraz n i es (także `PositComplex`); `np.save` na posicie
     zgłasza błąd z podpowiedzią.
+- Szersze API NumPy (`positnp/npapi.py`, `PositComplex` w `positnp/fft.py`):
+  - redukcje (`sum`, `mean`, `max`, `min`, `prod`, `var`, `std`, `argmax`, `any`, `all`, `cumsum`): `axis` jako liczba,
+    ujemna albo krotka, `keepdims`, `out=` (zapis do podanej `PositArray`), `np.add.reduce` / `accumulate`,
+    `np.maximum.reduce`; nieobsługiwana opcja (`where=`, `initial=`, ...) zgłasza `TypeError`, nic nie jest cicho
+    pomijane; `sum` po osi dla wielu wierszy idzie jednym `matmul` z kolumną jedynek (na silniku z gemv: jedno
+    polecenie, te same bity co suma w quire wiersz po wierszu);
+  - funkcje kształtu na bitach: `flip`, `roll`, `rot90`, `tile`, `repeat`, `squeeze`, `expand_dims`, `swapaxes`,
+    `moveaxis`, `broadcast_to`, `diag`, `diagonal`, `triu`, `tril`, `take`, `delete`, `insert`, `append`, `pad` (tryby
+    constant / edge / reflect / symmetric / wrap), `split`, `hstack`, `vstack`, `column_stack`, `zeros_like`,
+    `ones_like`, `full_like`; `pn.ones`, `pn.full`, `pn.eye`, `pn.identity`, `pn.arange`, `pn.linspace`;
+  - wybór po wartościach: `unique`, `searchsorted`, `partition`, `nonzero`, `count_nonzero`, `argwhere`;
+  - dokładnie, jedno zaokrąglenie: `np.hypot`, `np.fmod`, `np.remainder` (`%`), `np.floor_divide`, `np.median`,
+    `np.percentile`, `np.quantile` (metody linear / lower / higher / nearest / midpoint, z dokładnych ułamków),
+    `np.average(weights=)`, `np.trace`, `np.diff`; `np.nansum`, `nanmean`, `nanmax`, `nanmin`, `nanvar`, `nanstd`
+    (NaR jako brak wartości); na bitach: `np.sign`, `signbit`, `copysign`, `isfinite`, `isinf`, `fmax`, `fmin`,
+    `logical_*`; `np.arctan2` przez float64 (jak funkcje posit32), `arctan2(0, 0)` = NaR (standard);
+  - `np.isclose` / `np.allclose` na dokładnych wartościach; `int(x)`, `bool(x)`, `x.tolist()`, `x.item()`, `x.nbytes`;
+    `np.asarray(x)` zgłasza błąd z podpowiedzią (`x.to_float()` albo `x.bits`) zamiast tablicy obiektów;
+  - `np.linalg.norm` z `ord` (None / 2, 1, inf, −inf, 0 dla wektorów; 'fro', 1, −1, inf, −inf dla macierzy) i `axis`,
+    `keepdims`; `ord=2` / 'nuc' dla macierzy wymaga SVD - `TypeError`;
+  - FFT: `norm=` ('backward', 'forward', 'ortho'; 1 / N dokładnym dzieleniem przez liczbę całkowitą, 1 / sqrt N
+    dokładnie, jedno zaokrąglenie), `np.fft.irfft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `fftshift`, `ifftshift`;
+    `np.fft.ifft(X)` na `PositComplex` (wcześniej działało tylko `pn.fft.ifft`);
+  - `PositComplex` jak tablica: `z[i]`, wycinki, przypisanie, `len`, `reshape`, `sum`, `mean`, `z ** n` (dokładna
+    potęga, każda część zaokrąglona raz), `A @ B` zespolone (Re = [Ar, Ai] @ [Br; −Bi] - jeden matmul o długości
+    2K, na gemv), `np.vdot`, `np.dot`, `np.angle`, `np.concatenate`, funkcje kształtu; `pn.array(liczby zespolone)`
+    i `x + 1j` dają `PositComplex`.
 - `pn.array(tablica float32)` i `x.to_float32()` / `x.astype(np.float32)` dla posit32 idą przez F2P / P2F backendu
   (bez rzutowania przez float64); dla innych formatów przez `vecops`.
 

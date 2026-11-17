@@ -66,8 +66,10 @@ def test_inverse_rfft_batch_and_numpy_dispatch():
     assert XT.real.T.equal_bits(XB.real)
     P = pn.fft.fft(r, n=128)                                         # zero padding like numpy
     assert np.allclose(P.to_complex(), np.fft.fft(r.to_float(), 128), atol=1e-6)
-    with pytest.raises(TypeError, match="norm"):
-        np.fft.fft(r, norm="ortho")
+    O = np.fft.fft(r, norm="ortho")                                  # norm= now supported
+    assert np.allclose(O.to_complex(), np.fft.fft(r.to_float(), norm="ortho"), atol=1e-6)
+    with pytest.raises(ValueError, match="norm"):
+        np.fft.fft(r, norm="bogus")
     with pytest.raises(ValueError, match="small prime"):
         pn.fft.fft(pn.array(np.ones(4099), c))                       # prime > EXACT_MAX
 
