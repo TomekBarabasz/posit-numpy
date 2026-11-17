@@ -1,0 +1,17 @@
+{
+    "overlay": "posit16_8_ml",
+    "engines": [
+        {"n": 16, "ip": "posit_vec_p16", "base": 2684354560, "size": 4096, "io": "master", "irq": 89, "udmabuf": "udmabuf-posit-p16", "buf_size": 100663296},
+        {"n": 8, "ip": "posit_vec_p8", "base": 2684358656, "size": 4096, "io": "master", "irq": 90, "udmabuf": "udmabuf-posit-p8", "buf_size": 100663296}
+    ],
+    "dma_max_bytes": 67108863,
+    "pl_clk0_hz": 100000000,
+    "vivado": "2026.1",
+    "part": "xck26-sfvc784-2LV-c",
+    "built": "2026-11-17 12:36",
+    "wns_ns": 1.530,
+    "lut": "71604",
+    "ff": "39368",
+    "dsp": "30",
+    "bram": "90"
+}

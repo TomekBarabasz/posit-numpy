@@ -1,0 +1,82 @@
+/*
+ * posit32_16_8_mem: PositVecAxi + AXI DMA na KV260 (posit<32,2>, posit<16,2>, posit<8,2>), wygenerowane przez
+ * hw/top-modules/vec/vivado/build.tcl (2026-11-17 23:53, Vivado 2026.1)
+ * Na plytce: dtc -@ -O dtb -o posit32_16_8_mem.dtbo posit32_16_8_mem.dtsi  (robi to sw/scripts/install_overlay.sh)
+ * Bufory DMA: modul u-dma-buf (sw/scripts/build_udmabuf.sh) -> /dev/udmabuf-posit-p<n>.
+ */
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	firmware-name = "posit32_16_8_mem.bit.bin";
+	resets = <&zynqmp_reset 116>;	/* pl_resetn0 */
+};
+
+&amba {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	/* szerokosci portow PS jak w block designie:
+	 *   <4 0>, <5 0>: S_AXI_HP0_FPD (AFIFM2) odczyt i zapis 128 b
+	 *   <14 0xa00>:   M_AXI_HPM0/HPM1_FPD 128 b */
+	afi0: afi0 {
+		compatible = "xlnx,afi-fpga";
+		config-afi = <4 0>, <5 0>, <14 0xa00>;
+	};
+
+	clocking0: clocking0 {
+		compatible = "xlnx,fclk";
+		#clock-cells = <0>;
+		clocks = <&zynqmp_clk 71>;	/* PL0_REF */
+		clock-output-names = "fabric_clk";
+		assigned-clocks = <&zynqmp_clk 71>;
+		assigned-clock-rates = <100000000>;
+	};
+
+	/* silnik posit<32,2>: rejestry (wlasny master AXI4), ciagly bufor (adresy 32 b) */
+	posit_vec_p32: posit_vec_p32@a0001000 {
+		compatible = "generic-uio";
+		reg = <0x0 0xa0001000 0x0 0x1000>;
+		clocks = <&clocking0>;
+		interrupt-parent = <&gic>;
+		interrupts = <0 89 4>;	/* pl_ps_irq0, poziom wysoki */
+	};
+
+	posit_buf_p32: posit_buf_p32 {
+		compatible = "ikwzm,u-dma-buf";
+		device-name = "udmabuf-posit-p32";
+		size = <0x4000000>;
+	};
+
+	/* silnik posit<16,2>: rejestry (wlasny master AXI4), ciagly bufor (adresy 32 b) */
+	posit_vec_p16: posit_vec_p16@a0000000 {
+		compatible = "generic-uio";
+		reg = <0x0 0xa0000000 0x0 0x1000>;
+		clocks = <&clocking0>;
+		interrupt-parent = <&gic>;
+		interrupts = <0 90 4>;	/* pl_ps_irq0, poziom wysoki */
+	};
+
+	posit_buf_p16: posit_buf_p16 {
+		compatible = "ikwzm,u-dma-buf";
+		device-name = "udmabuf-posit-p16";
+		size = <0x4000000>;
+	};
+
+	/* silnik posit<8,2>: rejestry (wlasny master AXI4), ciagly bufor (adresy 32 b) */
+	posit_vec_p8: posit_vec_p8@a0002000 {
+		compatible = "generic-uio";
+		reg = <0x0 0xa0002000 0x0 0x1000>;
+		clocks = <&clocking0>;
+		interrupt-parent = <&gic>;
+		interrupts = <0 91 4>;	/* pl_ps_irq0, poziom wysoki */
+	};
+
+	posit_buf_p8: posit_buf_p8 {
+		compatible = "ikwzm,u-dma-buf";
+		device-name = "udmabuf-posit-p8";
+		size = <0x4000000>;
+	};
+};

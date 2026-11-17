@@ -1,0 +1,17 @@
+{
+    "overlay": "posit32_16_linalg",
+    "engines": [
+        {"n": 32, "ip": "posit_vec_p32", "base": 2684358656, "size": 4096, "io": "master", "irq": 89, "udmabuf": "udmabuf-posit-p32", "buf_size": 100663296},
+        {"n": 16, "ip": "posit_vec_p16", "base": 2684354560, "size": 4096, "io": "master", "irq": 90, "udmabuf": "udmabuf-posit-p16", "buf_size": 100663296}
+    ],
+    "dma_max_bytes": 67108863,
+    "pl_clk0_hz": 100000000,
+    "vivado": "2026.1",
+    "part": "xck26-sfvc784-2LV-c",
+    "built": "2026-11-17 23:05",
+    "wns_ns": 0.286,
+    "lut": "99739",
+    "ff": "55772",
+    "dsp": "93",
+    "bram": "19.5"
+}
