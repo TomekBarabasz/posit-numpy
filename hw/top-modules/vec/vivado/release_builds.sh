@@ -23,11 +23,11 @@ VIVADO_ARGS=${VIVADO_ARGS:-}
 
 # nazwa | extra | argumenty VecKv260 | -engines | -buf_mb | stan
 CONFIGS=(
-  "posit32_16_8_mem|kv260|32:2:4:4:2 16:2:4:2:4 8:2:4:1:8|32 16 8|64|sprawdzona (5.4); przebudowa na 5.6"
-  "posit32_16_8_dsp|kv260-dsp|--fft 6:32 --gemv-cols 32=2,16=2,8=0 32:2:4:4:2 16:2:4:2:4 8:2:4:1:8|32 16 8|64|sprawdzona (5.6)"
-  "posit16_8_ml|kv260-ml|--gemv-cols 16=8,8=8 16:2:4:2:4 8:2:4:1:8|16 8|96|nowa"
-  "posit32_16_linalg|kv260-linalg|--gemv-cols 32=8,16=4 --table-copies 0 32:2:4:4:2 16:2:4:2:4|32 16|96|nowa"
-  "posit32_16_dsp|(kv260-dsp v2)|--fft 6 --gemv-cols 2 32:2:4:4:2 16:2:4:2:4|32 16|96|eksperyment: FFT tez w posit16"
+  "posit32_16_8_mem|kv260|32:2:4:4:2 16:2:4:2:4 8:2:4:1:8|32 16 8|64|sprawdzona (5.4); 5.6 zbudowana 2026-11-17 (19 min)"
+  "posit32_16_8_dsp|kv260-dsp|--fft 6:32 --gemv-cols 32=2,16=2,8=0 32:2:4:4:2 16:2:4:2:4 8:2:4:1:8|32 16 8|64|sprawdzona (5.6); zbudowana 2026-11-17 (549 min)"
+  "posit16_8_ml|kv260-ml|--gemv-cols 16=8,8=8 16:2:4:2:4 8:2:4:1:8|16 8|96|zbudowana 2026-11-17 (13 min), do sprawdzenia na plytce"
+  "posit32_16_linalg|kv260-linalg|--gemv-cols 32=8,16=4 --table-copies 0 32:2:4:4:2 16:2:4:2:4|32 16|96|zbudowana 2026-11-17 (36 min), do sprawdzenia na plytce"
+  "posit32_16_dsp|(kv260-dsp v2)|--fft 6 --gemv-cols 2 32:2:4:4:2 16:2:4:2:4|32 16|96|eksperyment: FFT tez w posit16; zbudowany 2026-11-17 (22 min)"
 )
 
 field() { echo "$1" | cut -d'|' -f"$2"; }

@@ -692,11 +692,16 @@ z tymi samymi bitami), różnią się tym, co liczą szybko. Konfiguracje i kome
 
 | nazwa | extra | silniki | VecKv260 | dla kogo | stan |
 | --- | --- | --- | --- | --- | --- |
-| `posit32_16_8_mem` | `kv260` (domyślny) | 32 + 16 + 8 | gemv × 4 we wszystkich, tablice p16 / p8 | eksperymenty, porównania formatów, przykłady | sprawdzona (5.4) |
-| `posit32_16_8_dsp` | `kv260-dsp` | 32 + 16 + 8 | `--fft 6:32 --gemv-cols 32=2,16=2,8=0` | FFT, FIR, korelacja | sprawdzona (5.6) |
-| `posit16_8_ml` | `kv260-ml` | 16 + 8 | `--gemv-cols 16=8,8=8` | sieci w 8 / 16 bitach: gemm, sigmoid / tanh / exp z tablic | nowa |
-| `posit32_16_linalg` | `kv260-linalg` | 32 + 16 | `--gemv-cols 32=8,16=4 --table-copies 0` | układy równań, mieszana precyzja | nowa |
-| `posit32_16_dsp` | (`kv260-dsp` v2) | 32 + 16 | `--fft 6 --gemv-cols 2` | FFT także w posit16 (porównania z float16) | eksperyment |
+| `posit32_16_8_mem` | `kv260` (domyślny) | 32 + 16 + 8 | gemv × 4 we wszystkich, tablice p16 / p8 | eksperymenty, porównania formatów, przykłady | sprawdzona (5.4); 5.6 zbudowana |
+| `posit32_16_8_dsp` | `kv260-dsp` | 32 + 16 + 8 | `--fft 6:32 --gemv-cols 32=2,16=2,8=0` | FFT, FIR, korelacja | sprawdzona (5.6); przebudowana |
+| `posit16_8_ml` | `kv260-ml` | 16 + 8 | `--gemv-cols 16=8,8=8` | sieci w 8 / 16 bitach: gemm, sigmoid / tanh / exp z tablic | zbudowana, do sprawdzenia na płytce |
+| `posit32_16_linalg` | `kv260-linalg` | 32 + 16 | `--gemv-cols 32=8,16=4 --table-copies 0` | układy równań, mieszana precyzja | zbudowana, do sprawdzenia na płytce |
+| `posit32_16_dsp` | (`kv260-dsp` v2) | 32 + 16 | `--fft 6 --gemv-cols 2` | FFT także w posit16 (porównania z float16) | eksperyment, zbudowany |
+
+Pierwszy pełny przebieg `release_builds.sh run` (2026-11-17, 642 min): wszystkie pięć z WNS ≥ 0 —
+`posit16_8_ml` 13 min, `posit32_16_8_mem` 19 min, `posit32_16_dsp` 22 min, `posit32_16_linalg` 36 min,
+`posit32_16_8_dsp` 549 min (placer z rdzeniem FFT i gemv × 2 przy prawie pełnym układzie). Wyniki są w gicie
+(`sw/positnp/overlays/<nazwa>/`); pakiety PyPI robi z nich `sw/packaging/make_overlay_packages.py`.
 
 Silniki zawsze `32:2:4:4:2`, `16:2:4:2:4`, `8:2:4:1:8` (jak w sprawdzonych bitstreamach). Dwa silniki: `-buf_mb 96`
 (razem 192 MB CMA, tyle co trzy po 64). Elaboracja wszystkich pięciu przechodzi (2026-11-17); sterownik z gemv
