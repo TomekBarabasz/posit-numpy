@@ -62,7 +62,8 @@ proc vivado_cmd {c {soft 0}} {
     set n [dict get $c name]
     return [concat [tool vivado $::opt(vivado) $soft] \
         [list -mode batch -nojournal -log [file join out $n build.log] -source build.tcl -tclargs \
-              -engines [dict get $c engines] -name $n -buf_mb [dict get $c buf] -out [file join out $n]] \
+              -engines [dict get $c engines] -name $n -buf_mb [dict get $c buf] -out [file join out $n] \
+              -rtl [dict get $c vargs]] \
         $::opt(vivado_args)]
 }
 
@@ -84,7 +85,17 @@ proc run_in {dir cmd} {
 proc gen {name} {
     set c [find_cfg $name]
     puts ">> gen $name"
-    return [run_in $::hw [sbt_cmd $c]]
+    set t0 [clock seconds]
+    after 1100
+    if {![run_in $::hw [sbt_cmd $c]]} { return 0 }
+    foreach n [dict get $c engines] {                  ;# RTL kazdego silnika musi byc swiezo zapisany
+        set v [file join $::here .. hw gen p$n PositVecAxi_p$n.v]
+        if {![file exists $v] || [file mtime $v] < $t0} {
+            puts stderr "gen $name: sbt nie zapisal hw/gen/p$n/PositVecAxi_p$n.v - Vivado zbudowaloby stary RTL"
+            return 0
+        }
+    }
+    return 1
 }
 
 proc build {name} {

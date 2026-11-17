@@ -35,6 +35,7 @@
 #    -threads <n>        watki Vivado na przebieg (general.maxThreads)  (8)
 #    -fan 0|1            wentylator KV260: PWM z TTC0 (EMIO) na pin fan_en_b, sterowanie z Linuksa  (1)
 #    -stop ip|bd         zatrzymaj po spakowaniu IP albo po block designie
+#    -rtl "<argumenty>"   argumenty VecKv260, z ktorych jest RTL: tylko zapis w <nazwa>.json (release_builds)
 #
 #  Wynik: <deploy>/<nazwa>/ (.bit.bin, .dtsi, shell.json, .json z lista silnikow); na plytce
 #  sw/scripts/install_overlay.sh <nazwa>. WNS < 0 -> blad, nic nie jest kopiowane.
@@ -58,6 +59,7 @@ array set opt [list \
     jobs    8 \
     threads 8 \
     stop    "" \
+    rtl     "" \
 ]
 
 proc usage {} {
@@ -67,7 +69,7 @@ proc usage {} {
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
-        -n - -fan - -engines - -io - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
+        -n - -fan - -engines - -io - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop - -rtl {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([expr {$a eq "-n" ? "engines" : [string range $a 1 end]}]) [lindex $argv $i]
@@ -340,6 +342,7 @@ posit_overlay::write_json [file join $app $name.json] $name $engines $pl0_hz [ex
     part   [$q $opt(part)] \
     built  [$q [clock format [clock seconds] -format {%Y-%m-%d %H:%M}]] \
     wns_ns $wns \
+    rtl    [$q $opt(rtl)] \
     lut    [$q [util_field $util {CLB LUTs\*?}]] \
     ff     [$q [util_field $util {CLB Registers}]] \
     dsp    [$q [util_field $util {DSPs}]] \

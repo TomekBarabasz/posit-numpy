@@ -39,10 +39,22 @@ sbt_cmd()    { echo "cd $hw && $SBT \"top-vec/runMain posit.top.vec.VecKv260 $(f
 vivado_cmd() {
     local n; n=$(field "$1" 1)
     echo "cd $here && mkdir -p out/$n && $VIVADO -mode batch -nojournal -log out/$n/build.log -source build.tcl" \
-         "-tclargs -engines \"$(field "$1" 4)\" -name $n -buf_mb $(field "$1" 5) -out out/$n $VIVADO_ARGS"
+         "-tclargs -engines \"$(field "$1" 4)\" -name $n -buf_mb $(field "$1" 5) -out out/$n" \
+         "-rtl \"$(field "$1" 3)\" $VIVADO_ARGS"
 }
 
-gen()   { local c; c=$(find_cfg "$1") || return 1; echo ">> gen $1";   bash -c "$(sbt_cmd "$c")" < /dev/null; }
+gen() {
+    local c n stamp; c=$(find_cfg "$1") || return 1; echo ">> gen $1"
+    stamp=$(mktemp); sleep 1
+    bash -c "$(sbt_cmd "$c")" < /dev/null || { rm -f "$stamp"; return 1; }
+    for n in $(field "$c" 4); do                 # RTL kazdego silnika musi byc swiezo zapisany
+        if [[ ! "$here/../hw/gen/p$n/PositVecAxi_p$n.v" -nt "$stamp" ]]; then
+            echo "gen $1: sbt nie zapisal hw/gen/p$n/PositVecAxi_p$n.v - Vivado zbudowaloby stary RTL" >&2
+            rm -f "$stamp"; return 1
+        fi
+    done
+    rm -f "$stamp"
+}
 build() { local c; c=$(find_cfg "$1") || return 1; echo ">> build $1"; bash -c "$(vivado_cmd "$c")"; }
 
 cmd=${1:-list}; shift || true
