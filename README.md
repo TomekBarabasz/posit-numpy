@@ -4,6 +4,8 @@ A NumPy-style library for [posit](https://posithub.org/docs/posit_standard-2.pdf
 Kria KV260: posit arrays are computed by programmable logic (PL) generated in SpinalHDL and driven from Python
 running on the processing system (Ubuntu with `xmutil`, registers through UIO; no PYNQ).
 Plan: [posit-numpy on the KV260: architecture and implementation plan](https://claude.ai/artifact/JtAzXExTzWmnyTq6d8kmym).
+How the KV260 integration works (PS ↔ PL, registers, AXI, DMA, the engine's own master, buffers), written for
+learning (in Polish): [doc/kv260/](doc/kv260/README.md).
 
 **No board? No problem.** The Python package `positnp` has a software backend that is bit-exact with the
 hardware, so everything runs on an ordinary PC:
