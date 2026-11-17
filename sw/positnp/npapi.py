@@ -622,6 +622,99 @@ def _norm(x, ord=None, axis=None, keepdims=False):
                     "-inf; 2 and 'nuc' need an SVD)")
 
 
+# ---- contractions: outer, tensordot, einsum (exact sums of products through matmul) --------------------------
+
+def _outer(a, b, out=None):
+    x, y = A._unify(a, b)
+    return A._to_out(x.ravel().reshape(-1, 1) * y.ravel().reshape(1, -1), out)
+
+
+def _tensordot(a, b, axes=2):
+    """Contraction over the given axes as one matmul: every element the exact sum of products, rounded once."""
+    x, y = A._unify(a, b)
+    if np.ndim(axes) == 0:
+        k = int(axes)
+        ax_a, ax_b = list(range(x.ndim - k, x.ndim)), list(range(k))
+    else:
+        ax_a, ax_b = axes
+        ax_a = [int(ax_a)] if np.ndim(ax_a) == 0 else [int(i) for i in ax_a]
+        ax_b = [int(ax_b)] if np.ndim(ax_b) == 0 else [int(i) for i in ax_b]
+    ax_a, ax_b = [i % x.ndim for i in ax_a], [i % y.ndim for i in ax_b]
+    if [x.shape[i] for i in ax_a] != [y.shape[i] for i in ax_b]:
+        raise ValueError("tensordot: shape mismatch for the summed axes")
+    fa = [i for i in range(x.ndim) if i not in ax_a]
+    fb = [i for i in range(y.ndim) if i not in ax_b]
+    K = int(np.prod([x.shape[i] for i in ax_a], dtype=np.int64))
+    X2 = PositArray(np.transpose(x.bits, fa + ax_a).reshape(-1, K), x.config)
+    Y2 = PositArray(np.transpose(y.bits, ax_b + fb).reshape(K, -1), x.config)
+    return (X2 @ Y2).reshape([x.shape[i] for i in fa] + [y.shape[i] for i in fb])
+
+
+def _einsum(subscripts, *operands, out=None, optimize=False, **kw):
+    """np.einsum for one or two operands (more: pairwise from the left, the intermediates rounded): a pair is
+    contracted as a (batched) matmul, so each output element is the exact sum of products rounded once.
+    Indices repeated inside one operand take its diagonal; an index only one operand has and the output lacks
+    is summed exactly first. No '...' (ellipsis)."""
+    _no("np.einsum", dtype=kw.pop("dtype", None), casting=kw.pop("casting", None), order=kw.pop("order", None))
+    if kw:
+        raise TypeError(f"np.einsum on posit arrays: {', '.join(kw)} not supported")
+    if not isinstance(subscripts, str) or "." in subscripts:
+        raise TypeError("np.einsum on posit arrays: a subscripts string without '...'")
+    spec = subscripts.replace(" ", "")
+    lhs, arrow, rhs = spec.partition("->")
+    ins = lhs.split(",")
+    if len(ins) != len(operands):
+        raise ValueError("einsum: as many subscripts as operands")
+    if not arrow:
+        letters = "".join(ins)
+        rhs = "".join(sorted(l for l in set(letters) if letters.count(l) == 1))
+    ops = A._unify(*operands)
+    size = {}
+    for x, ix in zip(ops, ins):
+        if len(ix) != x.ndim:
+            raise ValueError(f"einsum: {ix!r} for an operand of {x.ndim} dimensions")
+        for l, n in zip(ix, x.shape):
+            if size.setdefault(l, n) != n:
+                raise ValueError(f"einsum: index {l!r} of sizes {size[l]} and {n}")
+    terms = [(x, ix) for x, ix in zip(ops, ins)]
+
+    def tidy(x, ix, keep):
+        for l in set(ix):                                         # repeated index: the diagonal
+            while ix.count(l) > 1:
+                i = ix.index(l)
+                j = ix.index(l, i + 1)
+                x = PositArray(np.diagonal(x.bits, axis1=i, axis2=j), x.config)
+                ix = ix[:i] + ix[i + 1:j] + ix[j + 1:] + l
+        drop = [i for i, l in enumerate(ix) if l not in keep]
+        if drop:
+            x = x.sum(axis=tuple(drop))
+            ix = "".join(l for l in ix if l in keep)
+        return x, ix
+
+    for t in range(len(terms)):
+        others = rhs + "".join(ix for k, (_, ix) in enumerate(terms) if k != t)
+        terms[t] = tidy(*terms[t], others)
+    while len(terms) > 1:
+        (x, ix), (y, iy) = terms[0], terms[1]
+        later = rhs + "".join(i for _, i in terms[2:])
+        shared = [l for l in ix if l in iy]
+        batch = [l for l in shared if l in later]
+        con = [l for l in shared if l not in later]
+        fa = [l for l in ix if l not in shared]
+        fb = [l for l in iy if l not in shared]
+        dims = lambda ls: [size[l] for l in ls]                    # noqa: E731
+        Bn, FA, FB, K = (int(np.prod(dims(ls), dtype=np.int64)) for ls in (batch, fa, fb, con))
+        X = PositArray(np.transpose(x.bits, [ix.index(l) for l in batch + fa + con]).reshape(Bn, FA, K), x.config)
+        Y = PositArray(np.transpose(y.bits, [iy.index(l) for l in batch + con + fb]).reshape(Bn, K, FB), x.config)
+        R = (X @ Y).reshape(dims(batch + fa + fb))
+        terms = [(R, "".join(batch + fa + fb))] + terms[2:]
+    x, ix = tidy(*terms[0], rhs)
+    if sorted(ix) != sorted(rhs):
+        raise ValueError(f"einsum: output {rhs!r} not reachable from {subscripts!r}")
+    r = PositArray(np.transpose(x.bits, [ix.index(l) for l in rhs]), x.config) if rhs else x
+    return A._to_out(r, out)
+
+
 # ---- constructors ------------------------------------------------------------------------------------------------
 
 def full(shape, fill_value, config: PositConfig = P32) -> PositArray:
@@ -705,6 +798,7 @@ FUNCTIONS = {
     np.real: _real, np.imag: _imag, np.angle: lambda z, deg=False: _angle_real(z, deg),
     np.iscomplexobj: lambda x: False, np.isrealobj: lambda x: True,
     np.linalg.norm: _norm,
+    np.outer: _outer, np.tensordot: _tensordot, np.einsum: _einsum,
 }
 
 
@@ -720,6 +814,12 @@ from . import fft as _F                                         # noqa: E402
 for _f, _g in {np.fft.fft: _F.fft, np.fft.ifft: _F.ifft, np.fft.rfft: _F.rfft, np.fft.irfft: _F.irfft,
                np.fft.fft2: _F.fft2, np.fft.ifft2: _F.ifft2, np.fft.fftn: _F.fftn, np.fft.ifftn: _F.ifftn,
                np.fft.fftshift: _F.fftshift, np.fft.ifftshift: _F.ifftshift}.items():
+    A._FUNCTIONS[_f] = _g
+from . import linalg as _L                                      # noqa: E402
+
+for _f, _g in {np.linalg.solve: _L.solve, np.linalg.inv: _L.inv, np.linalg.det: _L.det,
+               np.linalg.slogdet: _L.slogdet, np.linalg.cholesky: _L.cholesky,
+               np.linalg.lstsq: _L.lstsq}.items():
     A._FUNCTIONS[_f] = _g
 for _alias, _src in (("amax", np.max), ("amin", np.min)):
     if hasattr(np, _alias):

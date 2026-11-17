@@ -260,6 +260,9 @@ def convolve(a, v, mode: str = "full") -> "PositArray":
 
     On a 5.4 KV260 engine: FIR through GEMV with a window over the signal (signal read once, P outputs
     per pass); elsewhere PositSw."""
+    if _is_complex(a) or _is_complex(v):
+        from . import fft as _F
+        return _F.convolve(a, v, mode)
     A, V = _conv_args(a, v)
     n, t = max(A.size, V.size), min(A.size, V.size)
     lo, ln = {"full": (0, n + t - 1), "same": ((t - 1) // 2, n), "valid": (t - 1, n - t + 1)}[_mode(mode)]
@@ -268,6 +271,9 @@ def convolve(a, v, mode: str = "full") -> "PositArray":
 
 def correlate(a, v, mode: str = "valid") -> "PositArray":
     """np.correlate on posits (real): c[k] = sum_n a[n + k] v[n], exact in the quire, rounded once."""
+    if _is_complex(a) or _is_complex(v):
+        from . import fft as _F
+        return _F.correlate(a, v, mode)
     A, V = _conv_args(a, v)
     n, t = max(A.size, V.size), min(A.size, V.size)
     same_lo = (t - 1) // 2 if A.size >= V.size else (t - 1) - (t - 1) // 2

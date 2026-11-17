@@ -815,6 +815,8 @@ _COMPLEX_FUNCTIONS = {
     np.shape: lambda z: z.shape, np.ndim: lambda z: z.ndim, np.size: lambda z, axis=None: z.size if axis is None
     else z.shape[axis],
     np.dot: _cdot, np.vdot: _vdot, np.inner: _cdot,
+    np.convolve: lambda a, v, mode="full": convolve(a, v, mode),
+    np.correlate: lambda a, v, mode="valid": correlate(a, v, mode),
     np.iscomplexobj: lambda x: True, np.isrealobj: lambda x: False,
     np.save: _np_save_complex,
     np.isclose: lambda a, b, rtol=1e-05, atol=1e-08, equal_nan=False: np.isclose(
@@ -822,6 +824,73 @@ _COMPLEX_FUNCTIONS = {
     np.allclose: lambda a, b, rtol=1e-05, atol=1e-08, equal_nan=False: bool(np.allclose(
         _cfloat(a), _cfloat(b), rtol=rtol, atol=atol, equal_nan=equal_nan)),
 }
+
+
+def _conv_full(a, v) -> PositComplex:
+    """Full complex convolution, each part of each output the exact sum of products rounded once.
+
+    Complex by complex: the parts interleaved, x2 = [ar0, ai0, ar1, ai1, ...]; with h_re[2k+1] = vr[k],
+    h_re[2k] = -vi[k] the real convolution gives y[2n+1] = sum ar[n-k] vr[k] - ai[n-k] vi[k] = Re[n] (and
+    h_im[2k+1] = vi[k], h_im[2k] = vr[k] gives Im[n]): two real convolutions of twice the length, on the
+    engine's FIR (gemv with a window) where there is one. A real operand: two plain convolutions."""
+    A = _arr()
+    ca, cv = A._is_complex(a), A._is_complex(v)
+    ar, ai = _as_complex(a, None) if ca else (a if isinstance(a, A.PositArray) else A.array(a), None)
+    vr, vi = _as_complex(v, None) if cv else (v if isinstance(v, A.PositArray) else A.array(v), None)
+    parts = [p for p in (ar, ai, vr, vi) if p is not None]
+    parts = A._unify(*parts)
+    ar, ai, vr, vi = (parts.pop(0) if p is not None else None for p in (ar, ai, vr, vi))
+    if ar.ndim != 1 or vr.ndim != 1 or not ar.size or not vr.size:
+        raise ValueError("convolve: non-empty 1-D arrays")
+    if vi is None:
+        return PositComplex(A.convolve(ar, vr), A.convolve(ai, vr) if ai is not None else A.zeros(ar.size + vr.size - 1, ar.config))
+    if ai is None:
+        return PositComplex(A.convolve(ar, vr), A.convolve(ar, vi))
+    c = ar.config
+    x2 = np.empty(2 * ar.size, np.int64)
+    x2[0::2], x2[1::2] = ar.bits, ai.bits
+    hr = np.empty(2 * vr.size, np.int64)
+    hr[1::2], hr[0::2] = vr.bits, vecops.neg(c, vi.bits)
+    hi = np.empty(2 * vr.size, np.int64)
+    hi[1::2], hi[0::2] = vi.bits, vr.bits
+    X2 = A.PositArray(x2, c)
+    re = A.convolve(X2, A.PositArray(hr, c))
+    im = A.convolve(X2, A.PositArray(hi, c))
+    return PositComplex(A.PositArray(re.bits[1::2], c), A.PositArray(im.bits[1::2], c))
+
+
+def _cslice(z: PositComplex, lo: int, ln: int) -> PositComplex:
+    return PositComplex(z.real[lo:lo + ln], z.imag[lo:lo + ln])
+
+
+def convolve(a, v, mode: str = "full") -> PositComplex:
+    """np.convolve with complex operands (see _conv_full); modes like NumPy."""
+    A = _arr()
+    z = _conv_full(a, v)
+    n, t = sorted((_len(a), _len(v)), reverse=True)
+    lo, ln = {"full": (0, n + t - 1), "same": ((t - 1) // 2, n), "valid": (t - 1, n - t + 1)}[A._mode(mode)]
+    return _cslice(z, lo, ln)
+
+
+def correlate(a, v, mode: str = "valid") -> PositComplex:
+    """np.correlate with complex operands: c[k] = sum_n a[n + k] conj(v[n]), exact per part, rounded once."""
+    A = _arr()
+    if A._is_complex(v):
+        vr, vi = _as_complex(v, None)
+        vc = PositComplex(A.PositArray(vr.bits[::-1].copy(), vr.config), -A.PositArray(vi.bits[::-1].copy(), vi.config))
+    else:
+        vv = v if isinstance(v, A.PositArray) else A.array(v)
+        vc = A.PositArray(vv.bits[::-1].copy(), vv.config)
+    z = _conv_full(a, vc)
+    na, nv = _len(a), _len(v)
+    n, t = max(na, nv), min(na, nv)
+    same_lo = (t - 1) // 2 if na >= nv else (t - 1) - (t - 1) // 2
+    lo, ln = {"full": (0, n + t - 1), "same": (same_lo, n), "valid": (t - 1, n - t + 1)}[A._mode(mode)]
+    return _cslice(z, lo, ln)
+
+
+def _len(x) -> int:
+    return x.shape[0] if hasattr(x, "shape") else len(x)
 
 
 def _cfloat(x):
