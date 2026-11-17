@@ -47,7 +47,27 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
 - `xmutil` wymaga roota: Python przez `sudo` albo reguła sudoers dla `xmutil` (`pn.board` woła `sudo -n`), np.
   `/etc/sudoers.d/positnp`: `<user> ALL=(root) NOPASSWD: /usr/bin/xmutil, /usr/sbin/modprobe u-dma-buf`,
   plus reguła udev dająca dostęp do `/dev/uio*` i `/dev/udmabuf-*`.
-- Aplikacje instaluje `scripts/install_overlay.sh <nazwa>` (kopiuje też `<nazwa>.json`, z którego `pn.board` zna silniki).
+- Aplikacje instaluje `pn.board.install(nazwa)` / `positnp-board install <nazwa>` (dtc `.dtsi` → `.dtbo`, kopia
+  `.bit.bin`, `shell.json` i `<nazwa>.json` do `/lib/firmware/xilinx/<nazwa>/` przez `sudo -n`, restart dfx-mgr, gdy
+  nie widzi nowej aplikacji). Źródła: pakiety z bitstreamami (extras, entry point `positnp.overlays`),
+  `positnp/overlays/<nazwa>/` w repozytorium, katalogi z `$POSITNP_OVERLAYS`; `pn.board.available()` je wylicza.
+  Z repozytorium działa też dalej `scripts/install_overlay.sh <nazwa>`.
+- Moduł u-dma-buf: `positnp-board udmabuf` (albo `pn.board.setup_udmabuf()`, skrypt `positnp/_data/build_udmabuf.sh`
+  w pakiecie; `scripts/build_udmabuf.sh` go woła), raz na jądro.
+
+## Pakiet PyPI
+
+- `pip install positnp` - biblioteka (backend programowy na każdym PC, sterownik KV260); `positnp-board` - komenda.
+  Wersja w jednym miejscu: `positnp/__init__.py` (`pyproject.toml` czyta ją dynamicznie); README pakietu:
+  `README.pypi.md` (po angielsku).
+- Bitstreamy nie są w głównym wheelu: każda aplikacja to osobny pakiet, który dociąga extra:
+  `positnp[kv260]` → `positnp-kv260` (`posit32_16_8_mem`), `[kv260-dsp]` → `positnp-kv260-dsp` (`posit32_16_8_dsp`),
+  `[kv260-ml]` → `positnp-kv260-ml` (`posit16_8_ml`), `[kv260-linalg]` → `positnp-kv260-linalg` (`posit32_16_linalg`).
+- Wydanie: (1) `hw/top-modules/vec/vivado/release_builds.sh run` → `positnp/overlays/<nazwa>/`; (2)
+  `python3 packaging/make_overlay_packages.py --wheel` → `packaging/build/<pakiet>/` i wheele w `packaging/build/dist/`;
+  (3) `pip wheel --no-deps -w dist .` dla `positnp`; (4) `twine upload` wszystkich wheeli (najpierw TestPyPI).
+  Budowa wymaga setuptools ≥ 77 (licencja w formacie SPDX); systemowy setuptools Debiana nie zbuduje wheela -
+  `pip wheel` z izolacją pobiera właściwy sam.
 
 - Własna klasa, nie podklasa `ndarray`: nic nie przechodzi po cichu do arytmetyki na liczbach całkowitych;
   nieobsługiwane funkcje NumPy rzucają `TypeError` (`np.sin`, `np.exp`: etap 7).

@@ -158,7 +158,7 @@ def test_other_backends_survive(kv):
 
 def test_errors(kv):
     fake, board = kv
-    with pytest.raises(BoardError, match="not installed.*install_overlay.sh"):
+    with pytest.raises(BoardError, match="not installed.*pip install positnp"):
         pn.board.load("posit99_vec")
     fake.appear = False
     with pytest.raises(BoardError, match="no device posit_vec_p32"):

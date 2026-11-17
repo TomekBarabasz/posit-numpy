@@ -29,6 +29,10 @@ np.var(x), x ** 3, np.cumsum(x)           # exact, rounded once
 np.linalg.solve(A, pn.array(np.ones(64)))  # LU from the quire, refined with a quire residual
 ```
 
+**On the KV260 from PyPI** (once published): `pip install "positnp[kv260-dsp]"` (or `kv260`, `kv260-ml`,
+`kv260-linalg` - one bitstream per workload), `positnp-board udmabuf`, `sudo positnp-board install posit32_16_8_dsp`,
+then `pn.board.load("posit32_16_8_dsp")` - see [`sw/README.pypi.md`](sw/README.pypi.md).
+
 **Start with the examples:** [`sw/examples/README.md`](sw/examples/README.md) - a guided tour from `+ - * /` to
 gemm, FIR and FFT, plus problems where posits beat floats of the same width. All of them run on a PC; with
 `--hw` they run on the KV260.
