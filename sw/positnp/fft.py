@@ -44,9 +44,11 @@ def _arr():
 EXACT_MAX = 2048      # direct DFT: K = 2N must fit the engine's x buffer (gemv_max_k = 4096)
 
 
-@dataclass
+@dataclass(eq=False)
 class PositComplex:
-    """A complex posit array: real and imaginary parts, both PositArray of the same shape and format."""
+    """A complex posit array: real and imaginary parts, both PositArray of the same shape and format.
+
+    re, im = z unpacks the parts (iteration gives the two parts, not the elements: use z[i] for those)."""
     real: "object"
     imag: "object"
 
@@ -56,6 +58,100 @@ class PositComplex:
     @property
     def shape(self):
         return self.real.shape
+
+    @property
+    def ndim(self) -> int:
+        return self.real.ndim
+
+    @property
+    def size(self) -> int:
+        return self.real.size
+
+    def __len__(self) -> int:
+        return len(self.real)
+
+    def __getitem__(self, idx) -> "PositComplex":
+        return PositComplex(self.real[idx], self.imag[idx])
+
+    def __setitem__(self, idx, value) -> None:
+        if isinstance(value, PositComplex):
+            self.real[idx], self.imag[idx] = value.real, value.imag
+        elif not isinstance(value, _arr().PositArray) and np.iscomplexobj(value):
+            v = np.asarray(value)
+            self.real[idx], self.imag[idx] = v.real, v.imag
+        else:
+            self.real[idx], self.imag[idx] = value, 0
+
+    def _both(self, f) -> "PositComplex":
+        return PositComplex(f(self.real), f(self.imag))
+
+    def copy(self) -> "PositComplex":
+        return self._both(lambda p: p.copy())
+
+    def reshape(self, *shape, order: str = "C") -> "PositComplex":
+        return self._both(lambda p: p.reshape(*shape, order=order))
+
+    def ravel(self, order: str = "C") -> "PositComplex":
+        return self._both(lambda p: p.ravel(order=order))
+
+    flatten = ravel
+
+    @property
+    def T(self) -> "PositComplex":
+        return self._both(lambda p: p.T)
+
+    def astype(self, dtype):
+        """Another posit format (pn.P16, ...) or np.complex64 / np.complex128."""
+        if isinstance(dtype, PositConfig):
+            return self._both(lambda p: p.astype(dtype))
+        return self.to_complex().astype(dtype)
+
+    def tolist(self):
+        return self.to_complex().tolist()
+
+    def sum(self, axis=None, keepdims: bool = False) -> "PositComplex":
+        """Exact sums of the parts, each rounded once."""
+        return self._both(lambda p: p.sum(axis=axis, keepdims=keepdims))
+
+    def mean(self, axis=None, keepdims: bool = False) -> "PositComplex":
+        return self._both(lambda p: p.mean(axis=axis, keepdims=keepdims))
+
+    def __eq__(self, o):
+        sr, si, orr, oi = self._with(o)
+        return (sr == orr) & (si == (oi if oi is not None else 0))
+
+    def __ne__(self, o):
+        return ~(self == o)
+
+    def __repr__(self) -> str:
+        return f"PositComplex({self.real!r}, {self.imag!r})"
+
+    def __pow__(self, n):
+        """z ** n for an integer n: the exact Gaussian power, each part rounded once (n < 0: of 1 / z**|n|)."""
+        if isinstance(n, (bool, np.bool_)) or np.ndim(n) != 0 or float(n) != int(n):
+            raise TypeError("PositComplex ** n: an integer n only")
+        n = int(n)
+        if n == 1:
+            return self.copy()
+        if n == 2:
+            return self * self
+        return _cpow(self, n)
+
+    def __matmul__(self, o):
+        """Complex matrix product with one rounding per part: Re = [Ar, Ai] @ [Br; -Bi], Im = [Ar, Ai] @ [Bi; Br],
+        each an exact dot of length 2K (a single matmul, on the engine's gemv where there is one)."""
+        sr, si, orr, oi = self._with(o)
+        A = _arr()
+        if oi is None:
+            return PositComplex(sr @ orr, si @ orr)
+        return _cmatmul(A, sr, si, orr, oi)
+
+    def __rmatmul__(self, o):
+        A = _arr()
+        sr, si, orr, oi = self._with(o)
+        if oi is None:
+            return PositComplex(orr @ sr, orr @ si)
+        return _cmatmul(A, orr, oi, sr, si)
 
     @property
     def config(self) -> PositConfig:
@@ -158,16 +254,34 @@ class PositComplex:
         if method != "__call__" or kwargs:
             return NotImplemented
         unary = {np.negative: lambda z: -z, np.positive: lambda z: +z, np.absolute: abs,
-                 np.conjugate: lambda z: z.conj()}
+                 np.conjugate: lambda z: z.conj(), np.square: lambda z: z * z,
+                 np.isnan: lambda z: z.real.isnar() | z.imag.isnar(), np.isfinite: lambda z: ~(z.real.isnar() | z.imag.isnar())}
         if ufunc in unary and len(inputs) == 1:
             return unary[ufunc](inputs[0])
-        binary = {np.add: "__add__", np.subtract: "__sub__", np.multiply: "__mul__", np.true_divide: "__truediv__"}
+        binary = {np.add: "__add__", np.subtract: "__sub__", np.multiply: "__mul__", np.true_divide: "__truediv__",
+                  np.matmul: "__matmul__", np.equal: "__eq__", np.not_equal: "__ne__"}
         if ufunc not in binary:
             return NotImplemented
         a, b = inputs
         if isinstance(a, PositComplex):
             return getattr(a, binary[ufunc])(b)
+        if ufunc in (np.equal, np.not_equal):
+            return getattr(b, binary[ufunc])(a)
         return getattr(b, "__r" + binary[ufunc][2:])(a)
+
+    def __array__(self, dtype=None, copy=None):
+        raise TypeError("a PositComplex does not convert to an ndarray implicitly: use z.to_complex()")
+
+    def __array_function__(self, func, types, args, kwargs):
+        impl = _COMPLEX_FUNCTIONS.get(func)
+        if impl is None:
+            A = _arr()
+            if func in _PART_WISE:                                  # shape functions: the same on both parts
+                z, rest = args[0], args[1:]
+                f = A._FUNCTIONS[func]
+                return PositComplex(f(z.real, *rest, **kwargs), f(z.imag, *rest, **kwargs))
+            return NotImplemented
+        return impl(*args, **kwargs)
 
     # ---- device memory: one buffer (B, 2, N), the layout of the hardware FFT core -------------------------
 
@@ -427,28 +541,36 @@ def _transform(x, n, axis, inverse: bool, exact: bool, radix: int, config, metho
     return PositComplex(Yr, Yi)
 
 
-def fft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, radix: int = RADIX,
-        config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
+def fft(x, n: Optional[int] = None, axis: int = -1, norm: Optional[str] = None, *, exact: bool = False,
+        radix: int = RADIX, config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
     """Discrete Fourier transform along `axis`: X[k] = sum_n x[n] e^(-2 pi i nk / N).
 
     x: PositArray (real), PositComplex, a (re, im) pair, or anything pn.array accepts (complex too).
     exact=True: one direct DFT (N <= 2048), every output rounded once from the exact sum.
     method: "auto" (the engine's FFT core for N = 4^S when the bitstream has one, else DFT blocks),
     "core" (the core's radix-4 transform, in software when there is no core), "blocks", "exact".
+    norm: None / "backward" (no scaling), "forward" (1 / N) or "ortho" (1 / sqrt N), one more rounding each.
     """
-    return _transform(x, n, axis, False, exact, radix, config, method)
-
-
-def ifft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, radix: int = RADIX,
-         config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
-    """Inverse DFT: x[n] = (1 / N) sum_k X[k] e^(+2 pi i nk / N); the 1 / N is one more rounding."""
-    return _transform(x, n, axis, True, exact, radix, config, method)
-
-
-def rfft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, radix: int = RADIX,
-         config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
-    """DFT of a real signal, the N // 2 + 1 non-negative frequencies (like np.fft.rfft)."""
     X = _transform(x, n, axis, False, exact, radix, config, method)
+    return _scale(X, X.shape[axis], {"forward": "N", "ortho": "sqrt"}.get(_norm(norm)))
+
+
+def ifft(x, n: Optional[int] = None, axis: int = -1, norm: Optional[str] = None, *, exact: bool = False,
+         radix: int = RADIX, config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
+    """Inverse DFT: x[n] = (1 / N) sum_k X[k] e^(+2 pi i nk / N); the 1 / N is one more rounding.
+    norm="forward": no 1 / N (conj(fft(conj X))); "ortho": 1 / sqrt N instead."""
+    nm = _norm(norm)
+    if nm == "backward":
+        return _transform(x, n, axis, True, exact, radix, config, method)
+    re, im = _as_complex(x, config)
+    Y = fft(PositComplex(re, -im), n, axis, exact=exact, radix=radix, config=config, method=method).conj()
+    return Y if nm == "forward" else _scale(Y, Y.shape[axis], "sqrt")
+
+
+def rfft(x, n: Optional[int] = None, axis: int = -1, norm: Optional[str] = None, *, exact: bool = False,
+         radix: int = RADIX, config: Optional[PositConfig] = None, method: str = "auto") -> PositComplex:
+    """DFT of a real signal, the N // 2 + 1 non-negative frequencies (like np.fft.rfft)."""
+    X = fft(x, n, axis, norm, exact=exact, radix=radix, config=config, method=method)
     A = _arr()
     N = X.real.shape[axis]
     k = N // 2 + 1
@@ -456,6 +578,258 @@ def rfft(x, n: Optional[int] = None, axis: int = -1, *, exact: bool = False, rad
     sl[axis] = slice(0, k)
     take = lambda a: A.PositArray._wrap(np.ascontiguousarray(a.bits[tuple(sl)]), a.config)   # noqa: E731
     return PositComplex(take(X.real), take(X.imag))
+
+
+def irfft(x, n: Optional[int] = None, axis: int = -1, norm: Optional[str] = None, *, exact: bool = False,
+          radix: int = RADIX, config: Optional[PositConfig] = None, method: str = "auto"):
+    """Inverse of rfft: a real signal of length n (default 2 (m - 1)) from its m non-negative frequencies. The
+    spectrum is completed with conjugates (the imaginary parts of the 0 and n / 2 bins ignored, as in NumPy)."""
+    A = _arr()
+    re, im = _as_complex(x, config)
+    c = re.config
+    rb, ib = np.moveaxis(re.bits, axis, -1), np.moveaxis(im.bits, axis, -1)
+    m = rb.shape[-1]
+    n = 2 * (m - 1) if n is None else int(n)
+    if n < 1:
+        raise ValueError(f"irfft: invalid output length {n}")
+    h = n // 2 + 1
+    take = min(m, h)
+    R = np.zeros(rb.shape[:-1] + (n,), np.int64)
+    I = np.zeros_like(R)
+    R[..., :take], I[..., :take] = rb[..., :take], ib[..., :take]
+    I[..., 0] = 0
+    if n % 2 == 0 and take == h:
+        I[..., n // 2] = 0
+    k = np.arange(1, (n + 1) // 2)                                  # bins mirrored as conjugates
+    k = k[k < take]
+    R[..., n - k] = R[..., k]
+    I[..., n - k] = (-I[..., k]) & c.mask
+    Y = ifft(PositComplex(A.PositArray(R, c), A.PositArray(I, c)), None, -1, norm, exact=exact, radix=radix,
+             method=method)
+    return A.PositArray(np.ascontiguousarray(np.moveaxis(Y.real.bits, -1, axis)), c)
+
+
+def fftn(x, s=None, axes=None, norm: Optional[str] = None, *, inverse: bool = False, **kw) -> PositComplex:
+    """DFT over several axes (all by default, or the last len(s)), one axis after the other."""
+    re, im = _as_complex(x, kw.get("config"))
+    nd = re.ndim
+    if axes is None:
+        axes = list(range(nd)) if s is None else list(range(nd - len(s), nd))
+    s = [None] * len(axes) if s is None else list(s)
+    if len(s) != len(axes):
+        raise ValueError("fftn: s and axes of the same length")
+    z = PositComplex(re, im)
+    for ax, n in zip(axes, s):
+        z = (ifft if inverse else fft)(z, n, ax, norm, **kw)
+    return z
+
+
+def ifftn(x, s=None, axes=None, norm: Optional[str] = None, **kw) -> PositComplex:
+    return fftn(x, s, axes, norm, inverse=True, **kw)
+
+
+def fft2(x, s=None, axes=(-2, -1), norm: Optional[str] = None, **kw) -> PositComplex:
+    return fftn(x, s, axes, norm, **kw)
+
+
+def ifft2(x, s=None, axes=(-2, -1), norm: Optional[str] = None, **kw) -> PositComplex:
+    return fftn(x, s, axes, norm, inverse=True, **kw)
+
+
+def _shift(x, axes, sign):
+    A = _arr()
+    parts = [x.real, x.imag] if isinstance(x, PositComplex) else [x]
+    nd = parts[0].ndim
+    axes = tuple(range(nd)) if axes is None else ((axes,) if np.ndim(axes) == 0 else tuple(axes))
+    shifts = [sign * (parts[0].shape[a] // 2) for a in axes]
+    out = [A.PositArray(np.roll(p.bits, shifts, axes), p.config) for p in parts]
+    return PositComplex(*out) if isinstance(x, PositComplex) else out[0]
+
+
+def fftshift(x, axes=None):
+    """Zero frequency to the middle (on the bits: exact)."""
+    return _shift(x, axes, 1)
+
+
+def ifftshift(x, axes=None):
+    return _shift(x, axes, -1)
+
+
+def _norm(norm) -> str:
+    nm = "backward" if norm is None else norm
+    if nm not in ("backward", "forward", "ortho"):
+        raise ValueError(f"norm={norm!r}: None, 'backward', 'forward' or 'ortho'")
+    return nm
+
+
+def _div_int(p, N: int):
+    """p / N for an integer N, correctly rounded: the engine's division when N is a posit, else exact here."""
+    A = _arr()
+    c = p.config
+    Np = A.array(float(N), c)
+    if float(Np) == N:
+        return p / Np
+    return _per_value(p, lambda m, e: ref._div((m, e), (N, 0)))
+
+
+def _div_sqrt(p, N: int):
+    """p / sqrt(N), correctly rounded (exact division by 2**k when N = 4**k)."""
+    r = math.isqrt(N)
+    if r * r == N:
+        return _div_int(p, r)
+
+    def one(m, e):
+        k = 64 + max(0, 32 - m.bit_length())
+        t, rem = divmod((m * m) << (2 * k), N)
+        sq = math.isqrt(t)
+        return ((-sq if m < 0 else sq), e - k), rem != 0 or sq * sq != t
+    return _per_value(p, one)
+
+
+def _per_value(p, fn):
+    """fn(m, e) -> ((m', e'), sticky) for each distinct nonzero value of p, rounded once; 0 -> 0, NaR -> NaR."""
+    A = _arr()
+    c = p.config
+    u, inv = np.unique(p.bits.astype(np.int64).ravel(), return_inverse=True)
+    ms, es, st, bad = [], [], [], []
+    for b in u.tolist():
+        d = ref.decode(c, b)
+        if d is None or d[0] == 0:
+            ms.append(0), es.append(0), st.append(False), bad.append(d is None)
+            continue
+        (m, e), sticky = fn(*d)
+        ms.append(m), es.append(e), st.append(sticky), bad.append(False)
+    bits = A._round_exact(c, ms, es, st, bad)
+    return A.PositArray(bits[np.asarray(inv).ravel()].reshape(p.shape), c)
+
+
+def _scale(X: PositComplex, N: int, how: Optional[str]) -> PositComplex:
+    if how is None:
+        return X
+    f = _div_int if how == "N" else _div_sqrt
+    return PositComplex(f(X.real, N), f(X.imag, N))
+
+
+def _cmatmul(A, ar, ai, br, bi) -> PositComplex:
+    cat_a = lambda x, y: np.concatenate([x, y], axis=-1)                       # noqa: E731
+    cat_b = lambda x, y: np.concatenate([x, y], axis=-2 if br.ndim >= 2 else 0)  # noqa: E731
+    left = cat_a(ar, ai)
+    return PositComplex(left @ cat_b(br, -bi), left @ cat_b(bi, br))
+
+
+def _cpow(z: PositComplex, n: int) -> PositComplex:
+    """Exact (p + i q) ** n in Gaussian integers times 2**e, each part rounded once."""
+    A = _arr()
+    c = z.config
+    if abs(n) > 4096:
+        raise ValueError(f"PositComplex ** {n}: |n| <= 4096")
+    pairs = np.stack([z.real.bits.astype(np.int64).ravel(), z.imag.bits.astype(np.int64).ravel()], axis=1)
+    if pairs.size == 0:
+        return z.copy()
+    u, inv = np.unique(pairs, axis=0, return_inverse=True)
+    out = {k: ([], [], [], []) for k in ("re", "im")}
+
+    def put(k, m, e, st, bad):
+        ms, es, sts, bads = out[k]
+        ms.append(m), es.append(e), sts.append(st), bads.append(bad)
+    for a, b in u.tolist():
+        x, y = ref.decode(c, a), ref.decode(c, b)
+        if x is None or y is None or (x[0] == 0 and y[0] == 0 and n <= 0):
+            put("re", 0, 0, False, True), put("im", 0, 0, False, True)
+            continue
+        if n == 0:
+            put("re", 1, 0, False, False), put("im", 0, 0, False, False)
+            continue
+        e = min(x[1], y[1])
+        P, Q = x[0] << (x[1] - e), y[0] << (y[1] - e)
+        rp, rq, k = 1, 0, abs(n)
+        bp, bq = P, Q
+        while k:
+            if k & 1:
+                rp, rq = rp * bp - rq * bq, rp * bq + rq * bp
+            bp, bq = bp * bp - bq * bq, 2 * bp * bq
+            k >>= 1
+        E = e * abs(n)
+        if n > 0:
+            put("re", rp, E, False, False), put("im", rq, E, False, False)
+        else:
+            D = rp * rp + rq * rq
+            (m1, e1), s1 = ref._div((rp, 0), (D, E)) if rp else ((0, 0), False)
+            (m2, e2), s2 = ref._div((-rq, 0), (D, E)) if rq else ((0, 0), False)
+            put("re", m1, e1, s1, False), put("im", m2, e2, s2, False)
+    idx = np.asarray(inv).ravel()
+    re, im = (A._round_exact(c, *out[k])[idx].reshape(z.shape) for k in ("re", "im"))
+    return PositComplex(A.PositArray(re, c), A.PositArray(im, c))
+
+
+def _cjoin(f):
+    def g(arrays, *args, **kw):
+        A = _arr()
+        zs = [x if isinstance(x, PositComplex) else PositComplex(*_as_complex(x, None)) for x in arrays]
+        return PositComplex(f([z.real for z in zs], *args, **kw), f([z.imag for z in zs], *args, **kw))
+    return g
+
+
+def _vdot(a, b):
+    """sum(conj(a) * b): Re = ar.br + ai.bi, Im = ar.bi - ai.br, each one exact dot of length 2n, rounded once."""
+    A = _arr()
+    ar, ai = _as_complex(a, None)
+    br, bi = _as_complex(b, None)
+    cat = lambda x, y: np.concatenate([x.ravel(), y.ravel()])        # noqa: E731
+    return PositComplex(cat(ar, ai).dot(cat(br, bi)), cat(ar, -ai).dot(cat(bi, br)))
+
+
+def _cdot(a, b):
+    A = _arr()
+    ar, ai = _as_complex(a, None)
+    br, bi = _as_complex(b, None)
+    if ar.ndim == 1 and br.ndim == 1:
+        cat = lambda x, y: np.concatenate([x, y])                     # noqa: E731
+        return PositComplex(cat(ar, ai).dot(cat(br, -bi)), cat(ar, ai).dot(cat(bi, br)))
+    return PositComplex(ar, ai) @ PositComplex(br, bi)
+
+
+def _np_save_complex(*args, **kw):
+    raise TypeError("np.save would drop the posit format: use pn.save(file, z) and pn.load(file)")
+
+
+def _angle(z, deg=False):
+    from .npapi import arctan2
+    r = arctan2(z.imag, z.real)
+    return r * (180 / math.pi) if deg else r
+
+
+_PART_WISE = {np.flip, np.fliplr, np.flipud, np.roll, np.rot90, np.tile, np.repeat, np.squeeze, np.expand_dims,
+              np.swapaxes, np.moveaxis, np.broadcast_to, np.diag, np.diagonal, np.triu, np.tril, np.take,
+              np.transpose, np.reshape, np.ravel, np.copy, np.delete, np.atleast_1d, np.atleast_2d}
+
+_COMPLEX_FUNCTIONS = {
+    np.fft.fft: fft, np.fft.ifft: ifft, np.fft.rfft: rfft, np.fft.irfft: irfft, np.fft.fft2: fft2,
+    np.fft.ifft2: ifft2, np.fft.fftn: fftn, np.fft.ifftn: ifftn, np.fft.fftshift: fftshift,
+    np.fft.ifftshift: ifftshift,
+    np.sum: lambda a, axis=None, dtype=None, out=None, keepdims=False: a.sum(axis, keepdims),
+    np.mean: lambda a, axis=None, dtype=None, out=None, keepdims=False: a.mean(axis, keepdims),
+    np.real: lambda z: z.real.copy(), np.imag: lambda z: z.imag.copy(), np.angle: _angle,
+    np.concatenate: _cjoin(np.concatenate), np.stack: _cjoin(np.stack), np.hstack: _cjoin(np.hstack),
+    np.vstack: _cjoin(np.vstack),
+    np.shape: lambda z: z.shape, np.ndim: lambda z: z.ndim, np.size: lambda z, axis=None: z.size if axis is None
+    else z.shape[axis],
+    np.dot: _cdot, np.vdot: _vdot, np.inner: _cdot,
+    np.iscomplexobj: lambda x: True, np.isrealobj: lambda x: False,
+    np.save: _np_save_complex,
+    np.isclose: lambda a, b, rtol=1e-05, atol=1e-08, equal_nan=False: np.isclose(
+        _cfloat(a), _cfloat(b), rtol=rtol, atol=atol, equal_nan=equal_nan),
+    np.allclose: lambda a, b, rtol=1e-05, atol=1e-08, equal_nan=False: bool(np.allclose(
+        _cfloat(a), _cfloat(b), rtol=rtol, atol=atol, equal_nan=equal_nan)),
+}
+
+
+def _cfloat(x):
+    if isinstance(x, PositComplex):
+        return x.to_complex()
+    if hasattr(x, "to_float"):
+        return x.to_float()
+    return np.asarray(x)
 
 
 # ---- model of the hardware FFT core (PositVecAxi 5.5, PositFftCore) ---------------------------------

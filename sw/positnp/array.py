@@ -114,11 +114,41 @@ def array(x, config: Optional[PositConfig] = None) -> "PositArray":
     if isinstance(x, PositArray):
         return x.astype(config or x.config)
     c = config or P32
+    if _is_complex(x):                                         # complex numbers: a PositComplex, parts rounded
+        from .fft import PositComplex
+        z = np.asarray(x)
+        return PositComplex(array(z.real, c), array(z.imag, c))
     if isinstance(x, np.ndarray) and x.dtype == np.float32 and c.n == 32 and c.es == 2 and x.size:
         be = get_backend(c)
         if "f2p" in getattr(be, "array_ops", ()):
             return PositArray._wrap(be.array_op("f2p", x.view(np.uint32), scalar=0), c)
     return PositArray(vecops.from_float(c, np.asarray(x, dtype=np.float64)).bits, c)
+
+
+def _is_complex(x) -> bool:
+    if hasattr(x, "to_complex") and hasattr(x, "imag"):         # PositComplex
+        return True
+    if isinstance(x, (complex, np.complexfloating)):
+        return True
+    if isinstance(x, np.ndarray):
+        return np.iscomplexobj(x)
+    if isinstance(x, (list, tuple)):
+        try:
+            return np.iscomplexobj(np.asarray(x))
+        except (TypeError, ValueError):                         # posit arrays inside, ragged lists: not complex
+            return False
+    return False
+
+
+def _as_pc(x):
+    from .fft import PositComplex
+    return PositComplex(x, PositArray(np.zeros(x.shape, np.int64), x.config))
+
+
+_PC_OPS = {"add": lambda z, o: z + o, "sub": lambda z, o: z - o, "mul": lambda z, o: z * o,
+           "div": lambda z, o: z / o}
+_PC_ROPS = {"add": lambda z, o: o + z, "sub": lambda z, o: o - z, "mul": lambda z, o: o * z,
+            "div": lambda z, o: o / z}
 
 
 def to_device(x) -> "PositArray":
@@ -615,6 +645,43 @@ class PositArray:
             raise TypeError("only one-element posit arrays convert to float")
         return float(self.to_float().reshape(()))
 
+    def __int__(self) -> int:
+        """int(x) of a one-element array: truncated toward zero, like int(float); NaR: ValueError."""
+        f = float(self)
+        if math.isnan(f):
+            raise ValueError("cannot convert NaR to an integer")
+        return int(f)
+
+    def __bool__(self) -> bool:
+        if self.size != 1:
+            raise ValueError("the truth value of a posit array with more than one element is ambiguous "
+                             "(use (x != 0).any() or .all())")
+        return bool(self.bits.reshape(()) != 0)          # NaR is true, like nan
+
+    def __array__(self, dtype=None, copy=None):
+        raise TypeError("a PositArray does not convert to an ndarray implicitly (its integers are posit bits): "
+                        "use x.to_float(), x.to_float32() or x.bits")
+
+    def tolist(self):
+        """Nested lists of Python floats (NaR -> nan), like ndarray.tolist()."""
+        return self.to_float().tolist()
+
+    def item(self, *args) -> float:
+        """A Python float, like ndarray.item(): no argument (size 1), a flat index, or one index per axis."""
+        if not args:
+            return float(self)
+        if len(args) == 1 and np.ndim(args[0]) == 0:
+            return float(self.ravel()[int(args[0])])
+        return float(self[tuple(args[0]) if len(args) == 1 else args])
+
+    @property
+    def nbytes(self) -> int:
+        return self.bits.nbytes
+
+    @property
+    def itemsize(self) -> int:
+        return self.bits.itemsize
+
     @property
     def shape(self):
         return self.bits.shape
@@ -646,11 +713,11 @@ class PositArray:
     def copy(self) -> "PositArray":
         return PositArray(self.bits.copy(), self.config)
 
-    def reshape(self, *shape) -> "PositArray":
-        return PositArray(self.bits.reshape(*shape), self.config)
+    def reshape(self, *shape, order: str = "C") -> "PositArray":
+        return PositArray(self.bits.reshape(*shape, order=order), self.config)
 
-    def ravel(self) -> "PositArray":
-        return PositArray(self.bits.ravel(), self.config)
+    def ravel(self, order: str = "C") -> "PositArray":
+        return PositArray(self.bits.ravel(order=order), self.config)
 
     flatten = ravel
 
@@ -681,6 +748,8 @@ class PositArray:
         return _unify(other, default=self.config)[0]
 
     def _binary(self, name: str, other) -> "PositArray":
+        if _is_complex(other):                                  # real (op) complex -> PositComplex
+            return _PC_OPS[name](_as_pc(self), other)
         s, o = _unify(self, other)
         be = get_backend(s.config)
         if o.size == 1 and o.shape in ((), (1,)) and s.size >= 1:
@@ -692,6 +761,8 @@ class PositArray:
         return PositArray._wrap(r.reshape(a.shape), s.config)
 
     def _rbinary(self, name: str, other) -> "PositArray":
+        if _is_complex(other):
+            return _PC_ROPS[name](_as_pc(self), other)
         s, o = _unify(self, other)
         return o._binary(name, s)
 
@@ -794,39 +865,78 @@ class PositArray:
         """In place, NaR first."""
         self.bits[...] = self._from_signed(np.sort(self._signed(), axis=axis)).bits
 
-    def max(self, axis=None):
-        return self._from_signed(np.max(self._signed(), axis=axis))
+    def max(self, axis=None, keepdims: bool = False):
+        return self._from_signed(np.max(self._signed(), axis=axis, keepdims=keepdims))
 
-    def min(self, axis=None):
-        return self._from_signed(np.min(self._signed(), axis=axis))
+    def min(self, axis=None, keepdims: bool = False):
+        return self._from_signed(np.min(self._signed(), axis=axis, keepdims=keepdims))
 
-    def argmax(self, axis=None):
-        return np.argmax(self._signed(), axis=axis)
+    def argmax(self, axis=None, keepdims: bool = False):
+        return np.argmax(self._signed(), axis=axis, keepdims=keepdims)
 
-    def argmin(self, axis=None):
-        return np.argmin(self._signed(), axis=axis)
+    def argmin(self, axis=None, keepdims: bool = False):
+        return np.argmin(self._signed(), axis=axis, keepdims=keepdims)
+
+    def any(self, axis=None, keepdims: bool = False):
+        return np.any(self.bits != 0, axis=axis, keepdims=keepdims)
+
+    def all(self, axis=None, keepdims: bool = False):
+        return np.all(self.bits != 0, axis=axis, keepdims=keepdims)
 
     # ---- quire reductions (stage 4) -----------------------------------------------------------
 
-    def _along(self, axis, fn) -> "PositArray":
-        """fn(1-D PositArray) -> bits, for axis None (all elements) or one axis."""
+    def _axes(self, axis) -> tuple:
+        """axis (None, an int or a tuple, negative allowed) as a sorted tuple of axes."""
         if axis is None:
-            return PositArray(fn(self.ravel()), self.config)
-        moved = np.moveaxis(self.bits, axis, -1)
-        flat = moved.reshape(-1, moved.shape[-1])
-        out = [fn(PositArray(row, self.config)) for row in flat]
-        return PositArray(np.array(out, dtype=np.int64).reshape(moved.shape[:-1]), self.config)
+            return tuple(range(self.ndim))
+        axes = (axis,) if np.ndim(axis) == 0 else tuple(axis)
+        out = set()
+        for a in axes:
+            a = int(a)
+            if not -self.ndim <= a < self.ndim:
+                raise np.exceptions.AxisError(a, self.ndim)
+            out.add(a % self.ndim)
+        if len(out) != len(axes):
+            raise ValueError("repeated axis")
+        return tuple(sorted(out))
 
-    def sum(self, axis=None) -> "PositArray":
+    def _reduce_rows(self, axis, keepdims: bool, rows_fn) -> "PositArray":
+        """rows_fn(bits of shape (R, K)) -> R result bits: the reduced axes moved last and flattened to K."""
+        axes = self._axes(axis)
+        keep = [i for i in range(self.ndim) if i not in axes]
+        moved = np.transpose(self.bits, keep + list(axes))
+        rest = moved.shape[:len(keep)]
+        R, K = int(np.prod(rest, dtype=np.int64)), int(np.prod(moved.shape[len(keep):], dtype=np.int64))
+        res = np.asarray(rows_fn(moved.reshape(R, K)), np.int64).reshape(rest)
+        if keepdims:
+            res = res.reshape([1 if i in axes else n for i, n in enumerate(self.shape)])
+        return PositArray(res, self.config)
+
+    def _along(self, axis, fn, keepdims: bool = False) -> "PositArray":
+        """fn(1-D PositArray) -> bits, for axis None (all elements), one axis or a tuple of axes."""
+        c = self.config
+        return self._reduce_rows(axis, keepdims, lambda rows: [fn(PositArray(r, c)) for r in rows])
+
+    def _sum_rows(self, rows: np.ndarray) -> np.ndarray:
+        """Exact row sums, rounded once. Many rows: one matmul with a column of ones (each element the same
+        exact quire sum; on a KV260 engine with gemv a single command instead of one per row)."""
+        c = self.config
+        R, K = rows.shape
+        if R >= 2 and K >= 1:
+            ones = PositArray(np.full((K, 1), _one_bits(c), np.int64), c)
+            return matmul(PositArray._wrap(np.ascontiguousarray(rows), c), ones).bits.reshape(R)
+        return [_quire(PositArray(r, c), "sum")[0] for r in rows]
+
+    def sum(self, axis=None, keepdims: bool = False) -> "PositArray":
         """Exact sum in the quire, rounded once."""
-        return self._along(axis, lambda v: _quire(v, "sum")[0])
+        return self._reduce_rows(axis, keepdims, self._sum_rows)
 
-    def mean(self, axis=None) -> "PositArray":
+    def mean(self, axis=None, keepdims: bool = False) -> "PositArray":
         """Exact sum / N, rounded once."""
         def one(v):
             _, _, q, nar = _quire(v, "sum")
             return _mean_bits(self.config, q, nar, v.size)
-        return self._along(axis, one)
+        return self._along(axis, one, keepdims)
 
     def dot(self, other) -> "PositArray":
         """1-D . 1-D: exact sum of products in the quire, rounded once; 2-D: matmul (np.dot of matrices)."""
@@ -844,17 +954,17 @@ class PositArray:
         _, _, q, nar = _quire(self.ravel(), "sumsq")
         return PositArray(_sqrt_bits(self.config, q, nar), self.config)
 
-    def var(self, axis=None, ddof: int = 0) -> "PositArray":
+    def var(self, axis=None, ddof: int = 0, keepdims: bool = False) -> "PositArray":
         """Variance from two exact quire sums (sum x, sum x**2), rounded once - no cancellation."""
-        return self._along(axis, lambda v: _var_bits(self.config, v, ddof, False))
+        return self._along(axis, lambda v: _var_bits(self.config, v, ddof, False), keepdims)
 
-    def std(self, axis=None, ddof: int = 0) -> "PositArray":
+    def std(self, axis=None, ddof: int = 0, keepdims: bool = False) -> "PositArray":
         """Standard deviation: the square root of the exact variance, rounded once."""
-        return self._along(axis, lambda v: _var_bits(self.config, v, ddof, True))
+        return self._along(axis, lambda v: _var_bits(self.config, v, ddof, True), keepdims)
 
-    def prod(self, axis=None) -> "PositArray":
+    def prod(self, axis=None, keepdims: bool = False) -> "PositArray":
         """Exact product, rounded once (computed in the PS: the engine has no product reduction)."""
-        return self._along(axis, lambda v: _prod_bits(self.config, v.bits))
+        return self._along(axis, lambda v: _prod_bits(self.config, v.bits), keepdims)
 
     def cumsum(self, axis=None) -> "PositArray":
         """Running sums, each the exact sum of its prefix rounded once (in the PS); axis None: flattened."""
@@ -930,11 +1040,44 @@ class PositArray:
         np.power: "power", np.reciprocal: "reciprocal",
     }
 
-    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        if method != "__call__" or kwargs.get("out") is not None or set(kwargs) - {"out"}:
+    _REDUCE = {np.add: "sum", np.multiply: "prod", np.maximum: "max", np.minimum: "min"}
+
+    def __array_ufunc__(self, ufunc, method, *inputs, out=None, **kwargs):
+        if method in ("reduce", "accumulate"):
+            return self._ufunc_reduce(ufunc, method, inputs, out, kwargs)
+        if method != "__call__":
+            return NotImplemented
+        if kwargs.pop("where", True) is not True or kwargs.pop("casting", "same_kind") != "same_kind" or \
+                kwargs.pop("dtype", None) is not None or kwargs.pop("subok", True) is not True or kwargs:
+            raise TypeError(f"np.{ufunc.__name__} on posit arrays: where=, dtype=, casting= and the other options "
+                            "are not supported")
+        return _to_out(self._ufunc_call(ufunc, inputs), out)
+
+    def _ufunc_reduce(self, ufunc, method, inputs, out, kw):
+        name = self._REDUCE.get(ufunc)
+        if name is None or len(inputs) != 1 or (method == "accumulate" and ufunc is not np.add):
+            return NotImplemented
+        axis = kw.pop("axis", 0)
+        keepdims = kw.pop("keepdims", False) if method == "reduce" else False
+        if kw.pop("dtype", None) is not None or kw.pop("where", True) is not True or kw:
+            raise TypeError(f"np.{ufunc.__name__}.{method} on posit arrays: axis=, keepdims= and out= only")
+        x = inputs[0]
+        if method == "accumulate":
+            return _to_out(x.cumsum(axis=axis), out)
+        return _to_out(getattr(x, name)(axis=axis, keepdims=keepdims), out)
+
+    def _ufunc_call(self, ufunc, inputs):
+        if any(_is_complex(x) for x in inputs):
+            if ufunc in (np.add, np.subtract, np.multiply, np.true_divide) and len(inputs) == 2:
+                name = {np.add: "add", np.subtract: "sub", np.multiply: "mul", np.true_divide: "div"}[ufunc]
+                a, b = inputs
+                return a._binary(name, b) if isinstance(a, PositArray) else b._rbinary(name, a)
             return NotImplemented
         what = self._UFUNCS.get(ufunc)
         if what is None:
+            ext = _npapi().UFUNCS.get(ufunc)
+            if ext is not None:
+                return ext(*inputs)
             if ufunc.__name__ in _LATER:
                 raise TypeError(f"np.{ufunc.__name__} on posit arrays: {_LATER[ufunc.__name__]}")
             return NotImplemented
@@ -1083,6 +1226,28 @@ if hasattr(np, "around"):
     _FUNCTIONS[np.around] = _round
 
 
+def _to_out(res, out):
+    """Write a result into out= (a PositArray of the right shape, or an ndarray for boolean results)."""
+    if out is None or res is NotImplemented:
+        return res
+    if isinstance(out, tuple):
+        if len(out) != 1:
+            raise TypeError("one out= array expected")
+        out = out[0]
+    if isinstance(res, PositArray):
+        if not isinstance(out, PositArray):
+            raise TypeError("out= of a posit result must be a PositArray")
+        out.bits[...] = np.broadcast_to(res.astype(out.config).bits, out.shape)
+    else:
+        out[...] = res
+    return out
+
+
+def _npapi():
+    from . import npapi
+    return npapi
+
+
 def _linalg():
     from . import linalg
     return linalg
@@ -1102,3 +1267,6 @@ def _norm(x, ord, axis):
 for _alias in ("amax", "amin"):
     if hasattr(np, _alias) and getattr(np, _alias) not in _FUNCTIONS:
         _FUNCTIONS[getattr(np, _alias)] = _FUNCTIONS[np.max if _alias == "amax" else np.min]
+
+
+from . import npapi as _npapi_module  # noqa: E402,F401  (registers the rest of the NumPy API)
