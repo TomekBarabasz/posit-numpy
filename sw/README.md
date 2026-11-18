@@ -129,6 +129,23 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
     potęga, każda część zaokrąglona raz), `A @ B` zespolone (Re = [Ar, Ai] @ [Br; −Bi] - jeden matmul o długości
     2K, na gemv), `np.vdot`, `np.dot`, `np.angle`, `np.concatenate`, funkcje kształtu; `pn.array(liczby zespolone)`
     i `x + 1j` dają `PositComplex`.
+- Pod zastosowania (linalg, DSP, ML):
+  - `np.linalg.solve` / `inv` / `det` także na stosach macierzy `(..., n, n)`; residuum przy poprawianiu
+    rozwiązania liczone jednym `matmul` `[B | A] @ [I; −X]` (dokładnie, jedno zaokrąglenie; na silniku z gemv);
+    `pn.linalg.solve(A, b, lu=pn.P16)` - mieszana precyzja: LU i poprawki w posit16, residuum w quire posit32
+    (4 kroki: dokładność jak pełne posit32 przy LU w połowie bitów); `np.linalg.cholesky` (przekątna: pierwiastek
+    z dokładnej reszty, zaokrąglony raz), `np.linalg.lstsq` (układ rozszerzony Björcka, bez SVD: `s` = None),
+    `np.linalg.slogdet`;
+  - `np.einsum` (jeden lub dwa operandy jako matmul - każde wyjście dokładnie, raz zaokrąglone; więcej operandów
+    parami; bez `...`), `np.tensordot`, `np.outer`;
+  - splot i korelacja zespolona (`np.convolve` / `np.correlate` / `pn.convolve` na `PositComplex`): części
+    przeplecione, dwa rzeczywiste sploty dwa razy dłuższe - każda część wyjścia dokładnie, zaokrąglona raz, na FIR
+    silnika;
+  - `pn.signal.lfilter(b, a, x, axis)` (IIR: każde wyjście jedna dokładna suma w quire; próbka po próbce w PS),
+    `pn.signal.convolve2d` / `correlate2d` (tryby full / same / valid; im2col + matmul);
+  - `pn.nn`: `linear(x, W, b)` i `conv2d(x, w, b, stride, padding)` (NCHW) z biasem wewnątrz quire (kolumna jedynek:
+    jedno zaokrąglenie na wyjście, jeden matmul), `relu` (NaR zostaje), `softmax`, `log_softmax`, `sigmoid`, `tanh`,
+    `gelu` (przybliżenie tanh), `layer_norm`, `max_pool2d`.
 - `pn.array(tablica float32)` i `x.to_float32()` / `x.astype(np.float32)` dla posit32 idą przez F2P / P2F backendu
   (bez rzutowania przez float64); dla innych formatów przez `vecops`.
 
