@@ -64,8 +64,9 @@ sudo apt install -y device-tree-compiler
 python3 -m venv --system-site-packages ~/pn
 ~/pn/bin/pip install "positnp[kv260-dsp]"
 ~/pn/bin/positnp-board udmabuf                          # once per kernel: the u-dma-buf module
-sudo ~/pn/bin/positnp-board install posit32_16_8_dsp
-sudo ~/pn/bin/positnp-board load posit32_16_8_dsp       # loads it and describes the engines
+sudo ~/pn/bin/positnp-board install posit32_16_8_dsp    # once per application
+sudo ~/pn/bin/positnp-board permissions                 # once: use the board without sudo (then log in again)
+~/pn/bin/positnp-board load posit32_16_8_dsp            # loads it and describes the engines
 ```
 
 ```python
@@ -74,9 +75,14 @@ pn.board.load("posit32_16_8_dsp")     # every engine becomes the backend of its 
 print(pn.board.describe())
 ```
 
-Loading needs root: run Python with `sudo`, or allow `xmutil` and `modprobe u-dma-buf` for your user in
-`/etc/sudoers.d/` and give it access to `/dev/uio*` and `/dev/udmabuf-*` with a udev rule. The engines use
-contiguous memory from CMA (`grep Cma /proc/meminfo`; the Kria image has enough by default).
+`positnp-board permissions` lets your user load applications and use the engines without `sudo`: it creates
+the group `posit`, adds you to it, allows `xmutil` and `modprobe u-dma-buf` for the group in
+`/etc/sudoers.d/positnp` (checked with `visudo` before it is installed) and gives the group access to the
+engines' `/dev/uio*`, `/dev/udmabuf-posit-*` and the buffers' cache-sync attributes with a udev rule
+(`/etc/udev/rules.d/99-positnp.rules`). `--dry-run` shows the files and commands, `--user` / `--group` change
+who gets access. Only add trusted users: an engine is a DMA master, so access to it is close to root. Without
+it, run Python with `sudo`. The engines use contiguous memory from CMA (`grep Cma /proc/meminfo`; the Kria image
+has enough by default).
 
 ## More
 
