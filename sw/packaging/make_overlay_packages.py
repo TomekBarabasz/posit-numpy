@@ -82,10 +82,10 @@ dependencies = ["positnp>={version}"]
 {name} = "{mod}"
 
 [tool.setuptools]
-packages = ["{mod}"]
+packages = ["{mod}", "{mod}.{name}"]          # the application directory as a (data-only) package
 
 [tool.setuptools.package-data]
-{mod} = ["{name}/*"]
+"{mod}.{name}" = ["*"]
 """)
     return root
 
