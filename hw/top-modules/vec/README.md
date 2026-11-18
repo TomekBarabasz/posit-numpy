@@ -686,36 +686,38 @@ dekoder -> prepare -+                                                           
 ## Bitstreamy do pakietów (extras `positnp`)
 
 Jedna aplikacja PL na zastosowanie; każdy bitstream liczy wszystko (czego nie ma w sprzęcie, liczy `PositSw`
-z tymi samymi bitami), różnią się tym, co liczą szybko. Konfiguracje i komendy: `vivado/release_builds.sh`
-(`list`, `print`, `run [nazwa ...]`, osobno `gen` / `build` dla sbt w kontenerze). Wynik: `sw/positnp/overlays/<nazwa>/`
-(te katalogi są w gicie, reszta `overlays/` nie).
-
-Konfiguracje są w `vivado/release_configs.txt` (wspólne dla obu skryptów). Bez basha (Windows) to samo robi
-`vivado/release_builds.tcl`, uruchamiany przez Vivado z katalogu `vivado/`:
+z tymi samymi bitami), różnią się tym, co liczą szybko. Konfiguracje są w jednym miejscu: `hw/spinal/main/VecReleases.scala`.
+Wszystkie naraz, dwie komendy (Windows i Linux):
 
 ```
-vivado -mode batch -nojournal -nolog -source release_builds.tcl -tclargs posit32_16_8_mem
-vivado -mode batch -nojournal -nolog -source release_builds.tcl -tclargs run              (wszystkie)
-vivado -mode batch -nojournal -nolog -source release_builds.tcl -tclargs print posit16_8_ml
+sbt "top-vec/runMain posit.top.vec.VecReleases"                      # z hw/ (np. w kontenerze SpinalHDL)
+vivado -mode batch -nojournal -nolog -source release_builds.tcl      # z hw/top-modules/vec/vivado
 ```
 
-Nazwy po `-tclargs` (bez tego Vivado nie przekaże ich skryptowi); komendy `list`, `print`, `run`, `gen`, `build`
-jak w wersji bash; `-nogen` pomija sbt (RTL wygenerowany np. w WSL), `-sbt` / `-vivado "<komenda>"` gdy nie ma ich
-w PATH (Vivado szuka też w `%XILINX_VIVADO%\bin`), `-vivado_args "-jobs 4"`. Każda konfiguracja to osobny proces
-Vivado z własnym `out/<nazwa>/build.log`.
+- `VecReleases` generuje RTL każdej konfiguracji do osobnego katalogu `hw/gen/release/<nazwa>/` (+ `release.txt`:
+  silniki, bufor, extra); `VecReleases <nazwa> ...` — tylko wybrane, `VecReleases --list` — lista.
+- `release_builds.tcl` buduje po kolei każdą konfigurację z `hw/gen/release/` w osobnym procesie Vivado (`build.tcl`
+  z `-rtl`); błąd jednej (WNS < 0, placer) nie zatrzymuje pozostałych; na końcu podsumowanie, też w `out/release_summary.txt`.
+  Opcje po `-tclargs`: nazwy konfiguracji, `-jobs n`, `-threads n`, `-dry` (tylko komendy), `-out <dir>` (projekty;
+  na Windows przy błędach długości ścieżek krótki katalog bez spacji, np. `-out C:/vb`).
+- Wynik: `sw/positnp/overlays/<nazwa>/` (te katalogi są w gicie, reszta `overlays/` nie); projekty i logi:
+  `vivado/out/<nazwa>/` (`build.log`).
 
 | nazwa | extra | silniki | VecKv260 | dla kogo | stan |
 | --- | --- | --- | --- | --- | --- |
 | `posit32_16_8_mem` | `kv260` (domyślny) | 32 + 16 + 8 | gemv × 4 we wszystkich, tablice p16 / p8 | eksperymenty, porównania formatów, przykłady | sprawdzona (5.4); 5.6 zbudowana |
-| `posit32_16_8_dsp` | `kv260-dsp` | 32 + 16 + 8 | `--fft 6:32 --gemv-cols 32=2,16=2,8=0` | FFT, FIR, korelacja | sprawdzona (5.6); przebudowana |
-| `posit16_8_ml` | `kv260-ml` | 16 + 8 | `--gemv-cols 16=8,8=8` | sieci w 8 / 16 bitach: gemm, sigmoid / tanh / exp z tablic | zbudowana, do sprawdzenia na płytce |
-| `posit32_16_linalg` | `kv260-linalg` | 32 + 16 | `--gemv-cols 32=8,16=4 --table-copies 0` | układy równań, mieszana precyzja | zbudowana, do sprawdzenia na płytce |
+| `posit32_16_8_dsp` | `kv260-dsp` | 32 + 16 + 8 | `--fft 6:32 --gemv-cols 32=2,16=2,8=0` | FFT, FIR, korelacja | sprawdzona (5.6) |
+| `posit16_8_ml` | `kv260-ml` | 16 + 8 | `--gemv-cols 16=8,8=8` | sieci w 8 / 16 bitach: gemm, sigmoid / tanh / exp z tablic | sprawdzona (2026-11-18) |
+| `posit32_16_linalg` | `kv260-linalg` | 32 + 16 | `--gemv-cols 32=8,16=4 --table-copies 0` | układy równań, mieszana precyzja | zbudowana |
 | `posit32_16_dsp` | (`kv260-dsp` v2) | 32 + 16 | `--fft 6 --gemv-cols 2` | FFT także w posit16 (porównania z float16) | eksperyment, zbudowany |
 
-Pierwszy pełny przebieg `release_builds.sh run` (2026-11-17, 642 min): wszystkie pięć z WNS ≥ 0 —
-`posit16_8_ml` 13 min, `posit32_16_8_mem` 19 min, `posit32_16_dsp` 22 min, `posit32_16_linalg` 36 min,
-`posit32_16_8_dsp` 549 min (placer z rdzeniem FFT i gemv × 2 przy prawie pełnym układzie). Wyniki są w gicie
-(`sw/positnp/overlays/<nazwa>/`); pakiety PyPI robi z nich `sw/packaging/make_overlay_packages.py`.
+Pierwszy pełny przebieg (2026-11-17, 642 min): wszystkie pięć z WNS ≥ 0 — `posit16_8_ml` 13 min,
+`posit32_16_8_mem` 19 min, `posit32_16_dsp` 22 min, `posit32_16_linalg` 36 min, `posit32_16_8_dsp` 549 min (placer
+z rdzeniem FFT i gemv × 2 przy prawie pełnym układzie). `posit32_16_8_mem` wyszedł wtedy kopią `posit32_16_8_dsp`
+bit w bit (RTL z poprzedniej konfiguracji we wspólnym `hw/gen/p<n>/`), przebudowany 2026-11-18 (64 DSP, 85,5 BRAM
+wobec 84 / 105,5 w dsp); osobne katalogi `hw/gen/release/<nazwa>/` z `VecReleases` wykluczają taki błąd. Testy na
+płytce z tymi bitstreamami: 244 passed, 13 skipped (2026-11-18). Pakiety PyPI robi z nich
+`sw/packaging/make_overlay_packages.py`.
 
 Silniki zawsze `32:2:4:4:2`, `16:2:4:2:4`, `8:2:4:1:8` (jak w sprawdzonych bitstreamach). Dwa silniki: `-buf_mb 96`
 (razem 192 MB CMA, tyle co trzy po 64). Elaboracja wszystkich pięciu przechodzi (2026-11-17); sterownik z gemv
@@ -729,6 +731,9 @@ Szacunek miejsca (z OOC wyżej): quire posit32 ok. 2 900 LUT, posit16 / posit8 p
   mniej). Gdy się nie zmieści: `--gemv-cols 32=6,16=4`, potem `32=4,16=4`.
 - `posit32_16_dsp`: rdzeń FFT w posit16 zamiast silnika posit8; gdy placer odmówi: `--gemv-cols 32=2,16=1`, potem
   `32=1,16=1`; gdy dalej nie — zostaje `posit32_16_8_dsp`.
+
+Zmiana konfiguracji (np. krok awaryjny): argumenty w `VecReleases.scala`, potem `VecReleases <nazwa>` i
+`release_builds.tcl -tclargs <nazwa>`.
 
 ## Krok po kroku
 

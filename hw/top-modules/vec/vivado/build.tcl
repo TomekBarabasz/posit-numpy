@@ -22,11 +22,12 @@
 #                                                                                         posit32_16_8_mem
 #    ... -tclargs -io dma -engines "32 16 8"  (RTL z VecKv260 --dma)                       posit32_16_8_vec
 #  Opcje (-tclargs):
-#    -engines "<n> ..."  silniki: 8, 16, 32, kazdy co najwyzej raz (rtl z ../hw/gen/p<n>/)   ("32")
+#    -engines "<n> ..."  silniki: 8, 16, 32, kazdy co najwyzej raz; tez 32_16_8 (Windows)       ("32")
 #    -io master|dma      etap 6: wlasny master AXI4 silnika (m_axi -> HP0, przerwanie -> pl_ps_irq0)
 #                        albo AXI4-Stream + AXI DMA (etapy 2-5; RTL z VecKv260 --dma)       (master)
 #    -n <bity>           to samo co -engines <bity> (jeden silnik)
 #    -name <nazwa>       nazwa aplikacji                  (posit<n>[_<n>...]_mem, z -io dma: _vec)
+#    -rtl <dir>          RTL silnikow: <dir>/p<n>/PositVecAxi_p<n>.v      (../hw/gen; VecReleases: ../hw/gen/release/<nazwa>)
 #    -part <part>                                                       (xck26-sfvc784-2LV-c)
 #    -out <dir>          katalog roboczy                                (./out)
 #    -deploy <dir>       gdzie zapisac katalog aplikacji                (../../../../sw/positnp/overlays)
@@ -35,7 +36,6 @@
 #    -threads <n>        watki Vivado na przebieg (general.maxThreads)  (8)
 #    -fan 0|1            wentylator KV260: PWM z TTC0 (EMIO) na pin fan_en_b, sterowanie z Linuksa  (1)
 #    -stop ip|bd         zatrzymaj po spakowaniu IP albo po block designie
-#    -rtl "<argumenty>"   argumenty VecKv260, z ktorych jest RTL: tylko zapis w <nazwa>.json (release_builds)
 #
 #  Wynik: <deploy>/<nazwa>/ (.bit.bin, .dtsi, shell.json, .json z lista silnikow); na plytce
 #  sw/scripts/install_overlay.sh <nazwa>. WNS < 0 -> blad, nic nie jest kopiowane.
@@ -52,6 +52,7 @@ array set opt [list \
     engines 32 \
     io      master \
     name    "" \
+    rtl     [file normalize [file join $script_dir .. hw gen]] \
     part    xck26-sfvc784-2LV-c \
     out     [file join $script_dir out] \
     deploy  [file normalize [file join $script_dir .. .. .. .. sw positnp overlays]] \
@@ -59,17 +60,16 @@ array set opt [list \
     jobs    8 \
     threads 8 \
     stop    "" \
-    rtl     "" \
 ]
 
 proc usage {} {
-    puts "uzycie: vivado -mode batch -source build.tcl -tclargs \[-engines \"32 16 8\"\] \[-name nazwa\] \[-part part\] \[-out dir\] \[-deploy dir\] \[-buf_mb MB\] \[-jobs n\] \[-threads n\] \[-stop ip|bd\]"
+    puts "uzycie: vivado -mode batch -source build.tcl -tclargs \[-engines \"32 16 8\"\] \[-name nazwa\] \[-rtl dir\] \[-part part\] \[-out dir\] \[-deploy dir\] \[-buf_mb MB\] \[-jobs n\] \[-threads n\] \[-stop ip|bd\]"
 }
 
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
-        -n - -fan - -engines - -io - -name - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop - -rtl {
+        -n - -fan - -engines - -io - -name - -rtl - -part - -out - -deploy - -buf_mb - -jobs - -threads - -stop {
             incr i
             if {$i >= [llength $argv]} { usage; error "brak wartosci dla $a" }
             set opt([expr {$a eq "-n" ? "engines" : [string range $a 1 end]}]) [lindex $argv $i]
@@ -79,7 +79,7 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
     }
 }
 if {$opt(stop) ni {"" ip bd}} { error "-stop ip|bd, nie $opt(stop)" }
-set ns [string map {, " "} $opt(engines)]
+set ns [string map {, " " _ " " + " "} $opt(engines)]   ;# "32 16 8", 32,16,8 albo 32_16_8 (cmd.exe / vivado.bat dzieli po przecinku)
 if {![llength $ns]} { error "-engines: co najmniej jeden silnik" }
 foreach n $ns {
     if {$n ni {8 16 32}} { error "-engines: 8|16|32 (tdata AXI DMA w pelnych bajtach), nie $n" }
@@ -111,7 +111,8 @@ puts "build: $name, silniki $ns, $opt(part), watki $opt(threads), przebiegi $opt
 set vlnv    [dict create]
 set ip_dirs {}
 foreach n $ns {
-    set rtl    [file normalize [file join $script_dir .. hw gen p$n PositVecAxi_p$n.v]]
+    set rtl    [file normalize [file join $opt(rtl) p$n PositVecAxi_p$n.v]]
+    if {![file exists $rtl]} { error "brak $rtl (sbt: VecKv260 albo VecReleases)" }
     set ip_dir [file join $out ip_p$n]
     set busifs [expr {$master ? {s_axi m_axi} : {s_axi s_axis m_axis}}]
     dict set vlnv $n [posit_ip::package $rtl $ip_dir $opt(part) PositVecAxi_p$n $busifs]
@@ -342,7 +343,6 @@ posit_overlay::write_json [file join $app $name.json] $name $engines $pl0_hz [ex
     part   [$q $opt(part)] \
     built  [$q [clock format [clock seconds] -format {%Y-%m-%d %H:%M}]] \
     wns_ns $wns \
-    rtl    [$q $opt(rtl)] \
     lut    [$q [util_field $util {CLB LUTs\*?}]] \
     ff     [$q [util_field $util {CLB Registers}]] \
     dsp    [$q [util_field $util {DSPs}]] \

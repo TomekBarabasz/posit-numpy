@@ -63,7 +63,8 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
 - Bitstreamy nie są w głównym wheelu: każda aplikacja to osobny pakiet, który dociąga extra:
   `positnp[kv260]` → `positnp-kv260` (`posit32_16_8_mem`), `[kv260-dsp]` → `positnp-kv260-dsp` (`posit32_16_8_dsp`),
   `[kv260-ml]` → `positnp-kv260-ml` (`posit16_8_ml`), `[kv260-linalg]` → `positnp-kv260-linalg` (`posit32_16_linalg`).
-- Wydanie: (1) `hw/top-modules/vec/vivado/release_builds.sh run` → `positnp/overlays/<nazwa>/`; (2)
+- Wydanie: (1) z `hw/`: `sbt "top-vec/runMain posit.top.vec.VecReleases"`, potem z `hw/top-modules/vec/vivado/`:
+  `vivado -mode batch -nojournal -nolog -source release_builds.tcl` → `positnp/overlays/<nazwa>/`; (2)
   `python3 packaging/make_overlay_packages.py --wheel` → `packaging/build/<pakiet>/` i wheele w `packaging/build/dist/`;
   (3) `pip wheel --no-deps -w dist .` dla `positnp`; (4) `twine upload` wszystkich wheeli (najpierw TestPyPI).
   Budowa wymaga setuptools ≥ 77 (licencja w formacie SPDX); systemowy setuptools Debiana nie zbuduje wheela -

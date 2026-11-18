@@ -8,7 +8,7 @@
     positnp-board install posit16_8_ml  ->  dtc + copy to /lib/firmware/xilinx/posit16_8_ml/, then pn.board.load()
 
 Each package holds one application directory (<name>.bit.bin, <name>.dtsi, shell.json, <name>.json, as
-build.tcl / release_builds.sh leave them in sw/positnp/overlays/<name>/) and registers it in the entry point
+build.tcl / release_builds.tcl leave them in sw/positnp/overlays/<name>/) and registers it in the entry point
 group "positnp.overlays", where pn.board.available() finds it. The package version is positnp's: the
 bitstream and the driver of one release go together (dependency positnp>=that version).
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 
 SW = Path(__file__).resolve().parents[1]
 
-# application -> (distribution, extra of positnp, one line for PyPI); names as in release_builds.sh
+# application -> (distribution, extra of positnp, one line for PyPI); names as in VecReleases.scala
 APPS = {
     "posit32_16_8_mem": ("positnp-kv260", "kv260",
                          "posit32 / posit16 / posit8 engines with matmul x4 and function tables"),
@@ -48,7 +48,7 @@ def make(name: str, src: Path, out: Path, version: str) -> Path:
     dist, extra, line = APPS.get(name, (f"positnp-app-{name.replace('_', '-')}", None, f"PL application {name}"))
     missing = [f.format(n=name) for f in REQUIRED if not (src / f.format(n=name)).exists()]
     if missing:
-        raise SystemExit(f"{name}: missing {', '.join(missing)} in {src} (build it: release_builds.sh run {name})")
+        raise SystemExit(f"{name}: missing {', '.join(missing)} in {src} (build it: VecReleases {name}, then release_builds.tcl -tclargs {name})")
     mod = dist.replace("-", "_")
     root = out / dist
     if root.exists():
@@ -106,7 +106,7 @@ def main(argv=None) -> int:
     names = a.names or [d.name for d in sorted(a.src.iterdir())
                         if d.is_dir() and all((d / f.format(n=d.name)).exists() for f in REQUIRED)]
     if not names:
-        print(f"no application in {a.src} (release_builds.sh run ...)", file=sys.stderr)
+        print(f"no application in {a.src} (VecReleases + release_builds.tcl)", file=sys.stderr)
         return 1
     version = positnp_version()
     for n in names:
