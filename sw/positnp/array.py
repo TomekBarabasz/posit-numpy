@@ -900,7 +900,7 @@ class PositArray:
         for a in axes:
             a = int(a)
             if not -self.ndim <= a < self.ndim:
-                raise np.exceptions.AxisError(a, self.ndim)
+                raise getattr(np, "exceptions", np).AxisError(a, self.ndim)
             out.add(a % self.ndim)
         if len(out) != len(axes):
             raise ValueError("repeated axis")

@@ -10,7 +10,7 @@ the programmable logic of an AMD/Xilinx **Kria KV260** board - with the same bit
 pip install positnp
 ```
 
-Python 3.10 or newer and NumPy; nothing else. Without a board everything runs in the software backend.
+Python 3.10 or newer and NumPy 1.26 or newer; nothing else. Without a board everything runs in the software backend.
 
 ## Quick start
 
