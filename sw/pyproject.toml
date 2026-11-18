@@ -1,17 +1,48 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "positnp"
-version = "0.8.0"
-description = "NumPy-style posit arrays computed in KV260 programmable logic"
+dynamic = ["version"]
+description = "NumPy-style posit arithmetic (posit8/16/32 with the quire), in software or in the PL of a Kria KV260"
+readme = "README.pypi.md"
+license = "Apache-2.0"
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = ["numpy>=1.24"]
+keywords = ["posit", "unum", "quire", "numpy", "fpga", "kria", "kv260", "zynq"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: System :: Hardware",
+]
+
+[project.urls]
+Homepage = "https://github.com/TomekBarabasz/posit-numpy"
+Documentation = "https://github.com/TomekBarabasz/posit-numpy/tree/main/sw"
 
 [project.optional-dependencies]
+# bitstreams for the Kria KV260, one package per application (pn.board.install(name) after pip install)
+kv260 = ["positnp-kv260"]                 # posit32_16_8_mem: all three formats, matmul x4, function tables
+kv260-dsp = ["positnp-kv260-dsp"]         # posit32_16_8_dsp: hardware FFT core (posit32), FIR
+kv260-ml = ["positnp-kv260-ml"]           # posit16_8_ml: gemm x8 in posit16 / posit8, function tables
+kv260-linalg = ["positnp-kv260-linalg"]   # posit32_16_linalg: gemm x8 in posit32, x4 in posit16
 test = ["pytest", "hypothesis"]
 notebook = ["jupyter", "matplotlib"]
 
+[project.scripts]
+positnp-board = "positnp.board:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "positnp.__version__"}
+
 [tool.setuptools.packages.find]
 include = ["positnp*"]
+
+[tool.setuptools.package-data]
+# the bitstreams are not in this wheel (positnp/overlays is for source checkouts): they come in the
+# positnp-kv260* packages (sw/packaging/make_overlay_packages.py)
+positnp = ["_data/*.sh"]

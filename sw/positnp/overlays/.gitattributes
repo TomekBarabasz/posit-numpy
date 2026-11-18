@@ -1,0 +1,5 @@
+# aplikacje PL dla płytki (Linux): tekst zawsze z LF, bitstream bez żadnych konwersji
+*.bit.bin binary
+*.bit     binary
+*.dtsi    text eol=lf
+*.json    text eol=lf
