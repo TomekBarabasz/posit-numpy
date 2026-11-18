@@ -173,3 +173,22 @@ def test_main_wheel(tmp_path):
     meta = z.read(next(n for n in names if n.endswith("METADATA"))).decode()
     assert "Provides-Extra: kv260-ml" in meta and 'positnp-kv260-ml; extra == "kv260-ml"' in meta
     assert "positnp-board = positnp.board:main" in z.read(next(n for n in names if n.endswith("entry_points.txt"))).decode()
+
+
+def test_setup_permissions(tmp_path, monkeypatch):
+    """positnp-board permissions: group, membership, sudoers rule (checked by visudo first), udev rule, trigger."""
+    monkeypatch.setenv("SUDO_USER", "kria")
+    sh = FakeShell(tmp_path / "fw")
+    board = Board(tmp_path / "fw", run=sh.run, sudo=False)
+    sudoers, rule = tmp_path / "etc" / "sudoers.d" / "positnp", tmp_path / "etc" / "udev" / "99-positnp.rules"
+    assert board.setup_permissions(dry_run=True, sudoers=sudoers, udev_rule=rule)[1] == "usermod -aG posit kria"
+    assert sh.log == [] and not sudoers.exists()                             # dry run: nothing done
+    board.setup_permissions(sudoers=sudoers, udev_rule=rule)
+    cmds = [c[0] for c in sh.log]
+    assert cmds[:3] == ["groupadd", "usermod", "visudo"] and cmds.index("visudo") < cmds.index("install")
+    assert ["usermod", "-aG", "posit", "kria"] in sh.log and cmds[-2:] == ["udevadm", "udevadm"]
+    text = sudoers.read_text()
+    assert "%posit ALL=(root) NOPASSWD:" in text and "modprobe u-dma-buf" in text and "xmutil" in text
+    r = rule.read_text()
+    assert 'ATTR{name}=="posit_*", GROUP="posit", MODE="0660"' in r and 'KERNEL=="udmabuf-posit-*"' in r
+    assert "chmod g+w sync_offset sync_size sync_direction sync_for_cpu sync_for_device" in r

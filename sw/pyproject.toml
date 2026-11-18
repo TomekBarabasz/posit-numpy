@@ -10,7 +10,7 @@ readme = "README.pypi.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.26"]
 keywords = ["posit", "unum", "quire", "numpy", "fpga", "kria", "kv260", "zynq"]
 classifiers = [
     "Development Status :: 4 - Beta",

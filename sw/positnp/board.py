@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,24 @@ FW_DIR = Path("/lib/firmware/xilinx")
 OVERLAY_GROUP = "positnp.overlays"           # entry points of the bitstream packages
 APP_FILES = (".bit.bin", ".dtsi", "shell.json")
 UDMABUF_SCRIPT = Path(__file__).with_name("_data") / "build_udmabuf.sh"
+SUDOERS_FILE = Path("/etc/sudoers.d/positnp")
+UDEV_RULE = Path("/etc/udev/rules.d/99-positnp.rules")
+SYNC_ATTRS = "sync_offset sync_size sync_direction sync_for_cpu sync_for_device"
+
+
+def sudoers_text(group: str, xmutil: str, modprobe: str) -> str:
+    """The sudoers rule: xmutil and `modprobe u-dma-buf` (only that module) without a password."""
+    return (f"# positnp: load / unload PL applications without a password (positnp-board permissions)\n"
+            f"%{group} ALL=(root) NOPASSWD: {xmutil}, {modprobe} u-dma-buf\n")
+
+
+def udev_text(group: str) -> str:
+    """The udev rule: the engines' UIO nodes, their DMA buffers and the buffers' cache-sync attributes."""
+    return (f"# positnp (positnp-board permissions): registers of the posit engines (generic-uio nodes posit_*)\n"
+            f'SUBSYSTEM=="uio", ATTR{{name}}=="posit_*", GROUP="{group}", MODE="0660"\n'
+            f"# DMA buffers of the engines and their cache-sync attributes in sysfs\n"
+            f'SUBSYSTEM=="u-dma-buf", KERNEL=="udmabuf-posit-*", GROUP="{group}", MODE="0660", '
+            f"RUN+=\"/bin/sh -c 'cd /sys%p && chgrp {group} {SYNC_ATTRS} && chmod g+w {SYNC_ATTRS}'\"\n")
 
 
 def overlay_dirs() -> List[Path]:
@@ -197,6 +216,38 @@ class Board:
         if r.returncode != 0:
             raise BoardError(f"build_udmabuf.sh failed: {(r.stderr or r.stdout or '').strip()[-2000:]}")
         return r.stdout or ""
+
+    def setup_permissions(self, user: Optional[str] = None, group: str = "posit", dry_run: bool = False,
+                          sudoers: Path = SUDOERS_FILE, udev_rule: Path = UDEV_RULE) -> List[str]:
+        """Let `user` (default: the one who ran sudo, else the current one) load applications and use the engines
+        without sudo: a system group, membership in it, a sudoers rule for xmutil and `modprobe u-dma-buf`
+        (checked with visudo before it is installed) and a udev rule for /dev/uio*, /dev/udmabuf-posit-* and the
+        buffers' sync attributes; existing devices are re-triggered. Run as root (or with sudo -n rights).
+        Returns the steps; dry_run: only the steps, nothing changed. The user must log in again for the group.
+
+        Membership is close to root: an engine is a DMA master whose allowed address range is set through the
+        same registers, so only add trusted users."""
+        user = user or os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
+        xmutil = shutil.which("xmutil") or "/usr/bin/xmutil"
+        modprobe = shutil.which("modprobe") or "/usr/sbin/modprobe"
+        steps = [f"groupadd -f --system {group}", f"usermod -aG {group} {user}",
+                 f"{sudoers} (checked with visudo -cf):\n{sudoers_text(group, xmutil, modprobe)}",
+                 f"{udev_rule}:\n{udev_text(group)}",
+                 "udevadm control --reload-rules && udevadm trigger --subsystem-match=uio --subsystem-match=u-dma-buf"]
+        if dry_run:
+            return steps
+        self._cmd("groupadd", "-f", "--system", group)
+        self._cmd("usermod", "-aG", group, user)
+        with tempfile.TemporaryDirectory() as tmp:
+            sf, uf = Path(tmp) / "positnp.sudoers", Path(tmp) / "99-positnp.rules"
+            sf.write_text(sudoers_text(group, xmutil, modprobe))
+            uf.write_text(udev_text(group))
+            self._cmd("visudo", "-cf", str(sf))                     # a broken sudoers file never gets installed
+            self._cmd("install", "-D", "-m", "0440", "-o", "root", "-g", "root", str(sf), str(sudoers))
+            self._cmd("install", "-D", "-m", "0644", str(uf), str(udev_rule))
+        self._cmd("udevadm", "control", "--reload-rules", check=False)
+        self._cmd("udevadm", "trigger", "--subsystem-match=uio", "--subsystem-match=u-dma-buf", check=False)
+        return steps
 
     # ---- xmutil -----------------------------------------------------------------------------------
 
@@ -402,6 +453,10 @@ def setup_udmabuf(tag: str = "") -> str:
     return _board.setup_udmabuf(tag)
 
 
+def setup_permissions(user: Optional[str] = None, group: str = "posit", dry_run: bool = False) -> List[str]:
+    return _board.setup_permissions(user, group, dry_run)
+
+
 def use(board: Board) -> Board:
     """Replace the shared instance behind pn.board.* (tests, other firmware directory); returns the old one."""
     global _board
@@ -425,6 +480,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser("describe", help="open the engines of the loaded application and describe them")
     u = sub.add_parser("udmabuf", help="build and install the u-dma-buf kernel module")
     u.add_argument("tag", nargs="?", default="")
+    pm = sub.add_parser("permissions", help="let a user load applications and use the engines without sudo "
+                                            "(group, sudoers rule, udev rule; run with sudo)")
+    pm.add_argument("--user", default=None, help="default: the user who ran sudo")
+    pm.add_argument("--group", default="posit")
+    pm.add_argument("--dry-run", action="store_true", help="only show the files and commands")
     a = p.parse_args(argv)
     try:
         if a.cmd == "available":
@@ -449,6 +509,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(describe())
         elif a.cmd == "udmabuf":
             print(setup_udmabuf(a.tag))
+        elif a.cmd == "permissions":
+            steps = setup_permissions(a.user, a.group, a.dry_run)
+            print(("would do:\n" if a.dry_run else "done:\n") + "\n".join("  " + s for s in steps))
+            if not a.dry_run:
+                print("log in again (or: newgrp " + a.group + "), then load the application again so that the "
+                      "new rule applies to its devices")
     except BoardError as e:
         print(f"positnp-board: {e}", file=sys.stderr)
         return 1
@@ -456,6 +522,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 __all__ = ["App", "Board", "BoardError", "FW_DIR", "OVERLAY_GROUP", "apps", "active", "available", "install",
-           "setup_udmabuf", "load", "open", "engines", "engine", "close", "unload", "info", "describe", "use",
+           "setup_udmabuf", "setup_permissions", "load", "open", "engines", "engine", "close", "unload", "info", "describe", "use",
            "overlay_dirs", "main"]
 

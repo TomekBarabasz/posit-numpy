@@ -44,9 +44,11 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
   (`build.tcl -engines "32 16 8"`). `load` tej samej, już wgranej aplikacji tylko otwiera silniki (`force=True` przeładowuje).
 - Backendy: `pn.set_backend(hw)` ustawia backend formatu `hw.config` (inne formaty bez zmian), `pn.set_backend([...])`
   kilka naraz, `pn.set_backend(None)` wszystko w programie; `pn.active_backends()`; `pn.using(...)` przywraca poprzedni zestaw.
-- `xmutil` wymaga roota: Python przez `sudo` albo reguła sudoers dla `xmutil` (`pn.board` woła `sudo -n`), np.
-  `/etc/sudoers.d/positnp`: `<user> ALL=(root) NOPASSWD: /usr/bin/xmutil, /usr/sbin/modprobe u-dma-buf`,
-  plus reguła udev dająca dostęp do `/dev/uio*` i `/dev/udmabuf-*`.
+- `xmutil` wymaga roota: Python przez `sudo` albo jednorazowo `sudo positnp-board permissions` (`pn.board.setup_permissions()`):
+  grupa `posit`, użytkownik w niej, `/etc/sudoers.d/positnp` z `xmutil` i `modprobe u-dma-buf` bez hasła (sprawdzony
+  przez `visudo` przed instalacją; `pn.board` woła `sudo -n`) i reguła udev `/etc/udev/rules.d/99-positnp.rules` dająca
+  grupie `/dev/uio*` silników, `/dev/udmabuf-posit-*` i atrybuty `sync_*` buforów; `--dry-run` pokazuje pliki i komendy.
+  Członkostwo w grupie jest bliskie rootowi (silnik to master DMA).
 - Aplikacje instaluje `pn.board.install(nazwa)` / `positnp-board install <nazwa>` (dtc `.dtsi` → `.dtbo`, kopia
   `.bit.bin`, `shell.json` i `<nazwa>.json` do `/lib/firmware/xilinx/<nazwa>/` przez `sudo -n`, restart dfx-mgr, gdy
   nie widzi nowej aplikacji). Źródła: pakiety z bitstreamami (extras, entry point `positnp.overlays`),
