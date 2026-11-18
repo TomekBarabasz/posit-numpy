@@ -412,7 +412,7 @@ def use(board: Board) -> Board:
 def main(argv: Optional[List[str]] = None) -> int:
     """positnp-board: the same from a shell (installing and loading need root or sudo -n)."""
     import argparse
-    p = argparse.ArgumentParser(prog="positnp-board", description="posit-numpy PL applications on the KV260")
+    p = argparse.ArgumentParser(prog="positnp-board (python3 -m positnp)", description="posit-numpy PL applications on the KV260")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("available", help="applications the installed packages provide")
     sub.add_parser("list", help="applications installed in /lib/firmware/xilinx")
@@ -459,6 +459,3 @@ __all__ = ["App", "Board", "BoardError", "FW_DIR", "OVERLAY_GROUP", "apps", "act
            "setup_udmabuf", "load", "open", "engines", "engine", "close", "unload", "info", "describe", "use",
            "overlay_dirs", "main"]
 
-
-if __name__ == "__main__":          # python3 -m positnp.board ... (z repozytorium, bez pip install)
-    sys.exit(main())
