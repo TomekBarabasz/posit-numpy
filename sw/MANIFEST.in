@@ -1,0 +1,10 @@
+# sdist of positnp: the library only. Tests, examples, notebooks, the packaging and board scripts of the
+# repository and the bitstreams (separate positnp-kv260* packages) stay out.
+include README.pypi.md LICENSE
+prune tests
+prune examples
+prune notebooks
+prune packaging
+prune scripts
+prune positnp/overlays
+global-exclude __pycache__ *.py[cod]

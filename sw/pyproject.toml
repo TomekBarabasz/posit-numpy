@@ -8,6 +8,7 @@ dynamic = ["version"]
 description = "NumPy-style posit arithmetic (posit8/16/32 with the quire), in software or in the PL of a Kria KV260"
 readme = "README.pypi.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 keywords = ["posit", "unum", "quire", "numpy", "fpga", "kria", "kv260", "zynq"]
@@ -43,6 +44,6 @@ version = {attr = "positnp.__version__"}
 include = ["positnp*"]
 
 [tool.setuptools.package-data]
-# the bitstreams are not in this wheel (positnp/overlays is for source checkouts): they come in the
-# positnp-kv260* packages (sw/packaging/make_overlay_packages.py)
+# only the library and the board setup script: the bitstreams come in the positnp-kv260* packages
+# (sw/packaging/make_overlay_packages.py); MANIFEST.in keeps the sdist to the same
 positnp = ["_data/*.sh"]

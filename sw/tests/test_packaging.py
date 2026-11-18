@@ -129,12 +129,39 @@ def test_overlay_package_tree_and_wheel(tmp_path):
         m.make("posit32_16_8_mem", tmp_path / "nothing", tmp_path / "out", "9.9.9")
 
 
+def test_pypi_readme_is_up_to_date():
+    """README.pypi.md is generated from examples/README.md (python3 packaging/make_pypi_readme.py)."""
+    spec = importlib.util.spec_from_file_location("make_pypi_readme", SW / "packaging" / "make_pypi_readme.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    assert m.main(["--check"]) == 0
+    text = (SW / "README.pypi.md").read_text(encoding="utf-8")
+    assert "](" not in text.replace("](https://", "")                       # no relative links on PyPI
+    assert not any(ch in text for ch in "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+@needs_setuptools
+def test_sdist_has_only_the_library(tmp_path):
+    src = tmp_path / "src"
+    shutil.copytree(SW, src, ignore=shutil.ignore_patterns("__pycache__", "build", "*.egg-info", "dist"))
+    out = tmp_path / "sdist"
+    subprocess.run([sys.executable, "-c", f"from setuptools import build_meta; build_meta.build_sdist({str(out)!r})"],
+                   cwd=src, check=True, capture_output=True)
+    import tarfile
+    names = tarfile.open(next(out.glob("positnp-*.tar.gz"))).getnames()
+    top = names[0].split("/")[0]
+    rel = {n[len(top) + 1:] for n in names if "/" in n}
+    assert {"README.pypi.md", "LICENSE", "pyproject.toml", "positnp/array.py", "positnp/_data/build_udmabuf.sh"} <= rel
+    assert not any(r.startswith(("tests/", "examples/", "packaging/", "scripts/", "notebooks/", "positnp/overlays/"))
+                   for r in rel), sorted(rel)
+
+
 @needs_setuptools
 def test_main_wheel(tmp_path):
     src = tmp_path / "src"
     shutil.copytree(SW / "positnp", src / "positnp", ignore=shutil.ignore_patterns("__pycache__"))
-    _fake_app(src / "positnp" / "overlays", "posit32_16_8_mem")              # must not end up in the wheel
-    for f in ("pyproject.toml", "README.pypi.md"):
+    _fake_app(src / "positnp" / "overlays", "posit99_fake")                 # must not end up in the wheel
+    for f in ("pyproject.toml", "README.pypi.md", "LICENSE", "MANIFEST.in"):
         shutil.copy(SW / f, src / f)
     subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "-q", "-w",
                     str(tmp_path / "dist"), str(src)], check=True)
