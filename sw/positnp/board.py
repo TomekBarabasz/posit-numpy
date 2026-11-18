@@ -458,3 +458,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 __all__ = ["App", "Board", "BoardError", "FW_DIR", "OVERLAY_GROUP", "apps", "active", "available", "install",
            "setup_udmabuf", "load", "open", "engines", "engine", "close", "unload", "info", "describe", "use",
            "overlay_dirs", "main"]
+
+
+if __name__ == "__main__":          # python3 -m positnp.board ... (z repozytorium, bez pip install)
+    sys.exit(main())
