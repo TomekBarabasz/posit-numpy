@@ -58,9 +58,9 @@ pn.board.unload()                       # zamyka silniki (backendy wracają do P
 ## Pakiet PyPI
 
 - `pip install positnp` - biblioteka (backend programowy na każdym PC, sterownik KV260); `positnp-board` - komenda.
-  Wersja w jednym miejscu: `positnp/__init__.py` (`pyproject.toml` czyta ją dynamicznie). README pakietu
-  (`README.pypi.md`) powstaje z `examples/README.md`: `python3 packaging/make_pypi_readme.py` (pełne adresy linków,
-  instalacja z pip, sekcja o płytce dla zainstalowanego pakietu; test pilnuje, żeby było aktualne).
+  Wersja w jednym miejscu: `positnp/__init__.py` (`pyproject.toml` czyta ją dynamicznie). README pakietu:
+  `README.pypi.md` (po angielsku: instalacja z pip, szybki start, wspierane płytki i aplikacje PL); test sprawdza,
+  że ma tylko pełne linki, nie ma polskiego tekstu, a przykład z szybkiego startu działa.
 - W pakiecie jest tylko biblioteka (`positnp/`, z `_data/build_udmabuf.sh` do przygotowania płytki), README i
   licencja: wheel bierze sam `positnp`, sdist ogranicza `MANIFEST.in` (bez testów, przykładów, skryptów,
   `packaging/` i bitstreamów). Cała maszyneria budowy (SpinalHDL, Vivado, `VecReleases`) zostaje w repozytorium.

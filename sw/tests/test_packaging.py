@@ -129,15 +129,15 @@ def test_overlay_package_tree_and_wheel(tmp_path):
         m.make("posit32_16_8_mem", tmp_path / "nothing", tmp_path / "out", "9.9.9")
 
 
-def test_pypi_readme_is_up_to_date():
-    """README.pypi.md is generated from examples/README.md (python3 packaging/make_pypi_readme.py)."""
-    spec = importlib.util.spec_from_file_location("make_pypi_readme", SW / "packaging" / "make_pypi_readme.py")
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    assert m.main(["--check"]) == 0
+def test_pypi_readme():
+    """README.pypi.md: links that work on PyPI (absolute), English only, a quick start that runs."""
+    import re
     text = (SW / "README.pypi.md").read_text(encoding="utf-8")
     assert "](" not in text.replace("](https://", "")                       # no relative links on PyPI
     assert not any(ch in text for ch in "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+    assert "git clone" not in text and "pip install positnp" in text
+    code = re.search(r"```python\n(import numpy as np, positnp as pn.*?)```", text, re.S).group(1)
+    exec(compile(code, "README.pypi.md", "exec"), {})
 
 
 @needs_setuptools
